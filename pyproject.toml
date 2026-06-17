@@ -1,0 +1,19 @@
+[project]
+name = "splineax"
+version = "0.0.1"
+description = "Sparse linear operators and solvers for Lineax"
+readme = "README.md"
+authors = [{ name = "Nardi Lam", email = "mail@nardilam.nl" }]
+requires-python = ">=3.11"
+dependencies = ["lineax>=0.1.1", "jax>=0.4", "equinox>=0.11", "jaxtyping>=0.2"]
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9.1.0", "ruff>=0.15.17"]
+
+[tool.ruff.lint]
+ignore = ["F722"]
+select = ["E4", "E7", "E9", "F", "I"]
