@@ -1,4 +1,4 @@
-from typing import Protocol, TypeVar
+from typing import Protocol, TypeVar, runtime_checkable
 
 import numpy as np
 from lineax import AbstractLinearOperator
@@ -14,6 +14,7 @@ class SparseMatrix(Protocol):
 SparseMatrixT = TypeVar("SparseMatrixT", bound=SparseMatrix, covariant=True)
 
 
+@runtime_checkable
 class SparseLinearOperator(Protocol[SparseMatrixT]):
     """Structural type implemented by all sparse operators.
 
