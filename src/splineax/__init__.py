@@ -4,4 +4,9 @@ from .operators import (
 from .operators import (
     BCSRLinearOperator as BCSRLinearOperator,
 )
-from .solvers import Spsolve as Spsolve
+from .solvers import (
+    KLU as KLU,
+)
+from .solvers import (
+    Spsolve as Spsolve,
+)

@@ -1,8 +1,9 @@
-"""Test suite for the `Spsolve` sparse direct solver.
+"""Shared test suite for the sparse direct solvers.
 
-`Spsolve` wraps `jax.experimental.sparse.linalg.spsolve` and must work against either
-sparse operator format. As in the operators suite, the `make_operator` fixture is
-parametrised over `["bcoo", "bcsr"]`, so every test below runs once for each format,
+Both `Spsolve` (wrapping `jax.experimental.sparse.linalg.spsolve`) and `KLU` (wrapping
+`klujax`) must behave identically against either sparse operator format. The `solver`
+fixture is parametrised over the two solvers and the `make_operator` fixture over
+`["bcoo", "bcsr"]`, so every test below runs for the full solver x format cross-product,
 with the dense reference matrix serving as the source of truth.
 """
 
@@ -15,7 +16,7 @@ import numpy as np
 import pytest
 from jax.experimental.sparse import BCOO, BCSR
 
-from splineax import BCOOLinearOperator, BCSRLinearOperator, Spsolve
+from splineax import KLU, BCOOLinearOperator, BCSRLinearOperator, Spsolve
 
 
 class OperatorFactory(Protocol):
@@ -39,6 +40,18 @@ SQUARE_MATRIX: jax.Array = jnp.array(
 RIGHT_HAND_SIDE: jax.Array = jnp.array([1.0, 2.0, 3.0, 4.0])
 # A non-square (wide) matrix, to confirm the square-only contract is enforced.
 WIDE_MATRIX: jax.Array = jnp.array([[1.0, 0.0, 2.0], [0.0, 3.0, 0.0]])
+# A diagonally dominant complex matrix, to exercise the complex128 solve path.
+COMPLEX_MATRIX: jax.Array = jnp.array(
+    [
+        [10.0 + 2.0j, 1.0 + 0.0j, 0.0, 0.0],
+        [0.0, 8.0 - 1.0j, 2.0 + 0.0j, 0.0],
+        [0.0, 0.0, 9.0 + 0.0j, 1.0 + 1.0j],
+        [1.0 + 0.0j, 0.0, 0.0, 7.0 + 0.0j],
+    ]
+)
+COMPLEX_RIGHT_HAND_SIDE: jax.Array = jnp.array(
+    [1.0 + 1.0j, 2.0 + 0.0j, 3.0 - 1.0j, 2.0j]
+)
 
 
 def _make_bcoo_operator(
@@ -62,64 +75,95 @@ def make_operator(request: pytest.FixtureRequest) -> OperatorFactory:
     }[request.param]
 
 
-def test_solve_matches_numpy(make_operator: OperatorFactory) -> None:
-    """The core proof that `Spsolve` works for both operator formats: the solution must
+@pytest.fixture(params=[Spsolve, KLU], ids=["spsolve", "klu"])
+def solver(request: pytest.FixtureRequest) -> lx.AbstractLinearSolver:
+    """Yields an instance of each sparse direct solver under test."""
+    return request.param()
+
+
+def test_solve_matches_numpy(
+    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
+) -> None:
+    """The core proof that the solver works for both operator formats: the solution must
     match `numpy.linalg.solve` against the dense reference matrix."""
     operator = make_operator(SQUARE_MATRIX)
-    solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=Spsolve()).value
+    solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver).value
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 
-def test_solve_matches_dense_lu(make_operator: OperatorFactory) -> None:
+def test_solve_matches_dense_lu(
+    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
+) -> None:
     """Cross-check against Lineax's own dense `LU` path on the same operator, so that any
-    discrepancy is attributable to `Spsolve` rather than to the reference."""
+    discrepancy is attributable to the solver rather than to the reference."""
     operator = make_operator(SQUARE_MATRIX)
-    spsolve_solution = lx.linear_solve(
-        operator, RIGHT_HAND_SIDE, solver=Spsolve()
-    ).value
+    sparse_solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver).value
     lu_solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=lx.LU()).value
-    assert jnp.allclose(spsolve_solution, lu_solution, atol=1e-5)
+    assert jnp.allclose(sparse_solution, lu_solution, atol=1e-5)
 
 
-def test_result_is_successful(make_operator: OperatorFactory) -> None:
+def test_result_is_successful(
+    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
+) -> None:
     """A well-posed solve must report `RESULTS.successful`, confirming `compute` reports
     success (and that the no-throw path returns a usable solution)."""
     operator = make_operator(SQUARE_MATRIX)
-    solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=Spsolve())
+    solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver)
     assert solution.result == lx.RESULTS.successful
 
 
-def test_reuses_state_across_vectors(make_operator: OperatorFactory) -> None:
+def test_reuses_state_across_vectors(
+    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
+) -> None:
     """`init` computes on just the operator; `compute` then solves for a given vector.
     Re-using a single `state` across multiple right-hand sides must give correct
     solutions, exercising that init/compute separation."""
     operator = make_operator(SQUARE_MATRIX)
-    solver = Spsolve()
     state = solver.init(operator, options={})
-    for rhs in (RIGHT_HAND_SIDE, jnp.array([4.0, 3.0, 2.0, 1.0])):
+    # Match the operator dtype: a `KLU` solve enables x64 globally, after which a freshly
+    # created array would default to float64 and mismatch the (float32) operator.
+    second_rhs = jnp.array([4.0, 3.0, 2.0, 1.0]).astype(RIGHT_HAND_SIDE.dtype)
+    for rhs in (RIGHT_HAND_SIDE, second_rhs):
         solution = lx.linear_solve(operator, rhs, solver=solver, state=state).value
         expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(rhs))
         assert jnp.allclose(solution, expected, atol=1e-5)
 
 
-def test_transpose_solve(make_operator: OperatorFactory) -> None:
+def test_transpose_solve(
+    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
+) -> None:
     """Solving against `operator.T` must recover the transposed system's solution,
     exercising the solver's `transpose` state path."""
     operator = make_operator(SQUARE_MATRIX)
-    solution = lx.linear_solve(operator.T, RIGHT_HAND_SIDE, solver=Spsolve()).value
+    solution = lx.linear_solve(operator.T, RIGHT_HAND_SIDE, solver=solver).value
     expected = jnp.linalg.solve(
         np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
     )
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 
-def test_non_square_raises(make_operator: OperatorFactory) -> None:
-    """`spsolve` only handles square systems, so initialising the solver on a non-square
-    operator must fail loudly rather than producing nonsense."""
+def test_complex_solve(
+    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
+) -> None:
+    """Solving a complex system must match `numpy.linalg.solve`, exercising the
+    `complex128` path of each backend."""
+    operator = make_operator(COMPLEX_MATRIX)
+    solution = lx.linear_solve(operator, COMPLEX_RIGHT_HAND_SIDE, solver=solver).value
+    expected = jnp.linalg.solve(
+        np.asarray(COMPLEX_MATRIX), np.asarray(COMPLEX_RIGHT_HAND_SIDE)
+    )
+    assert jnp.allclose(solution, expected, atol=1e-5)
+
+
+def test_non_square_raises(
+    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
+) -> None:
+    """Both solvers only handle square systems, so initialising on a non-square operator
+    must fail loudly rather than producing nonsense."""
     operator = make_operator(WIDE_MATRIX)
     with pytest.raises(ValueError):
-        Spsolve().init(operator, options={})
+        solver.init(operator, options={})
 
 
 def _unsorted_bcoo(dense_matrix: jax.Array) -> BCOO:
@@ -134,10 +178,9 @@ def _unsorted_bcoo(dense_matrix: jax.Array) -> BCOO:
 
 
 @pytest.mark.parametrize("fmt", ["bcoo", "bcsr"])
-def test_solve_with_unsorted_indices(fmt: str) -> None:
-    """The CSR triple `spsolve` consumes requires sorted column indices. A coalesced but
-    unsorted operator (in either format) must still solve correctly, confirming `init`
-    canonicalises the index order rather than trusting the input to be sorted."""
+def test_solve_with_unsorted_indices(fmt: str, solver: lx.AbstractLinearSolver) -> None:
+    """A coalesced but *unsorted* operator (in either format) must still solve correctly:
+    `Spsolve` canonicalises the index order in `init`, while `KLU` is order-agnostic."""
     unsorted_bcoo = _unsorted_bcoo(SQUARE_MATRIX)
     if fmt == "bcoo":
         operator = BCOOLinearOperator(unsorted_bcoo)
@@ -159,34 +202,36 @@ def test_solve_with_unsorted_indices(fmt: str) -> None:
         assert not unsorted_bcsr.indices_sorted
         operator = BCSRLinearOperator(unsorted_bcsr)
 
-    solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=Spsolve()).value
+    solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver).value
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 
-def test_solve_under_jit(make_operator: OperatorFactory) -> None:
-    """The solve must be traceable: wrapping it in `jax.jit` (so `spsolve` runs inside a
-    compiled computation, via its CPU `scipy` callback) must still give the right
-    answer."""
+def test_solve_under_jit(
+    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
+) -> None:
+    """The solve must be traceable: wrapping it in `jax.jit` (so the backend runs inside a
+    compiled computation) must still give the right answer."""
     operator = make_operator(SQUARE_MATRIX)
 
     @jax.jit
     def solve(b: jax.Array) -> jax.Array:
-        return lx.linear_solve(operator, b, solver=Spsolve()).value
+        return lx.linear_solve(operator, b, solver=solver).value
 
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
     assert jnp.allclose(solve(RIGHT_HAND_SIDE), expected, atol=1e-5)
 
 
-def test_solve_under_vmap(make_operator: OperatorFactory) -> None:
-    """`jax.vmap` over a stack of right-hand sides must solve each one, directly
-    exercising the custom sequential batching rule that `_spsolve` adds on top of
-    `spsolve` (which has no native `vmap` rule)."""
+def test_solve_under_vmap(
+    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
+) -> None:
+    """`jax.vmap` over a stack of right-hand sides must solve each one, exercising each
+    backend's batching rule (`Spsolve`'s custom sequential rule; `klujax`'s native one)."""
     operator = make_operator(SQUARE_MATRIX)
     right_hand_sides = jnp.stack([RIGHT_HAND_SIDE, RIGHT_HAND_SIDE[::-1]])
 
     def solve(b: jax.Array) -> jax.Array:
-        return lx.linear_solve(operator, b, solver=Spsolve()).value
+        return lx.linear_solve(operator, b, solver=solver).value
 
     solutions = jax.vmap(solve)(right_hand_sides)
     expected = np.stack(
@@ -198,15 +243,16 @@ def test_solve_under_vmap(make_operator: OperatorFactory) -> None:
     assert jnp.allclose(solutions, expected, atol=1e-5)
 
 
-def test_differentiable_wrt_vector(make_operator: OperatorFactory) -> None:
+def test_differentiable_wrt_vector(
+    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
+) -> None:
     """Forward- and reverse-mode AD through the solve w.r.t. the right-hand side must
     yield the analytic Jacobian `d/db (A^-1 b) = A^-1`. The reverse path additionally
-    exercises the solver's `transpose` method (used by Lineax's backward pass). Both
-    `jax.jacfwd` and `jax.jacrev` rely on the custom batching rule `_spsolve` provides."""
+    exercises the solver's `transpose` method (used by Lineax's backward pass)."""
     operator = make_operator(SQUARE_MATRIX)
 
     def solve(b: jax.Array) -> jax.Array:
-        return lx.linear_solve(operator, b, solver=Spsolve()).value
+        return lx.linear_solve(operator, b, solver=solver).value
 
     expected_jacobian = jnp.linalg.inv(SQUARE_MATRIX)
     assert jnp.allclose(
@@ -218,7 +264,7 @@ def test_differentiable_wrt_vector(make_operator: OperatorFactory) -> None:
 
 
 @pytest.mark.parametrize("fmt", ["bcoo", "bcsr"])
-def test_differentiable_wrt_matrix(fmt: str) -> None:
+def test_differentiable_wrt_matrix(fmt: str, solver: lx.AbstractLinearSolver) -> None:
     """AD w.r.t. the matrix entries must match Lineax's own dense `LU` path differentiated
     the same way. The operator is rebuilt from a differentiable `data` vector (with fixed
     sparsity), so the Jacobian flows through the sparse solve; both `jax.jacfwd` and
@@ -232,7 +278,7 @@ def test_differentiable_wrt_matrix(fmt: str) -> None:
             operator = BCOOLinearOperator(bcoo)
         else:
             operator = BCSRLinearOperator(BCSR.from_bcoo(bcoo))
-        return lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=Spsolve()).value
+        return lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver).value
 
     def solve_dense(data: jax.Array) -> jax.Array:
         dense = BCOO((data, indices), shape=shape).todense()
