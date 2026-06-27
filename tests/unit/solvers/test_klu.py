@@ -15,12 +15,14 @@ from contextlib import contextmanager
 from typing import Generator
 
 import jax
+import jax.numpy as jnp
 import lineax as lx
+import numpy as np
 import pytest
 from jax.experimental.sparse import BCOO
 
 from splineax import KLU, BCOOLinearOperator
-from splineax.solvers._klu import _ManagedKLUState
+from splineax.solvers._klu import _KLUNumericState, _KLUSymbolicState
 
 from .conftest import (
     COMPLEX_MATRIX,
@@ -47,7 +49,7 @@ def _spy_frees() -> Generator[tuple[list[int], list[int]], None, None]:
     spying on the primitive's `.bind` would fail the id-equality assertions.
     Intercepting the wrapper functions directly lets us read `manager.handle`
     before the barrier is applied, giving us the same id as
-    `managed_state.factorization.symbolic/numeric`.
+    `numeric_state.factorization.symbolic/numeric`.
 
     Why we only record when the first argument is a `KLUHandleManager`:
     `KLUHandleAllocationScopeManager.begin_scope()` calls
@@ -62,7 +64,7 @@ def _spy_frees() -> Generator[tuple[list[int], list[int]], None, None]:
     Under JIT, `manager.close()` short-circuits (the handle is a Tracer and
     cannot be eagerly freed), so `begin_scope()` is the only call site that
     reaches the spy with a `KLUHandleManager`.  In both cases,
-    `id(manager.handle) == id(managed_state.factorization.symbolic/numeric)`.
+    `id(manager.handle) == id(numeric_state.factorization.symbolic/numeric)`.
     """
     import klujax as klu
 
@@ -156,17 +158,17 @@ def test_factorize_reuses_numeric_solve(
 
         def run(right_hand_side):
             state_init = solver.init(operator, options={})
-            with state_init.factorize() as managed_state:
+            with state_init.factorize() as numeric_state:
                 # Under JIT these are Tracer object ids; the spy in _spy_frees
                 # captures the same Tracer ids when begin_scope() exits.
                 captured_handle_ids.append(
                     (
-                        id(managed_state.factorization.symbolic),
-                        id(managed_state.factorization.numeric),
+                        id(numeric_state.factorization.symbolic),
+                        id(numeric_state.factorization.numeric),
                     )
                 )
                 return lx.linear_solve(
-                    operator, right_hand_side, solver=solver, state=managed_state
+                    operator, right_hand_side, solver=solver, state=numeric_state
                 ).value
 
         solve_fn = jax.jit(run) if use_jit else run
@@ -201,18 +203,18 @@ def test_transpose_in_factorize_reuses_factorization() -> None:
         _spy_solve("solve_with_numeric") as solve_with_numeric_calls,
     ):
         state_init = solver.init(operator, options={})
-        with state_init.factorize() as managed_state:
-            symbolic_handle_id = id(managed_state.factorization.symbolic)
-            numeric_handle_id = id(managed_state.factorization.numeric)
+        with state_init.factorize() as numeric_state:
+            symbolic_handle_id = id(numeric_state.factorization.symbolic)
+            numeric_handle_id = id(numeric_state.factorization.numeric)
 
-            transposed_state, _ = solver.transpose(managed_state, options={})
+            transposed_state, _ = solver.transpose(numeric_state, options={})
 
-            # `KLU.transpose` on a `_ManagedKLUState` reuses the factorization
+            # `KLU.transpose` on a `_KLUNumericState` reuses the factorization
             # object in-place: no new handles are allocated, and `tsolve_with_numeric`
             # computes the transposed solve using the existing LU decomposition.
             assert (
-                isinstance(transposed_state, _ManagedKLUState)
-                and transposed_state.factorization is managed_state.factorization
+                isinstance(transposed_state, _KLUNumericState)
+                and transposed_state.factorization is numeric_state.factorization
             )
 
             solver.compute(transposed_state, RIGHT_HAND_SIDE, options={})
@@ -241,16 +243,16 @@ def test_conj_real_reuses_both_handles() -> None:
 
     with _spy_frees() as (freed_symbolic_ids, freed_numeric_ids):
         state_init = solver.init(operator, options={})
-        with state_init.factorize() as managed_state:
-            symbolic_handle_id = id(managed_state.factorization.symbolic)
-            numeric_handle_id = id(managed_state.factorization.numeric)
+        with state_init.factorize() as numeric_state:
+            symbolic_handle_id = id(numeric_state.factorization.symbolic)
+            numeric_handle_id = id(numeric_state.factorization.numeric)
 
-            conj_state, _ = solver.conj(managed_state, options={})
+            conj_state, _ = solver.conj(numeric_state, options={})
 
             # For a real matrix, conj(A) = A: `KLU.conj` detects that the
             # values are not complex and returns the same `_ManagedKLUState`
             # object without touching the factorization handles at all.
-            assert conj_state is managed_state
+            assert conj_state is numeric_state
 
     # Exactly one free per handle: no extra handles were registered in the scope.
     assert freed_symbolic_ids.count(symbolic_handle_id) == 1, (
@@ -272,16 +274,16 @@ def test_conj_complex_reuses_symbolic_creates_new_numeric() -> None:
 
     with _spy_frees() as (freed_symbolic_ids, freed_numeric_ids):
         state_init = solver.init(operator, options={})
-        with state_init.factorize() as managed_state:
-            symbolic_handle_id = id(managed_state.factorization.symbolic)
-            original_numeric_handle_id = id(managed_state.factorization.numeric)
+        with state_init.factorize() as numeric_state:
+            symbolic_handle_id = id(numeric_state.factorization.symbolic)
+            original_numeric_handle_id = id(numeric_state.factorization.numeric)
 
-            conj_state, _ = solver.conj(managed_state, options={})
+            conj_state, _ = solver.conj(numeric_state, options={})
 
             # The symbolic handle is shared because conj(A) has the same
             # sparsity pattern as A.  The numeric handle is new because the
             # numerical values differ.
-            assert isinstance(conj_state, _ManagedKLUState)
+            assert isinstance(conj_state, _KLUNumericState)
             assert id(conj_state.factorization.symbolic) == symbolic_handle_id, (
                 "conj() did not reuse the symbolic handle"
             )
@@ -303,4 +305,153 @@ def test_conj_complex_reuses_symbolic_creates_new_numeric() -> None:
     )
     assert len(freed_numeric_ids) == 2, (
         f"expected 2 numeric handle frees, got {len(freed_numeric_ids)}"
+    )
+
+
+def test_factorize_symbolic_init_uses_solve_with_symbol(
+    make_operator: OperatorFactory,
+) -> None:
+    """Inside a `factorize_symbolic()` block, calling `.init(operator)` then solving
+    must use `klujax.solve_with_symbol` (factors numerically on each call, reusing
+    the pre-computed symbolic analysis).  The symbolic handle must be freed when the
+    outer block exits and the solution must be numerically correct.
+    """
+    operator = make_operator(SQUARE_MATRIX)
+    solver = KLU()
+    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
+
+    with (
+        _spy_frees() as (freed_symbolic_ids, freed_numeric_ids),
+        _spy_solve("solve_with_symbol") as solve_with_symbol_calls,
+        _spy_solve("solve") as solve_calls,
+    ):
+        with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+            symbolic_handle_id = id(scope.symbolic)
+            state = scope.init(operator)
+            assert isinstance(state, _KLUSymbolicState)
+            solution = solver.compute(state, RIGHT_HAND_SIDE, options={})[0]
+
+    assert solve_with_symbol_calls, (
+        "klujax.solve_with_symbol was not called; symbolic factorization was not reused"
+    )
+    assert not solve_calls, "klujax.solve was called; should use solve_with_symbol"
+    assert symbolic_handle_id in freed_symbolic_ids, (
+        "symbolic handle was not freed when the factorize_symbolic block exited"
+    )
+    assert not freed_numeric_ids, (
+        "a numeric handle was unexpectedly registered in the scope (solve_with_symbol "
+        "factors internally without going through the allocation scope manager)"
+    )
+    assert jnp.allclose(solution, expected, atol=1e-5), (
+        "solve_with_symbol produced incorrect solution"
+    )
+
+
+def test_factorize_symbolic_factorize_reuses_symbolic_creates_numeric(
+    make_operator: OperatorFactory,
+) -> None:
+    """Inside a `factorize_symbolic()` block, calling `.factorize(operator)` must
+    reuse the pre-computed symbolic handle and create exactly one new numeric handle.
+    The symbolic is freed by the outer scope; the numeric by the inner scope.
+    The solution must be numerically correct.
+    """
+    operator = make_operator(SQUARE_MATRIX)
+    solver = KLU()
+    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
+
+    with (
+        _spy_frees() as (freed_symbolic_ids, freed_numeric_ids),
+        _spy_solve("solve_with_numeric") as solve_with_numeric_calls,
+        _spy_solve("solve_with_symbol") as solve_with_symbol_calls,
+    ):
+        captured: list[tuple[int, int]] = []
+
+        with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+            symbolic_handle_id = id(scope.symbolic)
+            with scope.factorize(operator) as numeric_state:
+                captured.append(
+                    (
+                        id(numeric_state.factorization.symbolic),
+                        id(numeric_state.factorization.numeric),
+                    )
+                )
+                # Call compute directly rather than through lx.linear_solve to avoid
+                # a JIT-cache hit: lx.linear_solve uses eqx.filter_jit internally, and
+                # if _KLUNumericState was already compiled by an earlier test, compute
+                # won't be re-traced and the spy won't fire.
+                solution, _, _ = solver.compute(numeric_state, RIGHT_HAND_SIDE, {})
+
+    captured_symbolic_id, captured_numeric_id = captured[0]
+
+    assert solve_with_numeric_calls, "klujax.solve_with_numeric was not called"
+    assert not solve_with_symbol_calls, (
+        "klujax.solve_with_symbol was called; numeric factorization should be used"
+    )
+    assert captured_symbolic_id == symbolic_handle_id, (
+        "numeric state did not reuse the symbolic handle from factorize_symbolic"
+    )
+    assert captured_symbolic_id in freed_symbolic_ids, (
+        "symbolic handle was not freed by the outer factorize_symbolic scope"
+    )
+    assert captured_numeric_id in freed_numeric_ids, (
+        "numeric handle was not freed by the inner factorize scope"
+    )
+    assert len(freed_numeric_ids) == 1, (
+        f"expected exactly 1 numeric free, got {len(freed_numeric_ids)}"
+    )
+    assert jnp.allclose(solution, expected, atol=1e-5), (
+        "solve_with_numeric via symbolic reuse produced incorrect solution"
+    )
+
+
+def test_factorize_symbolic_transpose_uses_tsolve_with_symbol(
+    make_operator: OperatorFactory,
+) -> None:
+    """Transposing a `_KLUSymbolicState` and then solving must use
+    `klujax.tsolve_with_symbol` and produce the correct A^T solution.
+    """
+    operator = make_operator(SQUARE_MATRIX)
+    solver = KLU()
+    expected_transpose = jnp.linalg.solve(
+        np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
+    )
+
+    with (
+        _spy_solve("tsolve_with_symbol") as tsolve_calls,
+        _spy_solve("solve_with_symbol") as solve_calls,
+    ):
+        with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+            state = scope.init(operator)
+            transposed_state, _ = solver.transpose(state, options={})
+            solution = solver.compute(transposed_state, RIGHT_HAND_SIDE, options={})[0]
+
+    assert tsolve_calls, (
+        "klujax.tsolve_with_symbol was not called for a transposed symbolic state"
+    )
+    assert not solve_calls, (
+        "klujax.solve_with_symbol was called; should use tsolve_with_symbol for transpose"
+    )
+    assert jnp.allclose(solution, expected_transpose, atol=1e-5), (
+        "tsolve_with_symbol produced incorrect transposed solution"
+    )
+
+
+def test_klu_factorize_classmethod_gives_correct_solution(
+    make_operator: OperatorFactory,
+) -> None:
+    """`KLU.factorize(operator)` is a convenience classmethod equivalent to
+    `KLU().init(operator).factorize()`.  It must yield a `_KLUNumericState` that
+    produces the same solution as the full lineax solve path.
+    """
+    operator = make_operator(SQUARE_MATRIX)
+    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
+
+    with KLU.factorize(operator) as state:
+        assert isinstance(state, _KLUNumericState)
+        solution = lx.linear_solve(
+            operator, RIGHT_HAND_SIDE, solver=KLU(), state=state
+        ).value
+
+    assert jnp.allclose(solution, expected, atol=1e-5), (
+        "KLU.factorize classmethod produced incorrect solution"
     )
