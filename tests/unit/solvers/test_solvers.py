@@ -3,11 +3,12 @@
 Both `Spsolve` (wrapping `jax.experimental.sparse.linalg.spsolve`) and `KLU` (wrapping
 `klujax`) must behave identically against either sparse operator format. The `solver`
 fixture is parametrised over the two solvers and the `make_operator` fixture over
-`["bcoo", "bcsr"]`, so every test below runs for the full solver x format cross-product,
-with the dense reference matrix serving as the source of truth.
-"""
+`["bcoo", "bcsr"]` (both in [conftest.py](conftest.py)), so every test below runs for the full
+solver x format cross-product, with the dense reference matrix as the source of truth.
 
-from typing import Protocol
+KLU-specific behaviour (the `factorize()` context manager and its handle lifecycle) lives
+in [test_klu.py](test_klu.py).
+"""
 
 import jax
 import jax.numpy as jnp
@@ -16,69 +17,16 @@ import numpy as np
 import pytest
 from jax.experimental.sparse import BCOO, BCSR
 
-from splineax import KLU, BCOOLinearOperator, BCSRLinearOperator, Spsolve
+from splineax import BCOOLinearOperator, BCSRLinearOperator
 
-
-class OperatorFactory(Protocol):
-    """Builds the operator under test from a dense reference matrix."""
-
-    def __call__(
-        self, dense_matrix: jax.Array, tags: object = ()
-    ) -> lx.AbstractLinearOperator: ...
-
-
-# A diagonally dominant (hence nonsingular, well-conditioned) square matrix, so the
-# direct solve is well posed and comparable against a dense reference solver.
-SQUARE_MATRIX: jax.Array = jnp.array(
-    [
-        [1.0, 2.0, 0.0, 7.0],
-        [3.0, 4.0, 5.0, 0.0],
-        [0.0, 6.0, 8.0, 9.0],
-        [0.0, 0.0, 1.0, 2.0],
-    ]
-) + 10.0 * jnp.eye(4)
-RIGHT_HAND_SIDE: jax.Array = jnp.array([1.0, 2.0, 3.0, 4.0])
-# A non-square (wide) matrix, to confirm the square-only contract is enforced.
-WIDE_MATRIX: jax.Array = jnp.array([[1.0, 0.0, 2.0], [0.0, 3.0, 0.0]])
-# A diagonally dominant complex matrix, to exercise the complex128 solve path.
-COMPLEX_MATRIX: jax.Array = jnp.array(
-    [
-        [10.0 + 2.0j, 1.0 + 0.0j, 0.0, 0.0],
-        [0.0, 8.0 - 1.0j, 2.0 + 0.0j, 0.0],
-        [0.0, 0.0, 9.0 + 0.0j, 1.0 + 1.0j],
-        [1.0 + 0.0j, 0.0, 0.0, 7.0 + 0.0j],
-    ]
+from .conftest import (
+    COMPLEX_MATRIX,
+    COMPLEX_RIGHT_HAND_SIDE,
+    RIGHT_HAND_SIDE,
+    SQUARE_MATRIX,
+    WIDE_MATRIX,
+    OperatorFactory,
 )
-COMPLEX_RIGHT_HAND_SIDE: jax.Array = jnp.array(
-    [1.0 + 1.0j, 2.0 + 0.0j, 3.0 - 1.0j, 2.0j]
-)
-
-
-def _make_bcoo_operator(
-    dense_matrix: jax.Array, tags: object = ()
-) -> BCOOLinearOperator:
-    return BCOOLinearOperator(BCOO.fromdense(dense_matrix), tags)
-
-
-def _make_bcsr_operator(
-    dense_matrix: jax.Array, tags: object = ()
-) -> BCSRLinearOperator:
-    return BCSRLinearOperator(BCSR.fromdense(dense_matrix), tags)
-
-
-@pytest.fixture(params=["bcoo", "bcsr"])
-def make_operator(request: pytest.FixtureRequest) -> OperatorFactory:
-    """Yields a factory that creates a sparse linear operator from a dense array."""
-    return {
-        "bcoo": _make_bcoo_operator,
-        "bcsr": _make_bcsr_operator,
-    }[request.param]
-
-
-@pytest.fixture(params=[Spsolve, KLU], ids=["spsolve", "klu"])
-def solver(request: pytest.FixtureRequest) -> lx.AbstractLinearSolver:
-    """Yields an instance of each sparse direct solver under test."""
-    return request.param()
 
 
 def test_solve_matches_numpy(
