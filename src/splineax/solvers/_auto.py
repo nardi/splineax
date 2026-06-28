@@ -14,6 +14,7 @@ from splineax.operators._bcsr import BCSRLinearOperator
 
 from ._klu import KLU
 from ._sparse import (
+    AbstractSparseLinearSolver,
     SparseBasicState,
     SparseNumericState,
     SparseSymbolicScope,
@@ -23,7 +24,9 @@ from ._spsolve import Spsolve
 
 
 class AutoSparseLinearSolver(
-    AbstractLinearSolver[SparseBasicState | SparseSymbolicState | SparseNumericState]
+    AbstractSparseLinearSolver[
+        SparseBasicState | SparseSymbolicState | SparseNumericState
+    ]
 ):
     """Selects a sparse direct solver based on the JAX platform.
 

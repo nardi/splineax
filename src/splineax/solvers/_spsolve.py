@@ -8,7 +8,6 @@ from jax.experimental.sparse.linalg import _csr_transpose, spsolve
 from jaxtyping import Array, Inexact, PyTree
 from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
-from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
     PackedStructures,
     pack_structures,
@@ -19,7 +18,11 @@ from lineax._solver.misc import (
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.solvers._sparse import factorize_through_init
+from splineax.solvers._sparse import (
+    AbstractSparseLinearSolver,
+    SparseNumericState,
+    factorize_through_init,
+)
 
 
 class _SpsolveState(NamedTuple):
@@ -84,7 +87,7 @@ def _spsolve(
     return spsolve_with_sequential_vmap(data, indices, indptr, b)
 
 
-class Spsolve(AbstractLinearSolver[_SpsolveState]):
+class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
     """Sparse direct solver wrapping `jax.experimental.sparse.linalg.spsolve`.
 
     This solver keeps the operator in its native sparse (CSR) storage rather than
@@ -135,7 +138,7 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
 
     def factorize(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> AbstractContextManager[_SpsolveState]:
+    ) -> AbstractContextManager[SparseNumericState]:
         # No-op factorization for parity with KLU: yields the ordinary solver state.
         return factorize_through_init(self, operator, options)
 

@@ -8,6 +8,9 @@ from .solvers import (
     KLU as KLU,
 )
 from .solvers import (
+    AbstractSparseLinearSolver as AbstractSparseLinearSolver,
+)
+from .solvers import (
     AutoSparseLinearSolver as AutoSparseLinearSolver,
 )
 from .solvers import (

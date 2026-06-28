@@ -1,8 +1,10 @@
+import abc
 from contextlib import AbstractContextManager, contextmanager
-from typing import Any, Iterator, Protocol, runtime_checkable
+from typing import Any, Generic, Iterator, Protocol, TypeVar, runtime_checkable
 
 from jax.experimental.sparse import BCOO, BCSR
 from lineax import AbstractLinearOperator
+from lineax._solve import AbstractLinearSolver
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
@@ -80,6 +82,34 @@ class SparseLinearSolver(Protocol):
     ) -> AbstractContextManager[SparseSymbolicScope]:
         """Pre-compute a symbolic factorization from a known sparsity pattern."""
         ...
+
+
+_SolverState = TypeVar("_SolverState")
+
+
+class AbstractSparseLinearSolver(
+    AbstractLinearSolver[_SolverState], Generic[_SolverState]
+):
+    """Abstract base for sparse direct solvers that support factorization reuse.
+
+    Extends the lineax `AbstractLinearSolver` interface with `factorize` and
+    `factorize_symbolic`. Concrete subclasses (`KLU`, `Spsolve`,
+    `AutoSparseLinearSolver`) are therefore usable both with `lineax.linear_solve`
+    (which requires an `AbstractLinearSolver`) and the factorization-reuse API. They
+    also structurally satisfy the `SparseLinearSolver` protocol.
+    """
+
+    @abc.abstractmethod
+    def factorize(
+        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
+    ) -> AbstractContextManager[SparseNumericState]:
+        """Pre-compute a full factorization for reuse across multiple solves."""
+
+    @abc.abstractmethod
+    def factorize_symbolic(
+        self, sparsity: _Sparsity
+    ) -> AbstractContextManager[SparseSymbolicScope]:
+        """Pre-compute a symbolic factorization from a known sparsity pattern."""
 
 
 @contextmanager

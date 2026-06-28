@@ -12,7 +12,6 @@ from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import KLUHandleManager
 from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
-from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
     PackedStructures,
     pack_structures,
@@ -23,7 +22,11 @@ from lineax._solver.misc import (
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.solvers._sparse import SparseNumericState, factorize_through_init
+from splineax.solvers._sparse import (
+    AbstractSparseLinearSolver,
+    SparseNumericState,
+    factorize_through_init,
+)
 
 # `Ai` (row indices), `Aj` (column indices), `Ax` (values): the matrix in COO form.
 _COO = tuple[Integer[Array, " a"], Integer[Array, " b"], Inexact[Array, " nse"]]
@@ -238,7 +241,7 @@ COMPLEX_DTYPES = (
 )
 
 
-class KLU(AbstractLinearSolver[_KLUState]):
+class KLU(AbstractSparseLinearSolver[_KLUState]):
     """Sparse direct solver wrapping the `klujax` (SuiteSparse KLU) library.
 
     This solver keeps the operator in its native sparse (COO) storage rather than

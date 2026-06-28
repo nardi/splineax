@@ -1,6 +1,9 @@
 from ._auto import AutoSparseLinearSolver as AutoSparseLinearSolver
 from ._klu import KLU as KLU
 from ._sparse import (
+    AbstractSparseLinearSolver as AbstractSparseLinearSolver,
+)
+from ._sparse import (
     SparseBasicState as SparseBasicState,
 )
 from ._sparse import (
@@ -15,4 +18,5 @@ from ._sparse import (
 from ._sparse import (
     SparseSymbolicState as SparseSymbolicState,
 )
+from ._spsolve import ReorderingScheme as ReorderingScheme
 from ._spsolve import Spsolve as Spsolve
