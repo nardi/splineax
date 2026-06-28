@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from enum import Enum, auto
 from typing import Any, NamedTuple, NewType, TypeVar
@@ -23,6 +23,7 @@ from lineax._solver.misc import (
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.solvers._sparse import SparseNumericState, factorize_through_init
 
 # `Ai` (row indices), `Aj` (column indices), `Ax` (values): the matrix in COO form.
 _COO = tuple[Integer[Array, " a"], Integer[Array, " b"], Inexact[Array, " nse"]]
@@ -292,12 +293,14 @@ class KLU(AbstractLinearSolver[_KLUState]):
             pack_structures(operator),
         )
 
-    @classmethod
-    @contextmanager
-    def factorize(cls, operator: AbstractLinearOperator, options: dict[str, Any] = {}):
-        """Convenience method: equivalent to `KLU().init(operator, options).factorize()`."""
-        with cls().init(operator, options).factorize() as state:
-            yield state
+    def factorize(
+        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
+    ) -> AbstractContextManager[SparseNumericState]:
+        """Pre-compute a full (symbolic + numeric) factorization for reuse.
+
+        Equivalent to `self.init(operator, options).factorize()`.
+        """
+        return factorize_through_init(self, operator, options)
 
     @contextmanager
     def factorize_symbolic(

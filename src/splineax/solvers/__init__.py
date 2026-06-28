@@ -1,2 +1,18 @@
+from ._auto import AutoSparseLinearSolver as AutoSparseLinearSolver
 from ._klu import KLU as KLU
+from ._sparse import (
+    SparseBasicState as SparseBasicState,
+)
+from ._sparse import (
+    SparseLinearSolver as SparseLinearSolver,
+)
+from ._sparse import (
+    SparseNumericState as SparseNumericState,
+)
+from ._sparse import (
+    SparseSymbolicScope as SparseSymbolicScope,
+)
+from ._sparse import (
+    SparseSymbolicState as SparseSymbolicState,
+)
 from ._spsolve import Spsolve as Spsolve

@@ -8,5 +8,11 @@ from .solvers import (
     KLU as KLU,
 )
 from .solvers import (
+    AutoSparseLinearSolver as AutoSparseLinearSolver,
+)
+from .solvers import (
+    SparseLinearSolver as SparseLinearSolver,
+)
+from .solvers import (
     Spsolve as Spsolve,
 )

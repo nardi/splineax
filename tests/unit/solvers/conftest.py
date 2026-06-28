@@ -13,7 +13,13 @@ import lineax as lx
 import pytest
 from jax.experimental.sparse import BCOO, BCSR
 
-from splineax import KLU, BCOOLinearOperator, BCSRLinearOperator, Spsolve
+from splineax import (
+    KLU,
+    AutoSparseLinearSolver,
+    BCOOLinearOperator,
+    BCSRLinearOperator,
+    Spsolve,
+)
 
 
 class OperatorFactory(Protocol):
@@ -72,7 +78,13 @@ def make_operator(request: pytest.FixtureRequest) -> OperatorFactory:
     }[request.param]
 
 
-@pytest.fixture(params=[Spsolve, KLU], ids=["spsolve", "klu"])
+@pytest.fixture(
+    params=[Spsolve, KLU, AutoSparseLinearSolver],
+    ids=["spsolve", "klu", "auto"],
+)
 def solver(request: pytest.FixtureRequest) -> lx.AbstractLinearSolver:
-    """Yields an instance of each sparse direct solver under test."""
+    """Yields an instance of each sparse direct solver under test.
+
+    `AutoSparseLinearSolver` dispatches to `KLU` on the (CPU) test platform.
+    """
     return request.param()

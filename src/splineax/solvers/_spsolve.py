@@ -1,8 +1,9 @@
+from contextlib import AbstractContextManager, contextmanager
 from enum import IntEnum
-from typing import Any, TypeAlias
+from typing import Any, Iterator, NamedTuple
 
 from jax import custom_batching
-from jax.experimental.sparse import BCSR
+from jax.experimental.sparse import BCOO, BCSR
 from jax.experimental.sparse.linalg import _csr_transpose, spsolve
 from jaxtyping import Array, Inexact, PyTree
 from lineax import AbstractLinearOperator
@@ -18,8 +19,33 @@ from lineax._solver.misc import (
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.solvers._sparse import factorize_through_init
 
-_SpsolveState: TypeAlias = tuple[BCSR, PackedStructures]
+
+class _SpsolveState(NamedTuple):
+    matrix: BCSR
+    packed_structures: PackedStructures
+
+    @contextmanager
+    def factorize(self) -> Iterator["_SpsolveState"]:
+        # No-op: Spsolve has no separate numeric factorization phase.
+        yield self
+
+
+class _SpsolveSymbolicScope(NamedTuple):
+    solver: "Spsolve"
+    """The originating solver, so built states keep its tol/reorder config."""
+
+    def init(
+        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
+    ) -> _SpsolveState:
+        # No-op symbolic reuse: Spsolve cannot pre-analyze, so this is a normal init.
+        return self.solver.init(operator, options)
+
+    @contextmanager
+    def factorize(self, operator: AbstractLinearOperator) -> Iterator[_SpsolveState]:
+        with self.init(operator).factorize() as state:
+            yield state
 
 
 class ReorderingScheme(IntEnum):
@@ -105,13 +131,29 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
                     f"`splineax.BCSRLinearOperator`); got {type(operator).__name__}."
                 )
 
-        return matrix_bcsr, pack_structures(operator)
+        return _SpsolveState(matrix_bcsr, pack_structures(operator))
+
+    def factorize(
+        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
+    ) -> AbstractContextManager[_SpsolveState]:
+        # No-op factorization for parity with KLU: yields the ordinary solver state.
+        return factorize_through_init(self, operator, options)
+
+    @contextmanager
+    def factorize_symbolic(
+        self, sparsity: BCOO | BCSR | BCOOLinearOperator | BCSRLinearOperator
+    ) -> Iterator[_SpsolveSymbolicScope]:
+        # No-op symbolic factorization: the sparsity is accepted for parity with KLU but
+        # not used, since Spsolve cannot pre-analyze a sparsity pattern.
+        del sparsity
+        yield _SpsolveSymbolicScope(self)
 
     def compute(
         self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
         del options
-        matrix, packed_structures = state
+        matrix = state.matrix
+        packed_structures = state.packed_structures
         vector = ravel_vector(vector, packed_structures)
         # `spsolve` requires the right-hand side to share the matrix dtype.
         vector = vector.astype(matrix.dtype)
@@ -130,23 +172,25 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         self, state: _SpsolveState, options: dict[str, Any]
     ) -> tuple[_SpsolveState, dict[str, Any]]:
         del options
-        matrix, packed_structures = state
+        matrix = state.matrix
         matrix_T = BCSR(
             _csr_transpose(matrix.data, matrix.indices, matrix.indptr),
             shape=matrix.shape[::-1],
         )
-        transpose_state = (matrix_T, transpose_packed_structures(packed_structures))
+        transpose_state = _SpsolveState(
+            matrix_T, transpose_packed_structures(state.packed_structures)
+        )
         return transpose_state, {}
 
     def conj(
         self, state: _SpsolveState, options: dict[str, Any]
     ) -> tuple[_SpsolveState, dict[str, Any]]:
         del options
-        matrix, packed_structures = state
+        matrix = state.matrix
         matrix_conj = BCSR(
             (matrix.data.conj(), matrix.indices, matrix.indptr), shape=matrix.shape
         )
-        return (matrix_conj, packed_structures), {}
+        return _SpsolveState(matrix_conj, state.packed_structures), {}
 
     def assume_full_rank(self) -> bool:
         return True

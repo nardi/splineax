@@ -436,22 +436,22 @@ def test_factorize_symbolic_transpose_uses_tsolve_with_symbol(
     )
 
 
-def test_klu_factorize_classmethod_gives_correct_solution(
+def test_klu_factorize_gives_correct_solution(
     make_operator: OperatorFactory,
 ) -> None:
-    """`KLU.factorize(operator)` is a convenience classmethod equivalent to
+    """`KLU().factorize(operator)` is a convenience method equivalent to
     `KLU().init(operator).factorize()`.  It must yield a `_KLUNumericState` that
     produces the same solution as the full lineax solve path.
     """
     operator = make_operator(SQUARE_MATRIX)
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
 
-    with KLU.factorize(operator) as state:
+    with KLU().factorize(operator) as state:
         assert isinstance(state, _KLUNumericState)
         solution = lx.linear_solve(
             operator, RIGHT_HAND_SIDE, solver=KLU(), state=state
         ).value
 
     assert jnp.allclose(solution, expected, atol=1e-5), (
-        "KLU.factorize classmethod produced incorrect solution"
+        "KLU.factorize produced incorrect solution"
     )
