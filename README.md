@@ -15,7 +15,7 @@ plugs straight into `lineax.linear_solve`.
 ## Installation
 
 ```bash
-pip install splineax
+pip install git+https://github.com/nardi/splineax.git@0.1.0
 ```
 
 ## Example
@@ -37,5 +37,4 @@ print(solution.value)  # [0.2 0.6]
 
 ## Documentation
 
-Build the docs locally with `uv run mkdocs serve`, or see the user guide and API reference
-under [`docs/`](docs/).
+Build the docs locally with `uv run mkdocs serve`, or view the [user guide and API reference here](https://nardi.github.io/splineax).
