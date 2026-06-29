@@ -23,7 +23,7 @@ It provides:
 ## Installation
 
 ```bash
-pip install git+https://github.com/nardi/splineax.git@0.1.0
+pip install git+https://github.com/nardi/splineax.git@v0.1.1
 ```
 
 ## Quick example

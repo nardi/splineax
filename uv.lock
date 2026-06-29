@@ -1435,7 +1435,7 @@ wheels = [
 
 [[package]]
 name = "splineax"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "equinox" },
