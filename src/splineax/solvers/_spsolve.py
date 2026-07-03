@@ -2,6 +2,7 @@ from contextlib import AbstractContextManager, contextmanager
 from enum import IntEnum
 from typing import Any, Iterator, NamedTuple
 
+import equinox as eqx
 from jax import custom_batching
 from jax.experimental.sparse import BCOO, BCSR
 from jax.experimental.sparse.linalg import _csr_transpose, spsolve
@@ -99,8 +100,8 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
     This solver can only handle square nonsingular operators.
     """
 
-    tol: float = 1e-6
-    reorder: ReorderingScheme = ReorderingScheme.SYMRCM
+    tol: float = eqx.field(default=1e-6, static=True)
+    reorder: ReorderingScheme = eqx.field(default=ReorderingScheme.SYMRCM, static=True)
 
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any]
