@@ -44,8 +44,16 @@ dev = [
     "mkdocs-material>=9.7.6",
     "mkdocstrings[python]>=0.27",
     "pytest>=9.1.0",
+    "pytest-markdown-docs>=0.9.2",
     "ruff>=0.15.17",
 ]
+
+[tool.pytest.ini_options]
+# Execute the code examples in the markdown docs (and README) as tests via
+# pytest-markdown-docs. The superfences syntax lets dependent code blocks share state
+# with a `{.python continuation}` fence, which also renders under Material for MkDocs.
+addopts = "--markdown-docs --markdown-docs-syntax superfences"
+testpaths = ["tests", "docs", "README.md"]
 
 [tool.ruff.lint]
 ignore = ["F722"]

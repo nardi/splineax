@@ -60,7 +60,7 @@ If you know the *sparsity pattern* ahead of time but the values change (for exam
 solving a family of matrices with identical structure), pre-analyze the pattern with
 `solver.factorize_symbolic(sparsity)`. It yields a *scope* offering two options.
 
-```python
+```{.python continuation}
 sparsity = BCOO.fromdense(dense)  # only the structure matters here
 
 with solver.factorize_symbolic(sparsity) as scope:
@@ -105,7 +105,7 @@ All three solvers subclass
 with `lineax.linear_solve` and the factorization API). Type a routine against it and let the
 caller pick the solver:
 
-```python
+```{.python continuation}
 from splineax import AbstractSparseLinearSolver
 
 

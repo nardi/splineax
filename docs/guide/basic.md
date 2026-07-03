@@ -45,7 +45,7 @@ You can swap the solver for any of the three: `splineax.Spsolve()`, `splineax.KL
 Because the operators and solvers are ordinary Lineax components, the usual JAX
 transformations work:
 
-```python
+```{.python continuation}
 import jax
 
 # Solve the transposed system.
@@ -68,7 +68,7 @@ jacobian = jax.jacrev(solve)(b)
 It is common to solve `Ax = b` for the same `A` and many different `b`. Lineax lets you
 compute the operator-only part once with `init`, then reuse the resulting `state`:
 
-```python
+```{.python continuation}
 solver = splineax.KLU()
 state = solver.init(operator, options={})
 

@@ -37,7 +37,7 @@ Wraps [`klujax`](https://github.com/flaport/klujax), bindings for the SuiteSpars
 sparse LU solver. It keeps the operator in coordinate form and supports reusing a symbolic
 and/or numeric factorization across many solves (see [Advanced usage](advanced.md)).
 
-```python
+```{.python continuation}
 solver = splineax.KLU()
 ```
 

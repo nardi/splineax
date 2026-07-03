@@ -46,7 +46,7 @@ Both operators implement the standard `AbstractLinearOperator` surface:
 Like other Lineax operators, you can attach `tags` describing structural properties
 (symmetry, positive-definiteness, and so on):
 
-```python
+```{.python continuation}
 import lineax as lx
 
 operator = splineax.BCOOLinearOperator(
