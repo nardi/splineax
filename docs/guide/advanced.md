@@ -74,8 +74,11 @@ with solver.factorize_symbolic(sparsity) as scope:
         x2 = lx.linear_solve(operator, b2, solver=solver, state=numeric_state).value
 ```
 
-`factorize_symbolic` accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`, or
-`BCSRLinearOperator`; only its sparsity pattern is read.
+`factorize_symbolic` accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`,
+`BCSRLinearOperator`, `SparseJacobianLinearOperator`, or `SparseJacobianColoring`.
+Only its sparsity pattern is read. For the Jacobian operator and coloring, the
+pattern comes from the precomputed sparsity, without materialising the
+Jacobian numerically.
 
 ## How the states chain
 

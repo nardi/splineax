@@ -12,6 +12,10 @@ It provides:
 - **Operators** that wrap a sparse array into a `lineax.AbstractLinearOperator`:
   [`BCOOLinearOperator`][splineax.BCOOLinearOperator] and
   [`BCSRLinearOperator`][splineax.BCSRLinearOperator].
+- **Sparse Jacobian operators**:
+  [`SparseJacobianLinearOperator`][splineax.SparseJacobianLinearOperator] represents the
+  Jacobian of a function sparsely, detecting its sparsity pattern and constructing a coloring automatically (via
+  [asdex](https://github.com/adrhill/asdex)), which allows for efficient materialization into a sparse matrix by the solvers.
 - **Solvers**: [`Spsolve`][splineax.Spsolve] (any backend, wraps
   `jax.experimental.sparse.linalg.spsolve`), [`KLU`][splineax.KLU] (CPU-only, wraps the
   SuiteSparse KLU library via `klujax`, with factorization reuse), and
@@ -75,7 +79,8 @@ with solver.factorize(operator) as factorized_state:
 ## Where to next
 
 - [Basic usage](guide/basic.md): build operators and solve, just like plain lineax.
-- [Operators](guide/operators.md): `BCOO` vs `BCSR` and how to construct them.
+- [Operators](guide/operators.md): `BCOO` vs `BCSR`, how to construct them, and details on sparse
+  Jacobian operators.
 - [Solvers](guide/solvers.md): what each solver does and when to use it.
 - [Advanced usage](guide/advanced.md): reuse a factorization across many solves with the
   `SparseLinearSolver` protocol.

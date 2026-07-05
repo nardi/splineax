@@ -33,6 +33,7 @@ dependencies = [
     "klujax @ https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl ; python_version == '3.14' and sys_platform == 'linux' and platform_machine == 'x86_64'",
     "klujax @ https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-win_amd64.whl ; python_version == '3.14' and sys_platform == 'win32' and platform_machine == 'AMD64'",
     "klujax @ https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-win_arm64.whl ; python_version == '3.14' and sys_platform == 'win32' and platform_machine == 'ARM64'",
+    "asdex>=0.5.0",
 ]
 
 [build-system]

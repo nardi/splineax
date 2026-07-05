@@ -10,7 +10,7 @@ import numpy as np
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import KLUHandleManager
-from lineax import AbstractLinearOperator
+from lineax import AbstractLinearOperator, materialise
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
     PackedStructures,
@@ -22,6 +22,10 @@ from lineax._solver.misc import (
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.operators._jacobian import (
+    SparseJacobianColoring,
+    SparseJacobianLinearOperator,
+)
 from splineax.solvers._sparse import (
     AbstractSparseLinearSolver,
     SparseNumericState,
@@ -165,18 +169,19 @@ class _KLUSymbolicScope(NamedTuple):
         operator: AbstractLinearOperator,
         options: dict[str, Any] = {},
     ) -> _KLUSymbolicState:
-        del options
-
         Ai, Aj = self.indices
         match operator:
+            case SparseJacobianLinearOperator():
+                return self.init(materialise(operator), options)
             case BCSRLinearOperator(matrix):
                 bcoo = matrix.to_bcoo()
             case BCOOLinearOperator(matrix):
                 bcoo = matrix
             case _:
                 raise TypeError(
-                    "`_KLUSymbolicScope.init` requires a `BCOOLinearOperator` or "
-                    f"`BCSRLinearOperator`; got {type(operator).__name__}."
+                    "`_KLUSymbolicScope.init` requires a `BCOOLinearOperator`, "
+                    "`BCSRLinearOperator`, or `SparseJacobianLinearOperator`; "
+                    f"got {type(operator).__name__}."
                 )
         Ax = bcoo.data
 
@@ -266,6 +271,10 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         # `klujax.solve` consumes a COO triple. We assume the matrix is coalesced (no
         # duplicate indices); KLU builds CSC internally, so the index order is irrelevant.
         match operator:
+            case SparseJacobianLinearOperator():
+                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
+                # BCOO path below.
+                return self.init(materialise(operator), options)
             case BCSRLinearOperator(matrix):
                 matrix = matrix.to_bcoo()
             case BCOOLinearOperator(matrix):
@@ -274,7 +283,9 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                 raise TypeError(
                     "`KLU` requires a sparse operator backed by a `BCOO` or `BCSR` "
                     "matrix (e.g. `splineax.BCOOLinearOperator` or "
-                    f"`splineax.BCSRLinearOperator`); got {type(operator).__name__}."
+                    "`splineax.BCSRLinearOperator`), or a "
+                    f"`splineax.SparseJacobianLinearOperator`; "
+                    f"got {type(operator).__name__}."
                 )
 
         # Import klujax to enable x64.
@@ -308,7 +319,12 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
     @contextmanager
     def factorize_symbolic(
         self,
-        sparsity: BCOO | BCSR | BCOOLinearOperator | BCSRLinearOperator,
+        sparsity: BCOO
+        | BCSR
+        | BCOOLinearOperator
+        | BCSRLinearOperator
+        | SparseJacobianLinearOperator
+        | SparseJacobianColoring,
     ):
         """Open a scope with a pre-computed KLU symbolic factorization.
 
@@ -323,40 +339,67 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
 
         Args:
             sparsity: Sparse matrix whose sparsity pattern to pre-analyze. Accepts
-                      `BCOO`, `BCSR`, `BCOOLinearOperator`, or `BCSRLinearOperator`.
+                      `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`,
+                      `SparseJacobianLinearOperator`, or `SparseJacobianColoring`.
+                      For the latter two, the indices are taken host-side from the
+                      precomputed asdex sparsity pattern, without materialising the
+                      Jacobian numerically.
         """
         match sparsity:
+            case SparseJacobianLinearOperator(transposed=True):
+                # The stored pattern describes the forward Jacobian. asdex emits
+                # `BCOO` values in the pattern's index order and `BCOO.T` swaps the
+                # index columns without reordering entries, so swapping rows and
+                # columns here keeps the indices aligned with the values that
+                # `_KLUSymbolicScope.init` later pairs them with.
+                pattern = sparsity.coloring.internal_coloring.sparsity
+                Ai = jnp.asarray(pattern.cols, dtype=jnp.int32)
+                Aj = jnp.asarray(pattern.rows, dtype=jnp.int32)
+                shape = pattern.shape[::-1]
+            case SparseJacobianLinearOperator() | SparseJacobianColoring():
+                pattern = sparsity.coloring.internal_coloring.sparsity
+                Ai = jnp.asarray(pattern.rows, dtype=jnp.int32)
+                Aj = jnp.asarray(pattern.cols, dtype=jnp.int32)
+                shape = pattern.shape
             case BCSRLinearOperator():
                 bcoo = sparsity.matrix.to_bcoo()
+                Ai = bcoo.indices[:, 0].astype(jnp.int32)
+                Aj = bcoo.indices[:, 1].astype(jnp.int32)
+                shape = bcoo.shape
             case BCOOLinearOperator():
                 bcoo = sparsity.matrix
+                Ai = bcoo.indices[:, 0].astype(jnp.int32)
+                Aj = bcoo.indices[:, 1].astype(jnp.int32)
+                shape = bcoo.shape
             case BCSR():
                 bcoo = sparsity.to_bcoo()
+                Ai = bcoo.indices[:, 0].astype(jnp.int32)
+                Aj = bcoo.indices[:, 1].astype(jnp.int32)
+                shape = bcoo.shape
             case BCOO():
-                bcoo = sparsity
+                Ai = sparsity.indices[:, 0].astype(jnp.int32)
+                Aj = sparsity.indices[:, 1].astype(jnp.int32)
+                shape = sparsity.shape
             case _:
                 raise TypeError(
                     "`KLU.factorize_symbolic` requires a `BCOO`, `BCSR`, "
-                    "`BCOOLinearOperator`, or `BCSRLinearOperator`; "
+                    "`BCOOLinearOperator`, `BCSRLinearOperator`, "
+                    "`SparseJacobianLinearOperator`, or `SparseJacobianColoring`; "
                     f"got {type(sparsity).__name__}."
                 )
 
-        if bcoo.shape[0] != bcoo.shape[1]:
+        if shape[0] != shape[1]:
             raise ValueError(
-                "`KLU.factorize_symbolic` requires a square matrix; "
-                f"got shape {bcoo.shape}."
+                f"`KLU.factorize_symbolic` requires a square matrix; got shape {shape}."
             )
-
-        Ai = bcoo.indices[:, 0].astype(jnp.int32)
-        Aj = bcoo.indices[:, 1].astype(jnp.int32)
 
         with _KLUHandleAllocationScopeManager.begin_scope():
             symbolic = _KLUHandleAllocationScopeManager.register_handle(
-                _KLUHandleType.SYMBOLIC, _klujax().analyze(Ai, Aj, bcoo.shape[1])
+                _KLUHandleType.SYMBOLIC, _klujax().analyze(Ai, Aj, shape[1])
             )
             yield _KLUSymbolicScope(
                 (Ai, Aj),
-                bcoo.shape,
+                tuple(shape),
                 _KLUHandle(symbolic.handle),
             )
 

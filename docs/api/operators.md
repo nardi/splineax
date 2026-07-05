@@ -5,3 +5,11 @@
 ---
 
 ::: splineax.BCSRLinearOperator
+
+---
+
+::: splineax.SparseJacobianLinearOperator
+
+---
+
+::: splineax.SparseJacobianColoring

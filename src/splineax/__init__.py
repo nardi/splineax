@@ -4,6 +4,12 @@ from .operators import (
 from .operators import (
     BCSRLinearOperator as BCSRLinearOperator,
 )
+from .operators import (
+    SparseJacobianColoring as SparseJacobianColoring,
+)
+from .operators import (
+    SparseJacobianLinearOperator as SparseJacobianLinearOperator,
+)
 from .solvers import (
     KLU as KLU,
 )

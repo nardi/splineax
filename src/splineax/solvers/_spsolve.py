@@ -7,7 +7,7 @@ from jax import custom_batching
 from jax.experimental.sparse import BCOO, BCSR
 from jax.experimental.sparse.linalg import _csr_transpose, spsolve
 from jaxtyping import Array, Inexact, PyTree
-from lineax import AbstractLinearOperator
+from lineax import AbstractLinearOperator, materialise
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
     PackedStructures,
@@ -19,6 +19,10 @@ from lineax._solver.misc import (
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.operators._jacobian import (
+    SparseJacobianColoring,
+    SparseJacobianLinearOperator,
+)
 from splineax.solvers._sparse import (
     AbstractSparseLinearSolver,
     SparseNumericState,
@@ -106,7 +110,6 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any]
     ) -> _SpsolveState:
-        del options
         if operator.in_size() != operator.out_size():
             raise ValueError(
                 "`Spsolve` may only be used for linear solves with square matrices"
@@ -116,6 +119,10 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
         # each row. We assume the matrix is coalesced (no duplicate indices) and
         # only ensure the sorting here.
         match operator:
+            case SparseJacobianLinearOperator():
+                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
+                # BCOO path below.
+                return self.init(materialise(operator), options)
             case BCSRLinearOperator(matrix):
                 # Round-trip an unsorted `BCSR` through `BCOO`, since
                 # `BCSR.from_bcoo` sorts.
@@ -132,7 +139,9 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
                 raise TypeError(
                     "`Spsolve` requires a sparse operator backed by a `BCOO` or `BCSR` "
                     "matrix (e.g. `splineax.BCOOLinearOperator` or "
-                    f"`splineax.BCSRLinearOperator`); got {type(operator).__name__}."
+                    "`splineax.BCSRLinearOperator`), or a "
+                    f"`splineax.SparseJacobianLinearOperator`; "
+                    f"got {type(operator).__name__}."
                 )
 
         return _SpsolveState(matrix_bcsr, pack_structures(operator))
@@ -145,7 +154,13 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
 
     @contextmanager
     def factorize_symbolic(
-        self, sparsity: BCOO | BCSR | BCOOLinearOperator | BCSRLinearOperator
+        self,
+        sparsity: BCOO
+        | BCSR
+        | BCOOLinearOperator
+        | BCSRLinearOperator
+        | SparseJacobianLinearOperator
+        | SparseJacobianColoring,
     ) -> Iterator[_SpsolveSymbolicScope]:
         # No-op symbolic factorization: the sparsity is accepted for parity with KLU but
         # not used, since Spsolve cannot pre-analyze a sparsity pattern.
