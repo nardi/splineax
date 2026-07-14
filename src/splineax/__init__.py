@@ -5,10 +5,13 @@ from .operators import (
     BCSRLinearOperator as BCSRLinearOperator,
 )
 from .operators import (
-    SparseJacobianColoring as SparseJacobianColoring,
+    JacobianColoring as JacobianColoring,
 )
 from .operators import (
     SparseJacobianLinearOperator as SparseJacobianLinearOperator,
+)
+from .operators import (
+    SparseJacobianLinearOperatorColoring as SparseJacobianLinearOperatorColoring,
 )
 from .solvers import (
     KLU as KLU,

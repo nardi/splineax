@@ -102,7 +102,8 @@ Three construction paths are available, from least to most precomputed:
 - Pass only `fn` and `x`: the sparsity pattern is detected automatically.
 - Pass `sparsity=` (an `asdex.SparsityPattern`, a dense boolean mask, or a `BCOO`):
   detection is skipped and only the coloring is computed.
-- Pass `coloring=` (an `asdex.ColoredPattern`): both steps are skipped.
+- Pass `coloring=` (an `asdex.ColoredPattern` or a
+  [`JacobianColoring`][splineax.JacobianColoring]): both steps are skipped.
 
 The optional `mode=` argument selects `"fwd"` (column coloring, JVPs) or `"rev"` (row
 coloring, VJPs). The function must map a one-dimensional real array to a
@@ -112,23 +113,55 @@ one-dimensional real array. Complex dtypes are rejected.
 
 Sparsity and coloring depend only on the computation graph of `fn`, not on the values
 of `x`. When the Jacobian is needed at many points (a Newton iteration, for example),
-detect once with [`SparseJacobianColoring`][splineax.SparseJacobianColoring] and build
-cheap operators from it:
+detect once with
+[`SparseJacobianLinearOperatorColoring`][splineax.SparseJacobianLinearOperatorColoring]
+and build cheap operators from it:
 
 ```{.python continuation}
-coloring = splineax.SparseJacobianColoring.detect(residual, y0)
+coloring = splineax.SparseJacobianLinearOperatorColoring.detect(residual, y0)
 
 for step in range(3):
     step_operator = coloring.operator_at(y0)
     y0 = y0 - lx.linear_solve(step_operator, residual(y0, None), solver=splineax.KLU()).value
 ```
 
-All operators built from one `SparseJacobianColoring` share their pytree structure, so
-a jitted function accepting them (including the solve above) compiles only once.
+All operators built from one `SparseJacobianLinearOperatorColoring` share their pytree
+structure, so a jitted function accepting them (including the solve above) compiles only
+once.
+
+### Carrying a coloring into a jitted function
+
+The coloring itself is a pytree, wrapped as a
+[`JacobianColoring`][splineax.JacobianColoring]. It carries no function or point, so it
+can be created once (host-side) and passed as an argument into a jitted function that
+builds the operator internally. Any two colorings of the same sparsity pattern share a
+pytree structure, so regenerating the coloring from scratch does not trigger a
+recompile:
+
+```{.python continuation}
+import equinox as eqx
+
+
+@eqx.filter_jit
+def newton_step(coloring, point, b):
+    operator = splineax.SparseJacobianLinearOperator(residual, point, coloring=coloring)
+    return point - lx.linear_solve(operator, b, solver=splineax.KLU()).value
+
+
+coloring = splineax.JacobianColoring.detect(residual, y0)
+y0 = newton_step(coloring, y0, residual(y0, None))
+```
+
+A [`JacobianColoring`][splineax.JacobianColoring] is created either by detection with
+`JacobianColoring.detect(fn, x)` or, when the sparsity is already known, by
+`JacobianColoring.from_sparsity(sparsity)`. To bind a coloring to a function and reuse
+it across points, hand it to
+`SparseJacobianLinearOperatorColoring.from_jacobian_coloring(coloring, fn, x)`.
 
 `KLU.factorize_symbolic` (see [the advanced guide](advanced.md)) also accepts a
-`SparseJacobianLinearOperator` or a `SparseJacobianColoring` directly, reading the
-indices from the precomputed pattern without materialising the Jacobian numerically.
+`SparseJacobianLinearOperator`, a `SparseJacobianLinearOperatorColoring`, or a
+`JacobianColoring` directly, reading the indices from the precomputed pattern without
+materialising the Jacobian numerically.
 
 ## BCOO or BCSR?
 

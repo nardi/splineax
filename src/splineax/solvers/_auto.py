@@ -12,8 +12,9 @@ from lineax._solve import AbstractLinearSolver
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
-    SparseJacobianColoring,
+    JacobianColoring,
     SparseJacobianLinearOperator,
+    SparseJacobianLinearOperatorColoring,
 )
 
 from ._klu import KLU
@@ -21,7 +22,6 @@ from ._sparse import (
     AbstractSparseLinearSolver,
     SparseBasicState,
     SparseNumericState,
-    SparseSymbolicScope,
     SparseSymbolicState,
 )
 from ._spsolve import Spsolve
@@ -95,8 +95,9 @@ class AutoSparseLinearSolver(
         | BCOOLinearOperator
         | BCSRLinearOperator
         | SparseJacobianLinearOperator
-        | SparseJacobianColoring,
-    ) -> AbstractContextManager[SparseSymbolicScope]:
+        | SparseJacobianLinearOperatorColoring
+        | JacobianColoring,
+    ):
         return self._chosen_solver.factorize_symbolic(sparsity)
 
 

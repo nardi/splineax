@@ -1,13 +1,17 @@
-"""Test suite for `SparseJacobianLinearOperator` and `SparseJacobianColoring`.
+"""Test suite for the sparse Jacobian operator and its coloring wrappers.
+
+The classes under test are `SparseJacobianLinearOperator`, the function-agnostic
+`JacobianColoring`, and the function-bound `SparseJacobianLinearOperatorColoring`.
 
 The reference for correctness is always the dense Jacobian computed with
 `jax.jacfwd`. Two reference functions are used: an elementwise map (whose Jacobian
 is diagonal, the simplest sparsity) and a banded coupling (whose Jacobian needs a
 non-trivial coloring). Beyond numerical agreement, the suite checks the properties
-that make the operator practical: jit cache stability across evaluation points,
-sparse materialisation through `lineax.materialise` and `lineax.linearise`, and
-end-to-end solves through every splineax sparse solver, including the KLU symbolic
-factorization reuse path.
+that make the operator practical: jit cache stability across evaluation points and
+across freshly regenerated colorings, sparse materialisation through
+`lineax.materialise` and `lineax.linearise`, and end-to-end solves through every
+splineax sparse solver, including the KLU symbolic factorization reuse path and a
+coloring passed as an argument into a jitted solve.
 """
 
 import asdex
@@ -22,8 +26,9 @@ from splineax import (
     KLU,
     AutoSparseLinearSolver,
     BCOOLinearOperator,
-    SparseJacobianColoring,
+    JacobianColoring,
     SparseJacobianLinearOperator,
+    SparseJacobianLinearOperatorColoring,
     Spsolve,
 )
 
@@ -143,9 +148,12 @@ def test_mode_is_forwarded(mode) -> None:
 
 
 def test_coloring_object_matches_direct_construction() -> None:
-    """`SparseJacobianColoring.detect(...).operator_at(x)` must behave identically to
-    constructing the operator directly, since it is only a precomputation cache."""
-    coloring = SparseJacobianColoring.detect(banded_function, EVALUATION_POINT)
+    """`SparseJacobianLinearOperatorColoring.detect(...).operator_at(x)` must behave
+    identically to constructing the operator directly, since it is only a
+    precomputation cache."""
+    coloring = SparseJacobianLinearOperatorColoring.detect(
+        banded_function, EVALUATION_POINT
+    )
     from_coloring_object = coloring.operator_at(EVALUATION_POINT)
     direct = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
     assert jnp.allclose(from_coloring_object.as_matrix(), direct.as_matrix())
@@ -167,22 +175,26 @@ def test_coloring_object_from_sparsity_and_abstract_point() -> None:
     known_sparsity = asdex.jacobian_sparsity(
         lambda point: banded_function(point, None), EVALUATION_POINT
     )
-    coloring = SparseJacobianColoring.from_sparsity(
+    coloring = SparseJacobianLinearOperatorColoring.from_sparsity(
         banded_function, abstract_point, known_sparsity
     )
     expected = dense_jacobian(banded_function, EVALUATION_POINT)
     assert jnp.allclose(coloring.operator_at(EVALUATION_POINT).as_matrix(), expected)
 
-    detected = SparseJacobianColoring.detect(banded_function, abstract_point)
+    detected = SparseJacobianLinearOperatorColoring.detect(
+        banded_function, abstract_point
+    )
     assert jnp.allclose(detected.operator_at(EVALUATION_POINT).as_matrix(), expected)
 
 
 def test_jit_cache_is_stable_across_points_and_transposes() -> None:
-    """Operators built from one `SparseJacobianColoring` at different points, and
-    an operator transposed twice, must share a pytree structure, so a jitted
-    function accepting them compiles exactly once. This is the property that makes
-    the precomputed coloring worthwhile inside Newton-style loops."""
-    coloring = SparseJacobianColoring.detect(banded_function, EVALUATION_POINT)
+    """Operators built from one `SparseJacobianLinearOperatorColoring` at different
+    points, and an operator transposed twice, must share a pytree structure, so a
+    jitted function accepting them compiles exactly once. This is the property that
+    makes the precomputed coloring worthwhile inside Newton-style loops."""
+    coloring = SparseJacobianLinearOperatorColoring.detect(
+        banded_function, EVALUATION_POINT
+    )
     trace_log: list[bool] = []
 
     @eqx.filter_jit
@@ -269,9 +281,11 @@ def test_conflicting_precomputation_arguments_are_rejected() -> None:
             sparsity=known_sparsity,
             coloring=known_coloring,
         )
-    with pytest.raises(TypeError, match="at most one"):
+    with pytest.raises(TypeError, match="where `coloring` must be"):
         SparseJacobianLinearOperator(
-            banded_function, EVALUATION_POINT, coloring=known_sparsity
+            banded_function,
+            EVALUATION_POINT,
+            coloring=known_sparsity,  # type: ignore
         )
 
 
@@ -292,23 +306,121 @@ def test_linear_solve_matches_numpy(solver) -> None:
 
 
 def test_factorize_symbolic_round_trip() -> None:
-    """`KLU.factorize_symbolic` must accept both the operator and a bare
-    `SparseJacobianColoring`, deriving the indices host-side from the stored
-    sparsity pattern. Solving through the resulting scope must match the dense
-    solve, which fails if the pattern's index order ever disagrees with the order
-    `asdex` emits when the Jacobian is later materialised."""
+    """`KLU.factorize_symbolic` must accept the operator, a bound
+    `SparseJacobianLinearOperatorColoring`, and a bare `JacobianColoring`, deriving
+    the indices host-side from the stored sparsity pattern in each case. Solving
+    through the resulting scope must match the dense solve, which fails if the
+    pattern's index order ever disagrees with the order `asdex` emits when the
+    Jacobian is later materialised."""
     solver = KLU()
-    coloring = SparseJacobianColoring.detect(square_function, SQUARE_POINT)
-    operator = coloring.operator_at(SQUARE_POINT)
+    operator_coloring = SparseJacobianLinearOperatorColoring.detect(
+        square_function, SQUARE_POINT
+    )
+    operator = operator_coloring.operator_at(SQUARE_POINT)
+    bare_coloring = JacobianColoring.detect(square_function, SQUARE_POINT)
     expected = np.linalg.solve(
         np.asarray(dense_jacobian(square_function, SQUARE_POINT), dtype=np.float64),
         np.asarray(RIGHT_HAND_SIDE, dtype=np.float64),
     )
 
-    for sparsity_source in (operator, coloring):
+    for sparsity_source in (operator, operator_coloring, bare_coloring):
         with solver.factorize_symbolic(sparsity_source) as scope:
             state = scope.init(operator)
             solution = lx.linear_solve(
                 operator, RIGHT_HAND_SIDE, solver=solver, state=state
             ).value
         assert np.allclose(np.asarray(solution), expected, atol=1e-5)
+
+
+def test_jacobian_coloring_creation_paths_match_dense() -> None:
+    """A `JacobianColoring` built by detection or from a known sparsity pattern must,
+    through either entry point (the operator's `coloring` argument, or binding with
+    `from_jacobian_coloring` and calling `operator_at`), reproduce the dense
+    Jacobian."""
+    expected = dense_jacobian(banded_function, EVALUATION_POINT)
+    known_sparsity = asdex.jacobian_sparsity(
+        lambda point: banded_function(point, None), EVALUATION_POINT
+    )
+
+    detected_coloring = JacobianColoring.detect(banded_function, EVALUATION_POINT)
+    from_sparsity_coloring = JacobianColoring.from_sparsity(known_sparsity)
+
+    for jacobian_coloring in (detected_coloring, from_sparsity_coloring):
+        # Entry point one: hand the coloring straight to the operator.
+        direct_operator = SparseJacobianLinearOperator(
+            banded_function, EVALUATION_POINT, coloring=jacobian_coloring
+        )
+        assert jnp.allclose(direct_operator.as_matrix(), expected)
+
+        # Entry point two: bind the coloring to the function, then build at a point.
+        bound_coloring = SparseJacobianLinearOperatorColoring.from_jacobian_coloring(
+            jacobian_coloring, banded_function, EVALUATION_POINT
+        )
+        assert jnp.allclose(
+            bound_coloring.operator_at(EVALUATION_POINT).as_matrix(), expected
+        )
+
+
+def test_from_jacobian_coloring_matches_direct_construction() -> None:
+    """Binding a detected `JacobianColoring` to a function with
+    `from_jacobian_coloring` and building an operator at a point must match direct
+    construction, since it only reuses the precomputed coloring."""
+    jacobian_coloring = JacobianColoring.detect(banded_function, EVALUATION_POINT)
+    bound = SparseJacobianLinearOperatorColoring.from_jacobian_coloring(
+        jacobian_coloring, banded_function, EVALUATION_POINT
+    )
+    direct = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
+    assert jnp.allclose(
+        bound.operator_at(EVALUATION_POINT).as_matrix(), direct.as_matrix()
+    )
+
+
+def test_jacobian_coloring_through_jit_and_solver() -> None:
+    """A `JacobianColoring` is passed as an argument into a
+    jitted function, which builds a `SparseJacobianLinearOperator` from it and
+    solves with KLU. Because `asdex.ColoredPattern` is a pytree whose treedef
+    depends only on the sparsity structure, regenerating the coloring from
+    scratch (a fresh object with fresh arrays) and calling again must not
+    retrace the jitted function."""
+    known_sparsity = asdex.jacobian_sparsity(
+        lambda point: square_function(point, None), SQUARE_POINT
+    )
+    expected = np.linalg.solve(
+        np.asarray(dense_jacobian(square_function, SQUARE_POINT), dtype=np.float64),
+        np.asarray(RIGHT_HAND_SIDE, dtype=np.float64),
+    )
+    trace_log: list[bool] = []
+
+    @eqx.filter_jit
+    def solve(coloring, point, right_hand_side):
+        trace_log.append(True)
+        operator = SparseJacobianLinearOperator(
+            square_function, point, coloring=coloring
+        )
+        return lx.linear_solve(operator, right_hand_side, solver=KLU()).value
+
+    # First call, with a coloring built from the known sparsity pattern.
+    first_coloring = JacobianColoring.from_sparsity(known_sparsity)
+    first_solution = solve(first_coloring, SQUARE_POINT, RIGHT_HAND_SIDE)
+    assert np.allclose(np.asarray(first_solution), expected, atol=1e-5)
+    assert len(trace_log) == 1
+
+    # Regenerate the coloring from scratch (a fresh object) and solve at a different
+    # point. The freshly built coloring must reuse the compiled function, so the
+    # trace count stays at one.
+    other_point = SQUARE_POINT + 0.25
+    other_expected = np.linalg.solve(
+        np.asarray(dense_jacobian(square_function, other_point), dtype=np.float64),
+        np.asarray(RIGHT_HAND_SIDE, dtype=np.float64),
+    )
+    regenerated_coloring = JacobianColoring.from_sparsity(known_sparsity)
+    regenerated_solution = solve(regenerated_coloring, other_point, RIGHT_HAND_SIDE)
+    assert np.allclose(np.asarray(regenerated_solution), other_expected, atol=1e-5)
+    assert len(trace_log) == 1, "a regenerated coloring retraced the jitted solve"
+
+    # A coloring produced by detection rather than from a known pattern must share the
+    # same treedef too, so it also reuses the compiled function.
+    detected_coloring = JacobianColoring.detect(square_function, SQUARE_POINT)
+    detected_solution = solve(detected_coloring, SQUARE_POINT, RIGHT_HAND_SIDE)
+    assert np.allclose(np.asarray(detected_solution), expected, atol=1e-5)
+    assert len(trace_log) == 1, "a detection-built coloring retraced the jitted solve"

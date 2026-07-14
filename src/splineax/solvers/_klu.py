@@ -23,8 +23,9 @@ from lineax._solver.misc import (
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
-    SparseJacobianColoring,
+    JacobianColoring,
     SparseJacobianLinearOperator,
+    SparseJacobianLinearOperatorColoring,
 )
 from splineax.solvers._sparse import (
     AbstractSparseLinearSolver,
@@ -324,7 +325,8 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         | BCOOLinearOperator
         | BCSRLinearOperator
         | SparseJacobianLinearOperator
-        | SparseJacobianColoring,
+        | SparseJacobianLinearOperatorColoring
+        | JacobianColoring,
     ):
         """Open a scope with a pre-computed KLU symbolic factorization.
 
@@ -340,10 +342,13 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         Args:
             sparsity: Sparse matrix whose sparsity pattern to pre-analyze. Accepts
                       `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`,
-                      `SparseJacobianLinearOperator`, or `SparseJacobianColoring`.
-                      For the latter two, the indices are taken host-side from the
+                      `SparseJacobianLinearOperator`,
+                      `SparseJacobianLinearOperatorColoring`, or `JacobianColoring`.
+                      For the latter three, the indices are taken host-side from the
                       precomputed asdex sparsity pattern, without materialising the
-                      Jacobian numerically.
+                      Jacobian numerically. That host-side read means the coloring
+                      must be concrete here, not a traced value inside a jitted
+                      function.
         """
         match sparsity:
             case SparseJacobianLinearOperator(transposed=True):
@@ -352,12 +357,25 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                 # index columns without reordering entries, so swapping rows and
                 # columns here keeps the indices aligned with the values that
                 # `_KLUSymbolicScope.init` later pairs them with.
-                pattern = sparsity.coloring.internal_coloring.sparsity
+                pattern = sparsity.coloring.sparsity
                 Ai = jnp.asarray(pattern.cols, dtype=jnp.int32)
                 Aj = jnp.asarray(pattern.rows, dtype=jnp.int32)
                 shape = pattern.shape[::-1]
-            case SparseJacobianLinearOperator() | SparseJacobianColoring():
-                pattern = sparsity.coloring.internal_coloring.sparsity
+            case (
+                SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring()
+            ):
+                # Both hold the coloring one level in: the operator stores an
+                # `asdex.ColoredPattern` whose `.sparsity` is the pattern, and the
+                # operator coloring stores a `JacobianColoring` whose `.sparsity`
+                # property returns the same pattern.
+                pattern = sparsity.coloring.sparsity
+                Ai = jnp.asarray(pattern.rows, dtype=jnp.int32)
+                Aj = jnp.asarray(pattern.cols, dtype=jnp.int32)
+                shape = pattern.shape
+            case JacobianColoring():
+                # A bare coloring exposes the pattern directly through its
+                # `.sparsity` property.
+                pattern = sparsity.sparsity
                 Ai = jnp.asarray(pattern.rows, dtype=jnp.int32)
                 Aj = jnp.asarray(pattern.cols, dtype=jnp.int32)
                 shape = pattern.shape
@@ -384,7 +402,8 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                 raise TypeError(
                     "`KLU.factorize_symbolic` requires a `BCOO`, `BCSR`, "
                     "`BCOOLinearOperator`, `BCSRLinearOperator`, "
-                    "`SparseJacobianLinearOperator`, or `SparseJacobianColoring`; "
+                    "`SparseJacobianLinearOperator`, "
+                    "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
                     f"got {type(sparsity).__name__}."
                 )
 

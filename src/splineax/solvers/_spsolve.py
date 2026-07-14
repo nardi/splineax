@@ -20,8 +20,9 @@ from lineax._solver.misc import (
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
-    SparseJacobianColoring,
+    JacobianColoring,
     SparseJacobianLinearOperator,
+    SparseJacobianLinearOperatorColoring,
 )
 from splineax.solvers._sparse import (
     AbstractSparseLinearSolver,
@@ -160,7 +161,8 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
         | BCOOLinearOperator
         | BCSRLinearOperator
         | SparseJacobianLinearOperator
-        | SparseJacobianColoring,
+        | SparseJacobianLinearOperatorColoring
+        | JacobianColoring,
     ) -> Iterator[_SpsolveSymbolicScope]:
         # No-op symbolic factorization: the sparsity is accepted for parity with KLU but
         # not used, since Spsolve cannot pre-analyze a sparsity pattern.

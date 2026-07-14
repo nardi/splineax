@@ -30,15 +30,11 @@ resolution-markers = [
 [[package]]
 name = "asdex"
 version = "0.5.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/nardi/asdex?rev=pytree_coloring#1c8bce7230b17cd1af022c85bef96526042a6aec" }
 dependencies = [
     { name = "jax" },
     { name = "numba" },
     { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/1e/b5/e849a82cb552fdafca22c05e00c703a110bec61ead5114320cf14be94bed/asdex-0.5.0.tar.gz", hash = "sha256:8e852006def06867ff4d337ae6cfc10fda489ba185567900f8c54ea9791f6371", size = 489469, upload-time = "2026-07-01T20:41:04.941Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c6/69/9de3a370dc4d960ab44b76e8c29a8b332948aa8fe89a82431a38ac6ec49b/asdex-0.5.0-py3-none-any.whl", hash = "sha256:4f8b543f77d9dea9c6ba68f3bf03c201123936ca8585f50b0476e2a3dd9089c8", size = 141541, upload-time = "2026-07-01T20:41:03.651Z" },
 ]
 
 [[package]]
@@ -1584,7 +1580,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "asdex", specifier = ">=0.5.0" },
+    { name = "asdex", git = "https://github.com/nardi/asdex?rev=pytree_coloring" },
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4" },
     { name = "jaxtyping", specifier = ">=0.2" },

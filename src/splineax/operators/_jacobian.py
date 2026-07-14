@@ -1,36 +1,29 @@
 """Sparse Jacobian operator backed by `asdex` sparsity detection and coloring.
 
-`lineax.JacobianLinearOperator` represents the Jacobian of a function densely. The
-operator here is its sparse analogue: the Jacobian's sparsity pattern and a matching
-row or column coloring are computed once (by `asdex`) and stored, so materialising the
-Jacobian at a point costs one JVP or VJP per color rather than one per column or row.
-The result is a `jax.experimental.sparse.BCOO` matrix that the splineax sparse solvers
-consume directly.
+`lineax.JacobianLinearOperator` represents the Jacobian of a function densely.
+The operator here is its sparse analogue: the Jacobian's sparsity pattern and a
+matching row or column coloring are computed once (by `asdex`) and stored, so
+materialising the Jacobian at a point costs one JVP or VJP per color rather than
+one per column or row. The result is a `jax.experimental.sparse.BCOO` matrix
+that the splineax sparse solvers consume directly.
 
-The sparsity pattern and coloring depend only on the traced computation graph of the
-function, not on the numerical values of its inputs. They are therefore computed at
-construction time and reused for every evaluation point.
+The sparsity pattern and coloring depend only on the traced computation graph of
+the function, not on the numerical values of its inputs. They are therefore
+computed at construction time and reused for every evaluation point. Two
+colorings of the same sparsity pattern flatten to identical treedefs, so a
+jitted function that accepts one compiles exactly once. The public entry point
+for creating and carrying colorings is [`splineax.JacobianColoring`][].
 """
 
-import dataclasses
-from collections.abc import Callable, Hashable
+from collections.abc import Callable
 from typing import Any, Literal, cast
 
+import asdex
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import jax.tree_util as jtu
 import numpy as np
 from asdex import ColoredPattern, SparsityPattern
-from asdex import (
-    jacobian_coloring as asdex_jacobian_coloring,
-)
-from asdex import (
-    jacobian_coloring_from_sparsity as asdex_jacobian_coloring_from_sparsity,
-)
-from asdex import (
-    jacobian_from_coloring as asdex_jacobian_from_coloring,
-)
 from jax.experimental.sparse import BCOO
 from jaxtyping import Array, ArrayLike, Inexact, PyTree
 from lineax import (
@@ -64,72 +57,117 @@ from ._bcoo import BCOOLinearOperator
 JacobianMode = Literal["fwd", "rev"]
 
 
-def wrap_in_jax_partial(fn: Callable | jtu.Partial) -> jtu.Partial:
-    return fn if isinstance(fn, jtu.Partial) else jtu.Partial(fn)
+class JacobianColoring(eqx.Module):
+    """A function-agnostic Jacobian sparsity coloring, backed by `asdex`.
 
+    A `JacobianColoring` wraps an `asdex.ColoredPattern`: a Jacobian sparsity pattern
+    together with a matching row or column coloring. The coloring is what lets the
+    Jacobian be materialised with one JVP or VJP per color rather than one per column
+    or row.
 
-@dataclasses.dataclass(frozen=True, eq=False)
-class _StaticColoring:
-    """Hashable holder for an `asdex.ColoredPattern`, used as an equinox static field.
+    This wrapper carries only the coloring, not any particular function or evaluation
+    point. Create one with either [`splineax.JacobianColoring.detect`][], which
+    detects the sparsity of a function and colors it, or
+    [`splineax.JacobianColoring.from_sparsity`][], which colors a sparsity pattern you
+    already know. Both run host-side (they use numpy, scipy, and graph coloring under
+    the hood), so build the coloring outside `jax.jit` and pass the finished object
+    in as an argument.
 
-    A `ColoredPattern` is a frozen dataclass whose fields are numpy arrays. Numpy
-    arrays do not define `__hash__`, and comparing them with `==` returns an array
-    rather than a bool, so the pattern can neither be hashed nor safely
-    equality-compared. It therefore must never appear bare in a pytree treedef, which
-    jax hashes and compares when looking up jit caches.
+    Because `asdex.ColoredPattern` is a registered JAX pytree, a `JacobianColoring`
+    is itself a pytree and can be threaded through jitted computations. Any two
+    colorings of the same sparsity pattern flatten to the same treedef, so a jitted
+    function that receives a `JacobianColoring` compiles once and stays cached even
+    when the coloring is regenerated from scratch.
 
-    Instead, this wrapper is keyed by what uniquely determines the coloring: the
-    identity of the function that was colored and the abstract structure (shapes and
-    dtypes) of the arguments it was traced with. Two wrappers with equal keys hold
-    the same coloring, so jit caches stay warm across operators rebuilt from the same
-    function at same-shaped points. The pattern itself takes no part in hashing or
-    equality.
+    To turn a coloring into a linear operator, either pass it as the `coloring`
+    argument of [`splineax.SparseJacobianLinearOperator`][] together with a function
+    and a point, or bind it to a specific function once with
+    [`splineax.SparseJacobianLinearOperatorColoring.from_jacobian_coloring`][] and
+    then call `operator_at` at many points.
     """
 
-    internal_coloring: ColoredPattern
-    """The wrapped asdex coloring. This is the payload carried along for sparse
-    materialisation and it takes no part in hashing or equality comparison."""
-
-    fn: jtu.Partial
-    """The function whose Jacobian was colored, as passed by the caller before any
-    closure conversion. Compared by object identity. The wrapper holds a strong
-    reference to it, so the identity stays valid (and cannot be recycled by the
-    garbage collector) for the wrapper's lifetime."""
-
-    abstract_arguments: Hashable
-    """A hashable description of the abstract arguments the coloring was computed
-    for. It consists of the pytree structure of `(x, args)` together with the tuple
-    of `jax.ShapeDtypeStruct` leaves, with weak dtypes stripped."""
+    coloring: ColoredPattern
+    """The wrapped asdex coloring, holding both the sparsity pattern and the row or
+    column coloring of it. Stored as an ordinary (dynamic) pytree field, so it can be
+    carried through jitted functions."""
 
     @classmethod
-    def create(
-        cls, internal_coloring: ColoredPattern, fn: Callable, x: Any, args: Any
-    ) -> "_StaticColoring":
-        """Builds the wrapper, deriving the hashable key from the arguments.
+    def detect(
+        cls,
+        fn: Callable,
+        x: Inexact[ArrayLike, " n"] | jax.ShapeDtypeStruct,
+        args: PyTree[Any] = None,
+        *,
+        mode: JacobianMode | None = None,
+    ) -> "JacobianColoring":
+        """Detects the Jacobian sparsity of `fn` and colors it.
 
-        Uses `jax.eval_shape` over `(x, args)`, so both concrete arrays and
-        `jax.ShapeDtypeStruct`s are accepted. The resulting pytree of structs is
-        flattened into a `(treedef, leaves)` tuple and the leaves are passed through
-        lineax's `strip_weak_dtype`, so that a weakly typed point and a strongly
-        typed point of the same shape and dtype produce equal keys.
+        Detection is structural: asdex traces the computation graph of `fn` and reads
+        off which outputs depend on which inputs, without evaluating any derivatives.
+        Only the shape and dtype of `x` matter, so a `jax.ShapeDtypeStruct` may be
+        passed in place of a concrete point. Detection and coloring run host-side, so
+        call this outside `jax.jit` and pass the resulting coloring in.
+
+        **Arguments:**
+
+        - `fn`: a function `(x, args) -> y`, where both `x` and `y` are
+            one-dimensional arrays of real dtype. Its Jacobian's sparsity is detected.
+        - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
+            Only its shape and dtype are used.
+        - `args`: extra arguments to `fn` that are not differentiated.
+        - `mode`: optional asdex coloring mode, either `"fwd"` (column coloring,
+            materialised with JVPs) or `"rev"` (row coloring, materialised with VJPs).
+            If not given, asdex picks based on the pattern.
         """
-        abstract = strip_weak_dtype(
-            jax.eval_shape(lambda point, extra: (point, extra), x, args)
-        )
-        leaves, structure = jtu.tree_flatten(abstract)
-        return cls(
-            internal_coloring, wrap_in_jax_partial(fn), (structure, tuple(leaves))
-        )
+        example_point = _example_point(x)
 
-    def __hash__(self) -> int:
-        return hash((id(self.fn), self.abstract_arguments))
+        def function_of_point(point: Array) -> Array:
+            return fn(point, args)
 
-    def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, _StaticColoring)
-            and self.fn is other.fn
-            and self.abstract_arguments == other.abstract_arguments
-        )
+        detected = asdex.jacobian_coloring(function_of_point, example_point, mode=mode)
+        return cls(detected)
+
+    @classmethod
+    def from_sparsity(
+        cls,
+        sparsity: SparsityPattern | np.ndarray | BCOO,
+        *,
+        mode: JacobianMode | None = None,
+    ) -> "JacobianColoring":
+        """Colors a known Jacobian sparsity pattern, skipping detection.
+
+        No function is needed, since the sparsity pattern already describes which
+        Jacobian entries are nonzero. Coloring runs host-side, so call this outside
+        `jax.jit` and pass the resulting coloring in.
+
+        **Arguments:**
+
+        - `sparsity`: the known sparsity pattern of the Jacobian, as an
+            `asdex.SparsityPattern`, a dense boolean mask, or a `BCOO` matrix.
+        - `mode`: optional asdex coloring mode, either `"fwd"` (column coloring,
+            materialised with JVPs) or `"rev"` (row coloring, materialised with VJPs).
+            If not given, asdex picks based on the pattern.
+        """
+        colored = asdex.jacobian_coloring_from_sparsity(sparsity, mode=mode)
+        return cls(colored)
+
+    @property
+    def sparsity(self) -> SparsityPattern:
+        """The `asdex.SparsityPattern` that was colored. The splineax solvers read the
+        row and column indices from here to pre-analyze the sparsity host-side."""
+        return self.coloring.sparsity
+
+    @property
+    def mode(self) -> str:
+        """The resolved asdex coloring mode, either `"fwd"` or `"rev"`. This is the
+        mode asdex chose, never the unresolved `None` the caller may have passed."""
+        return self.coloring.mode
+
+    @property
+    def num_colors(self) -> int:
+        """The number of colors, and so the number of JVPs or VJPs one Jacobian
+        materialisation costs."""
+        return self.coloring.num_colors
 
 
 class SparseJacobianLinearOperator(AbstractLinearOperator):
@@ -143,15 +181,22 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
     hand the operator straight to a splineax sparse solver, which materialises
     it through `lineax.materialise`.
 
+    The coloring is stored as an `asdex.ColoredPattern`, which is a registered JAX
+    pytree, so the operator carries it as an ordinary (dynamic) field and the whole
+    operator can be passed as an argument into a jitted function. A precomputed
+    coloring may be supplied through the `coloring` argument (either an
+    `asdex.ColoredPattern` or a [`splineax.JacobianColoring`][]) to skip detection,
+    which is what makes it cheap to build many operators for the same sparsity.
+
     Only real dtypes are supported. To build many operators for the same
     function at different points without repeating sparsity detection, use
-    [`splineax.SparseJacobianColoring`][].
+    [`splineax.SparseJacobianLinearOperatorColoring`][].
     """
 
-    fn: jtu.Partial
+    fn: Callable
     x: Inexact[Array, " n"]
     args: PyTree[Any]
-    coloring: _StaticColoring = eqx.field(static=True)
+    coloring: ColoredPattern
     transposed: bool = eqx.field(static=True)
     _in_structure: jax.ShapeDtypeStruct = eqx.field(static=True)
     _out_structure: jax.ShapeDtypeStruct = eqx.field(static=True)
@@ -164,7 +209,7 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         args: PyTree[Any] = None,
         *,
         sparsity: SparsityPattern | np.ndarray | BCOO | None = None,
-        coloring: ColoredPattern | _StaticColoring | None = None,
+        coloring: ColoredPattern | JacobianColoring | None = None,
         mode: JacobianMode | None = None,
         tags: object | frozenset[object] = (),
         transposed: bool = False,
@@ -180,9 +225,9 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         - `sparsity`: optional known sparsity pattern of the Jacobian, as an
             `asdex.SparsityPattern`, a dense boolean mask, or a `BCOO` matrix.
             Skips sparsity detection (the pattern is still colored here).
-        - `coloring`: optional precomputed `asdex.ColoredPattern`. Skips both
-            sparsity detection and coloring. At most one of `sparsity` and
-            `coloring` may be given.
+        - `coloring`: optional precomputed coloring, either an `asdex.ColoredPattern`
+            or a [`splineax.JacobianColoring`][]. Skips both sparsity detection and
+            coloring. At most one of `sparsity` and `coloring` may be given.
         - `mode`: optional asdex coloring mode, either `"fwd"` (column coloring,
             materialised with JVPs) or `"rev"` (row coloring, materialised with
             VJPs). If not given, asdex picks based on the pattern.
@@ -192,13 +237,8 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
             these tags are wrong.
 
         `transposed` and `closure_convert` are internal arguments, used by
-        `transpose()` and [`splineax.SparseJacobianColoring`][].
+        `transpose()` and [`splineax.SparseJacobianLinearOperatorColoring`][].
         """
-        # Keep the caller's function around for keying the coloring. Closure
-        # conversion below produces a fresh object per call, so the original
-        # identity is the stable one.
-        unconverted_fn = wrap_in_jax_partial(fn)
-
         self.x = inexact_asarray(x)
         if jnp.issubdtype(self.x.dtype, jnp.complexfloating):
             raise TypeError(
@@ -212,7 +252,7 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
             )
         if closure_convert:
             fn = eqx.filter_closure_convert(fn, self.x, args)
-        self.fn = wrap_in_jax_partial(fn)
+        self.fn = fn
         self.args = args
         self.tags = _frozenset(tags)
         self.transposed = transposed
@@ -220,30 +260,30 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         def function_of_point(point: Array) -> Array:
             return fn(point, args)
 
+        # Resolve the coloring down to a bare `asdex.ColoredPattern`, which is what
+        # is stored and later handed to `asdex.jacobian_from_coloring`. A
+        # `JacobianColoring` (passed by `transpose()`, `operator_at()`, or the caller)
+        # is unwrapped to its inner pattern. Because the pattern is a pytree, storing
+        # it directly is enough for jit caches to stay warm: any two colorings of the
+        # same sparsity flatten to the same treedef.
         match (coloring, sparsity):
-            case (_StaticColoring() as wrapped, None):
-                # `transpose()` and `SparseJacobianColoring.operator_at()` pass an existing
-                # wrapper through, preserving its key and thereby the jit cache
-                # identity of the operator.
-                resolved = wrapped
+            case (JacobianColoring() as wrapper, None):
+                self.coloring = wrapper.coloring
             case (ColoredPattern() as pattern, None):
-                resolved = _StaticColoring.create(pattern, unconverted_fn, self.x, args)
+                self.coloring = pattern
             case (None, None):
-                detected = asdex_jacobian_coloring(function_of_point, self.x, mode=mode)
-                resolved = _StaticColoring.create(
-                    detected, unconverted_fn, self.x, args
+                self.coloring = asdex.jacobian_coloring(
+                    function_of_point, self.x, mode=mode
                 )
             case (None, known_sparsity):
-                colored = asdex_jacobian_coloring_from_sparsity(
+                self.coloring = asdex.jacobian_coloring_from_sparsity(
                     known_sparsity, mode=mode
                 )
-                resolved = _StaticColoring.create(colored, unconverted_fn, self.x, args)
             case _:
                 raise TypeError(
-                    "Pass at most one of `coloring` and `sparsity`, where "
-                    "`coloring` must be an `asdex.ColoredPattern`."
+                    "Pass at most one of `coloring` and `sparsity`, where `coloring` "
+                    "must be an `asdex.ColoredPattern` or a `splineax.JacobianColoring`."
                 )
-        self.coloring = resolved
 
         forward_in_structure = strip_weak_dtype(jax.eval_shape(lambda: self.x))
         forward_out_structure = strip_weak_dtype(
@@ -277,9 +317,9 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         per color of the precomputed coloring."""
         jacobian = cast(
             BCOO,
-            asdex_jacobian_from_coloring(
+            asdex.jacobian_from_coloring(
                 self._function_of_point(),
-                self.coloring.internal_coloring,
+                self.coloring,
                 "bcoo",
             )(self.x),
         )
@@ -295,7 +335,7 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         if is_symmetric(self):
             return self
         # Stay sparse by flipping the transpose flag, reusing the function, the
-        # point and the same coloring wrapper (so the jit cache identity is
+        # point and the same coloring pattern (so the jit cache identity is
         # preserved). `mv` switches between JVP and VJP and `as_bcoo` transposes
         # the materialised Jacobian.
         return SparseJacobianLinearOperator(
@@ -315,17 +355,23 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         return self._out_structure
 
 
-class SparseJacobianColoring(eqx.Module):
-    """A precomputed Jacobian sparsity coloring for a function, reusable across
+class SparseJacobianLinearOperatorColoring(eqx.Module):
+    """A [`splineax.JacobianColoring`][] bound to a specific function, reusable across
     evaluation points.
 
-    Build one with [`splineax.SparseJacobianColoring.detect`][] or
-    [`splineax.SparseJacobianColoring.from_sparsity`][], then call
-    [`splineax.SparseJacobianColoring.operator_at`][] to obtain a
-    [`splineax.SparseJacobianLinearOperator`][] at any point without repeating
-    sparsity detection or coloring. All operators built from one instance share the
-    same closure-converted function and coloring key, so passing them through the
-    same jitted computation compiles only once.
+    Where a [`splineax.JacobianColoring`][] carries only the coloring, this class also
+    holds the (closure-converted) function whose Jacobian was colored. That pairing is
+    what a [`splineax.SparseJacobianLinearOperator`][] needs, so
+    [`splineax.SparseJacobianLinearOperatorColoring.operator_at`][] can produce an
+    operator at any point without repeating sparsity detection or coloring.
+
+    Build one with [`splineax.SparseJacobianLinearOperatorColoring.detect`][] or
+    [`splineax.SparseJacobianLinearOperatorColoring.from_sparsity`][], or from an
+    existing [`splineax.JacobianColoring`][] with
+    [`splineax.SparseJacobianLinearOperatorColoring.from_jacobian_coloring`][]. All
+    operators built from one instance share the same closure-converted function and the
+    same coloring pattern, so passing them through the same jitted computation compiles
+    only once.
 
     The coloring is valid for any `x` and `args` of the same abstract structure
     (shapes and dtypes) as those it was computed with. asdex guarantees that the
@@ -333,14 +379,44 @@ class SparseJacobianColoring(eqx.Module):
     values, so reusing the coloring at other points is always sound.
     """
 
-    fn: jtu.Partial
+    fn: Callable
     """The closure-converted function whose Jacobian was colored. Shared by every
     operator built through `operator_at`, so their pytree structures compare
     equal."""
 
-    coloring: _StaticColoring = eqx.field(static=True)
-    """The detected and colored sparsity pattern, wrapped so it can be carried as an
-    equinox static field."""
+    coloring: JacobianColoring
+    """The function-agnostic coloring. Carried as an ordinary (dynamic) pytree field,
+    since `JacobianColoring` wraps a pytree `asdex.ColoredPattern`."""
+
+    @classmethod
+    def from_jacobian_coloring(
+        cls,
+        coloring: JacobianColoring,
+        fn: Callable,
+        x: Inexact[ArrayLike, " n"] | jax.ShapeDtypeStruct,
+        args: PyTree[Any] = None,
+    ) -> "SparseJacobianLinearOperatorColoring":
+        """Binds an existing [`splineax.JacobianColoring`][] to a function.
+
+        This is the bridge from a bare coloring to an operator factory. The coloring
+        may have come from [`splineax.JacobianColoring.detect`][] on this same
+        function or from [`splineax.JacobianColoring.from_sparsity`][] on a pattern
+        you know matches `fn`. The function is closure-converted here (once), and the
+        result reused by every `operator_at` call.
+
+        **Arguments:**
+
+        - `coloring`: the coloring to bind, as a [`splineax.JacobianColoring`][].
+        - `fn`: a function `(x, args) -> y`, where both `x` and `y` are
+            one-dimensional arrays of real dtype. Its Jacobian must have the sparsity
+            the coloring describes.
+        - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
+            Only its shape and dtype matter here, used to closure-convert `fn`.
+        - `args`: extra arguments to `fn` that are not differentiated.
+        """
+        example_point = _example_point(x)
+        converted_fn = eqx.filter_closure_convert(fn, example_point, args)
+        return cls(converted_fn, coloring)
 
     @classmethod
     def detect(
@@ -350,8 +426,12 @@ class SparseJacobianColoring(eqx.Module):
         args: PyTree[Any] = None,
         *,
         mode: JacobianMode | None = None,
-    ) -> "SparseJacobianColoring":
-        """Detects the Jacobian sparsity of `fn` and colors it.
+    ) -> "SparseJacobianLinearOperatorColoring":
+        """Detects the Jacobian sparsity of `fn`, colors it, and binds it to `fn`.
+
+        A convenience wrapper equivalent to
+        [`splineax.JacobianColoring.detect`][] followed by
+        [`splineax.SparseJacobianLinearOperatorColoring.from_jacobian_coloring`][].
 
         **Arguments:**
 
@@ -362,16 +442,8 @@ class SparseJacobianColoring(eqx.Module):
         - `args`: extra arguments to `fn` that are not differentiated.
         - `mode`: optional asdex coloring mode, `"fwd"` or `"rev"`.
         """
-        example_point = _example_point(x)
-        converted_fn = wrap_in_jax_partial(
-            eqx.filter_closure_convert(fn, example_point, args)
-        )
-
-        def function_of_point(point: Array) -> Array:
-            return converted_fn(point, args)
-
-        detected = asdex_jacobian_coloring(function_of_point, example_point, mode=mode)
-        return cls(converted_fn, _StaticColoring.create(detected, fn, x, args))
+        jacobian_coloring = JacobianColoring.detect(fn, x, args, mode=mode)
+        return cls.from_jacobian_coloring(jacobian_coloring, fn, x, args)
 
     @classmethod
     def from_sparsity(
@@ -382,27 +454,27 @@ class SparseJacobianColoring(eqx.Module):
         args: PyTree[Any] = None,
         *,
         mode: JacobianMode | None = None,
-    ) -> "SparseJacobianColoring":
-        """Colors a known Jacobian sparsity pattern of `fn`, skipping detection.
+    ) -> "SparseJacobianLinearOperatorColoring":
+        """Colors a known Jacobian sparsity pattern of `fn`, skipping detection, and
+        binds it to `fn`.
+
+        A convenience wrapper equivalent to
+        [`splineax.JacobianColoring.from_sparsity`][] followed by
+        [`splineax.SparseJacobianLinearOperatorColoring.from_jacobian_coloring`][].
 
         **Arguments:**
 
         - `fn`: a function `(x, args) -> y`, where both `x` and `y` are
             one-dimensional arrays of real dtype.
         - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
-            Not used for detection, but required to key the coloring for jit
-            caching and to closure-convert `fn`.
+            Not used for detection, but required to closure-convert `fn`.
         - `sparsity`: the known sparsity pattern of the Jacobian, as an
             `asdex.SparsityPattern`, a dense boolean mask, or a `BCOO` matrix.
         - `args`: extra arguments to `fn` that are not differentiated.
         - `mode`: optional asdex coloring mode, `"fwd"` or `"rev"`.
         """
-        example_point = _example_point(x)
-        converted_fn = wrap_in_jax_partial(
-            eqx.filter_closure_convert(fn, example_point, args)
-        )
-        colored = asdex_jacobian_coloring_from_sparsity(sparsity, mode=mode)
-        return cls(converted_fn, _StaticColoring.create(colored, fn, x, args))
+        jacobian_coloring = JacobianColoring.from_sparsity(sparsity, mode=mode)
+        return cls.from_jacobian_coloring(jacobian_coloring, fn, x, args)
 
     def operator_at(
         self,

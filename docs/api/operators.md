@@ -12,4 +12,8 @@
 
 ---
 
-::: splineax.SparseJacobianColoring
+::: splineax.JacobianColoring
+
+---
+
+::: splineax.SparseJacobianLinearOperatorColoring

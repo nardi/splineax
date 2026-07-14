@@ -75,10 +75,10 @@ with solver.factorize_symbolic(sparsity) as scope:
 ```
 
 `factorize_symbolic` accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`,
-`BCSRLinearOperator`, `SparseJacobianLinearOperator`, or `SparseJacobianColoring`.
-Only its sparsity pattern is read. For the Jacobian operator and coloring, the
-pattern comes from the precomputed sparsity, without materialising the
-Jacobian numerically.
+`BCSRLinearOperator`, `SparseJacobianLinearOperator`,
+`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`. Only its sparsity
+pattern is read. For the Jacobian operator and the two coloring wrappers, the pattern
+comes from the precomputed sparsity, without materialising the Jacobian numerically.
 
 ## How the states chain
 
