@@ -1,15 +1,17 @@
 """Tests for `AutoSparseLinearSolver`, the sparse-solver Protocols, and the
 no-op factorization API on `Spsolve`.
 
-`AutoSparseLinearSolver` selects `KLU` on CPU and `Spsolve` otherwise, and exposes
-the same factorization API as `KLU` so it can be substituted verbatim. The generic
-solve-correctness suite (parametrised over all three solvers) lives in
-`test_solvers.py`; this module covers Auto-specific dispatch, Protocol conformance,
-and the Spsolve no-op factorization behaviour.
+`AutoSparseLinearSolver` selects `KLU` on CPU when x64 is enabled, since `klujax` is
+double precision only, and `Spsolve` otherwise (CPU without x64, or any other
+platform). It exposes the same factorization API as `KLU` so it can be substituted
+verbatim. The generic solve-correctness suite (parametrised over all three solvers)
+lives in `test_solvers.py`; this module covers Auto-specific dispatch, Protocol
+conformance, and the Spsolve no-op factorization behaviour.
 """
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
@@ -35,24 +37,44 @@ from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 # ---------------------------------------------------------------------------
 
 
-def test_select_solver_defaults_to_klu_on_cpu(
+def test_select_solver_defaults_to_klu_on_cpu_with_x64(
     make_operator: OperatorFactory,
 ) -> None:
-    """With no override, `AutoSparseLinearSolver` selects `KLU` on the CPU test platform."""
+    """With no override, `AutoSparseLinearSolver` selects `KLU` on the CPU test platform
+    when x64 is enabled."""
     operator = make_operator(SQUARE_MATRIX)
-    assert isinstance(AutoSparseLinearSolver().select_solver(operator), KLU)
+    with jax.enable_x64(True):
+        assert isinstance(AutoSparseLinearSolver().select_solver(operator), KLU)
+
+
+def test_select_solver_falls_back_to_spsolve_on_cpu_without_x64(
+    make_operator: OperatorFactory,
+) -> None:
+    """On CPU with x64 disabled, `AutoSparseLinearSolver` falls back to `Spsolve`, since
+    `KLU` (via klujax) is double precision only."""
+    operator = make_operator(SQUARE_MATRIX)
+    with jax.enable_x64(False):
+        assert isinstance(AutoSparseLinearSolver().select_solver(operator), Spsolve)
 
 
 def test_select_solver_platform_override(make_operator: OperatorFactory) -> None:
     """An explicit `platform` override forces the corresponding solver, without running
     a solve (so no real GPU is required to check the non-CPU branch)."""
     operator = make_operator(SQUARE_MATRIX)
-    assert isinstance(
-        AutoSparseLinearSolver(platform="cpu").select_solver(operator), KLU
-    )
-    assert isinstance(
-        AutoSparseLinearSolver(platform="gpu").select_solver(operator), Spsolve
-    )
+    with jax.enable_x64(True):
+        assert isinstance(
+            AutoSparseLinearSolver(platform="cpu").select_solver(operator), KLU
+        )
+        assert isinstance(
+            AutoSparseLinearSolver(platform="gpu").select_solver(operator), Spsolve
+        )
+    with jax.enable_x64(False):
+        assert isinstance(
+            AutoSparseLinearSolver(platform="cpu").select_solver(operator), Spsolve
+        )
+        assert isinstance(
+            AutoSparseLinearSolver(platform="gpu").select_solver(operator), Spsolve
+        )
 
 
 # ---------------------------------------------------------------------------

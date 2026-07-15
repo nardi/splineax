@@ -32,26 +32,31 @@ class AutoSparseLinearSolver(
         SparseBasicState | SparseSymbolicState | SparseNumericState
     ]
 ):
-    """Selects a sparse direct solver based on the JAX platform.
+    """Selects a sparse direct solver based on the JAX platform and precision.
 
-    Dispatches to `KLU` on CPU (SuiteSparse direct solve with factorization reuse) and
-    to `Spsolve` on any other backend. Exposes the same factorization API as `KLU`
-    (`factorize`, `factorize_symbolic`), so it can be substituted for `KLU` verbatim; on
-    non-CPU backends these degrade to no-ops via `Spsolve`.
+    Dispatches to `KLU` (SuiteSparse direct solve with factorization reuse) only on CPU
+    with x64 enabled, since `klujax` is double precision only. On any other backend, or
+    on CPU when x64 is disabled, it dispatches to `Spsolve`, which works in single or
+    double precision and on any backend. Exposes the same factorization API as `KLU`
+    (`factorize`, `factorize_symbolic`), so it can be substituted for `KLU` verbatim.
+    When it dispatches to `Spsolve`, these factorization calls degrade to no-ops.
     """
 
     platform: str | None = None
     """Platform to select for. If None, `jax.default_backend()` is used. Set to e.g.
-    "cpu", "gpu", or "tpu" to override the choice explicitly."""
+    "cpu", "gpu", or "tpu" to override the choice explicitly. `KLU` is chosen only when
+    this resolves to "cpu" and x64 is enabled, otherwise `Spsolve` is chosen."""
 
     @cached_property
     def _chosen_solver(self) -> KLU | Spsolve:
         platform = self.platform if self.platform is not None else jax.default_backend()
-        match platform:
-            case "cpu":
-                return KLU()
-            case _:
-                return Spsolve()
+        x64_enabled = jax.config.read("jax_enable_x64")
+        # KLU (SuiteSparse via klujax) is double precision only, so it is only a valid
+        # choice on CPU when x64 is enabled. Everything else falls back to Spsolve,
+        # which works in single or double precision and on any backend.
+        if platform == "cpu" and x64_enabled:
+            return KLU()
+        return Spsolve()
 
     def select_solver(self, operator: AbstractLinearOperator) -> AbstractLinearSolver:
         """Check which solver `AutoSparseLinearSolver` will dispatch to.
@@ -104,5 +109,6 @@ class AutoSparseLinearSolver(
 AutoSparseLinearSolver.__init__.__doc__ = """**Arguments:**
 
 - `platform`: optional platform string ("cpu", "gpu", "tpu") overriding the
-    automatically detected `jax.default_backend()`.
+    automatically detected `jax.default_backend()`. `KLU` is chosen only when this
+    resolves to "cpu" and x64 is enabled, otherwise `Spsolve` is chosen.
 """

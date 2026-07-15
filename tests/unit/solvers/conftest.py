@@ -85,6 +85,7 @@ def make_operator(request: pytest.FixtureRequest) -> OperatorFactory:
 def solver(request: pytest.FixtureRequest) -> lx.AbstractLinearSolver:
     """Yields an instance of each sparse direct solver under test.
 
-    `AutoSparseLinearSolver` dispatches to `KLU` on the (CPU) test platform.
+    `AutoSparseLinearSolver` dispatches to `KLU` on the (CPU) test platform when x64 is
+    enabled, otherwise to `Spsolve`.
     """
     return request.param()
