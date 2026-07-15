@@ -1,6 +1,6 @@
 [project]
 name = "splineax"
-version = "0.1.1"
+version = "0.2.0"
 description = "Sparse linear operators and solvers for Lineax"
 readme = "README.md"
 authors = [{ name = "Nardi Lam", email = "mail@nardilam.nl" }]
