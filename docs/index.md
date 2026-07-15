@@ -27,7 +27,7 @@ It provides:
 ## Installation
 
 ```bash
-pip install git+https://github.com/nardi/splineax.git@v0.1.1
+pip install splineax
 ```
 
 ## Quick example

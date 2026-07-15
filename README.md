@@ -15,7 +15,7 @@ plugs straight into `lineax.linear_solve`. It also interfaces with [asdex](https
 ## Installation
 
 ```bash
-pip install git+https://github.com/nardi/splineax.git@v0.1.1
+pip install splineax
 ```
 
 ## Example
