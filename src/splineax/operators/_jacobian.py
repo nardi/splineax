@@ -276,6 +276,7 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
                     function_of_point, self.x, mode=mode
                 )
             case (None, known_sparsity):
+                assert known_sparsity is not None
                 self.coloring = asdex.jacobian_coloring_from_sparsity(
                     known_sparsity, mode=mode
                 )

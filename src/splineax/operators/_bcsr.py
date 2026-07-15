@@ -61,7 +61,7 @@ class BCSRLinearOperator(AbstractLinearOperator):
         if is_symmetric(self):
             return self
         # `BCSR.transpose` is not implemented in JAX; round-trip through `BCOO`.
-        matrix_T_bcoo: BCOO = self.matrix.to_bcoo().T  # type: ignore
+        matrix_T_bcoo: BCOO = self.matrix.to_bcoo().T
         matrix_T = BCSR.from_bcoo(matrix_T_bcoo)
         return BCSRLinearOperator(matrix_T, transpose_tags(self.tags))
 

@@ -88,8 +88,8 @@ def _spy_frees() -> Generator[tuple[list[int], list[int]], None, None]:
     # newly-created `KLUHandleManager` (which captures `free_callable` from
     # the module at construction time inside `klujax.analyze` / `klujax.factor`)
     # see the spy.
-    klu.free_symbolic = spy_free_symbolic
-    klu.free_numeric = spy_free_numeric
+    klu.free_symbolic = spy_free_symbolic  # type: ignore
+    klu.free_numeric = spy_free_numeric  # type: ignore
     try:
         yield freed_symbolic_handle_ids, freed_numeric_handle_ids
     finally:

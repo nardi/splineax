@@ -59,7 +59,7 @@ class BCOOLinearOperator(AbstractLinearOperator):
     def transpose(self) -> "BCOOLinearOperator":
         if is_symmetric(self):
             return self
-        matrix_T: BCOO = self.matrix.T  # type: ignore
+        matrix_T: BCOO = self.matrix.T
         return BCOOLinearOperator(matrix_T, transpose_tags(self.tags))
 
     def in_structure(self) -> jax.ShapeDtypeStruct:
