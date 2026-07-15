@@ -32,6 +32,9 @@ from splineax import (
     Spsolve,
 )
 
+# KLU solver requires 64-bit mode:
+jax.config.update("jax_enable_x64", True)
+
 
 def elementwise_function(x: jax.Array, args: object) -> jax.Array:
     """An elementwise map, whose Jacobian is diagonal."""

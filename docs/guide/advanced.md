@@ -25,11 +25,15 @@ Use `solver.factorize(operator)` as a context manager. Inside the block the oper
 factorized once; every `linear_solve` that passes the yielded `state` reuses it.
 
 ```python
+import jax
 import jax.numpy as jnp
 import lineax as lx
 from jax.experimental.sparse import BCOO
 
 import splineax
+
+# KLU solver requires 64-bit mode:
+jax.config.update("jax_enable_x64", True)
 
 dense = jnp.array(
     [

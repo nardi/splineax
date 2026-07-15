@@ -91,7 +91,11 @@ The operator can be handed straight to any splineax solver, which internally mat
 through `lineax.materialise`:
 
 ```{.python continuation}
+import jax
 import lineax as lx
+
+# KLU solver requires 64-bit mode:
+jax.config.update("jax_enable_x64", True)
 
 b = jnp.arange(1.0, 6.0)
 solution = lx.linear_solve(operator, b, solver=splineax.KLU()).value

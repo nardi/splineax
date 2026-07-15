@@ -311,506 +311,6 @@ wheels = [
 ]
 
 [[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-macosx_11_0_arm64.whl" }
-resolution-markers = [
-    "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "jaxlib", marker = "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "jaxtyping", marker = "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "numpy", marker = "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:a074939c3f2419e1e6bd13224c871a059845ecf1e4cf63709ed1694c231aa5c6" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" }
-resolution-markers = [
-    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "jaxlib", marker = "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "jaxtyping", marker = "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "numpy", marker = "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:39458f81a6900811110067baa77c707de51d75ba1de95a91fc041226ee369dc8" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" }
-resolution-markers = [
-    "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "jaxlib", marker = "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "jaxtyping", marker = "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "numpy", marker = "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c7aefafd0c15460b827c988921de8d1e66873f5fcda4cde1e2336cb97b06fbdc" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-win_amd64.whl" }
-resolution-markers = [
-    "python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "jaxlib", marker = "python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "jaxtyping", marker = "python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "numpy", marker = "python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-win_amd64.whl", hash = "sha256:b0997242f0d251fa09721811967ad293be81f215ac8c9ae43016f0d17228b27a" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-win_arm64.whl" }
-resolution-markers = [
-    "python_full_version < '3.12' and platform_machine == 'ARM64' and sys_platform == 'win32'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version < '3.12' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "jaxlib", marker = "python_full_version < '3.12' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "jaxtyping", marker = "python_full_version < '3.12' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "numpy", marker = "python_full_version < '3.12' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-win_arm64.whl", hash = "sha256:5d66f41c361c41eebf670d3717d3393267dc0f8c998657e9ef39bdda5a99cbad" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-macosx_11_0_arm64.whl" }
-resolution-markers = [
-    "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "jaxlib", marker = "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "numpy", marker = "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:f8c9bb4b9e1c63bde7c496fcdacab02c52167eb88bf2c466abc6c7baa80b7977" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" }
-resolution-markers = [
-    "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "jaxlib", marker = "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "numpy", marker = "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:3efae3b6f86c46665c2d04a0a2e1c6a5003de3c6dd7a7977a7f1ea778bf530d6" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" }
-resolution-markers = [
-    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "jaxlib", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "numpy", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a5c04d475928816fc2d46d3a8c524b5c8d212a0621ffa2e8d970fc41250adb10" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-win_amd64.whl" }
-resolution-markers = [
-    "python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "jaxlib", marker = "python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "numpy", marker = "python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-win_amd64.whl", hash = "sha256:c77b16bfc32ce52dbfa318a4ab94aa7ab23a7b86cc69bc18742dbc41ae469133" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-win_arm64.whl" }
-resolution-markers = [
-    "python_full_version == '3.12.*' and platform_machine == 'ARM64' and sys_platform == 'win32'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.12.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "jaxlib", marker = "python_full_version == '3.12.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.12.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "numpy", marker = "python_full_version == '3.12.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-win_arm64.whl", hash = "sha256:ab850f4b30a04a4b651e22615b889e83a87d74ec8109b33d18315b46740e4562" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-macosx_11_0_arm64.whl" }
-resolution-markers = [
-    "python_full_version == '3.13.*' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.13.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "jaxlib", marker = "python_full_version == '3.13.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.13.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "numpy", marker = "python_full_version == '3.13.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:d7843a05e06313e5a95cd0939ed23b426edd9e302eb11ba5e6457f4c14644c71" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" }
-resolution-markers = [
-    "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "jaxlib", marker = "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "numpy", marker = "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:8a14ec2ea098cf5f7f1188f05eafe150549b36e829ef3d9f3f19e3957fe37e79" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" }
-resolution-markers = [
-    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "jaxlib", marker = "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "numpy", marker = "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:14fba8dd15397bc53c751e454120a6af6c6215c36299aed16753ee772581922a" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-win_amd64.whl" }
-resolution-markers = [
-    "python_full_version == '3.13.*' and platform_machine == 'AMD64' and sys_platform == 'win32'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.13.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "jaxlib", marker = "python_full_version == '3.13.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.13.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "numpy", marker = "python_full_version == '3.13.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-win_amd64.whl", hash = "sha256:8526fce0e489cd6ad305fef1a64e2dc61af109d632a86852b74106e8a8e4ef20" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-win_arm64.whl" }
-resolution-markers = [
-    "python_full_version == '3.13.*' and platform_machine == 'ARM64' and sys_platform == 'win32'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.13.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "jaxlib", marker = "python_full_version == '3.13.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.13.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "numpy", marker = "python_full_version == '3.13.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-win_arm64.whl", hash = "sha256:6985665eab74a9df3092cd83fa0bef913e3dedab0680bda85428899399c525d7" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-macosx_11_0_arm64.whl" }
-resolution-markers = [
-    "python_full_version == '3.14.*' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.14.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "jaxlib", marker = "python_full_version == '3.14.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.14.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "numpy", marker = "python_full_version == '3.14.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:b3ec1ebb0062a88143f84104872db5f093c1bad164fd207d535428d886098a54" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" }
-resolution-markers = [
-    "python_full_version == '3.14.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.14.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "jaxlib", marker = "python_full_version == '3.14.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.14.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "numpy", marker = "python_full_version == '3.14.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:7d5c39a4c64953e64e61b71d15a8d13519a5f05b23c0890d38b02dedaaad39d3" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" }
-resolution-markers = [
-    "python_full_version == '3.14.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.14.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "jaxlib", marker = "python_full_version == '3.14.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.14.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "numpy", marker = "python_full_version == '3.14.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:45939658b8a32416284796306f327bece5ec66ad33c90716427fec658907ab89" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-win_amd64.whl" }
-resolution-markers = [
-    "python_full_version == '3.14.*' and platform_machine == 'AMD64' and sys_platform == 'win32'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.14.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "jaxlib", marker = "python_full_version == '3.14.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.14.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "numpy", marker = "python_full_version == '3.14.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-win_amd64.whl", hash = "sha256:f997d247cad670045db44e074ed65e0368c82e0db04ca0b2ff84999cfe129404" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
-name = "klujax"
-version = "0.5.0+gha8.d715101"
-source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-win_arm64.whl" }
-resolution-markers = [
-    "python_full_version == '3.14.*' and platform_machine == 'ARM64' and sys_platform == 'win32'",
-]
-dependencies = [
-    { name = "jax", marker = "python_full_version == '3.14.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "jaxlib", marker = "python_full_version == '3.14.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "jaxtyping", marker = "python_full_version == '3.14.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "numpy", marker = "python_full_version == '3.14.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-]
-wheels = [
-    { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-win_arm64.whl", hash = "sha256:76f6f4ed10a8652ac17c7627f4a637f912fbc368ed83364df307776b471702e1" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.5.0" },
-    { name = "jaxlib", specifier = ">=0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.38" },
-    { name = "numpy", specifier = ">=2" },
-]
-
-[[package]]
 name = "lineax"
 version = "0.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1550,27 +1050,8 @@ dependencies = [
     { name = "equinox" },
     { name = "jax" },
     { name = "jaxtyping" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-macosx_11_0_arm64.whl" }, marker = "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" }, marker = "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" }, marker = "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-win_amd64.whl" }, marker = "python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-win_arm64.whl" }, marker = "python_full_version < '3.12' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-macosx_11_0_arm64.whl" }, marker = "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" }, marker = "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" }, marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-win_amd64.whl" }, marker = "python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-win_arm64.whl" }, marker = "python_full_version == '3.12.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-macosx_11_0_arm64.whl" }, marker = "python_full_version == '3.13.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" }, marker = "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" }, marker = "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-win_amd64.whl" }, marker = "python_full_version == '3.13.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-win_arm64.whl" }, marker = "python_full_version == '3.13.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-macosx_11_0_arm64.whl" }, marker = "python_full_version == '3.14.*' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" }, marker = "python_full_version == '3.14.*' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" }, marker = "python_full_version == '3.14.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-win_amd64.whl" }, marker = "python_full_version == '3.14.*' and platform_machine == 'AMD64' and sys_platform == 'win32'" },
-    { name = "klujax", version = "0.5.0+gha8.d715101", source = { url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-win_arm64.whl" }, marker = "python_full_version == '3.14.*' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
     { name = "lineax" },
+    { name = "splineax-klujax" },
 ]
 
 [package.dev-dependencies]
@@ -1589,27 +1070,8 @@ requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4" },
     { name = "jaxtyping", specifier = ">=0.2" },
-    { name = "klujax", marker = "python_full_version == '3.11.*' and platform_machine == 'arm64' and sys_platform == 'darwin'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-macosx_11_0_arm64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-macosx_11_0_arm64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.13.*' and platform_machine == 'arm64' and sys_platform == 'darwin'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-macosx_11_0_arm64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.14.*' and platform_machine == 'arm64' and sys_platform == 'darwin'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-macosx_11_0_arm64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.11.*' and platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.14.*' and platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.14.*' and platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.11.*' and platform_machine == 'AMD64' and sys_platform == 'win32'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-win_amd64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-win_amd64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.13.*' and platform_machine == 'AMD64' and sys_platform == 'win32'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-win_amd64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.14.*' and platform_machine == 'AMD64' and sys_platform == 'win32'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-win_amd64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.11.*' and platform_machine == 'ARM64' and sys_platform == 'win32'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp311-cp311-win_arm64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.12.*' and platform_machine == 'ARM64' and sys_platform == 'win32'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp312-cp312-win_arm64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.13.*' and platform_machine == 'ARM64' and sys_platform == 'win32'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp313-cp313-win_arm64.whl" },
-    { name = "klujax", marker = "python_full_version == '3.14.*' and platform_machine == 'ARM64' and sys_platform == 'win32'", url = "https://github.com/nardi/klujax/releases/download/dispatch-split_solve_fixes-d715101/klujax-0.5.0+gha8.d715101-cp314-cp314-win_arm64.whl" },
     { name = "lineax", specifier = ">=0.1.1" },
+    { name = "splineax-klujax", specifier = ">=0.5.0.post1" },
 ]
 
 [package.metadata.requires-dev]
@@ -1620,6 +1082,39 @@ dev = [
     { name = "pytest-markdown-docs", specifier = ">=0.9.2" },
     { name = "ruff", specifier = ">=0.15.17" },
     { name = "ty", specifier = ">=0.0.59" },
+]
+
+[[package]]
+name = "splineax-klujax"
+version = "0.5.0.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jax" },
+    { name = "jaxlib" },
+    { name = "jaxtyping" },
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/a0/7e95de5bbfd75c9ae432310491d59fe04761653bbd257727227c0d15b57d/splineax_klujax-0.5.0.post1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:117a96f3424cb80824cd2d446a068d6634138d40122b48ac152c4e72cf5b2f27", size = 255315, upload-time = "2026-07-15T21:30:01.872Z" },
+    { url = "https://files.pythonhosted.org/packages/48/5f/de17a94c897543a1651f0fd6d58f1da0a7e51d1e67ced4d88a62dc5aab11/splineax_klujax-0.5.0.post1-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ead7d5241441fb9dbdc0cd7b14fea6170dd686b8edb8d823af3dc85c1ac0bd81", size = 2848067, upload-time = "2026-07-15T21:30:03.387Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/60/bb0d2f268fa3741ae3037b0e55701f0d4e1e5138b0850f381f6c94c39ff0/splineax_klujax-0.5.0.post1-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:abe578f6c8a6b7aef25a586bd70329fb9a6146626189eef2ca92d9f35152fcdb", size = 2898932, upload-time = "2026-07-15T21:30:05.12Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/ce/3f16a8dba83cdf0c92729a58a52e4c7f750225c1d326abb1294655215d95/splineax_klujax-0.5.0.post1-cp311-cp311-win_amd64.whl", hash = "sha256:4d044dc3116af2d98ac2ecb3838d046c6b9b541f6ea73a5e94c9dfe584104c69", size = 184079, upload-time = "2026-07-15T21:30:06.891Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/de/88e9012880ecf3718936a7c55bd6afb69dde64fda0379c249b23c5731e66/splineax_klujax-0.5.0.post1-cp311-cp311-win_arm64.whl", hash = "sha256:ed4d3225b2688aebfc2ee1d047b68176928d2c179793cbbc14966af42de97790", size = 169277, upload-time = "2026-07-15T21:30:08.27Z" },
+    { url = "https://files.pythonhosted.org/packages/21/92/6c2cc2a1541dc373a79c03b6bbb8956256fe0b1066043c5fd22c071d5de6/splineax_klujax-0.5.0.post1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:565b4233dff67f723d2fe978a8576c0093078d14ee749267db491d3b8e1da141", size = 254867, upload-time = "2026-07-15T21:30:09.66Z" },
+    { url = "https://files.pythonhosted.org/packages/24/cf/64041b3e1353c2a8db5296c413f07c7bcf91c476e5417b68801b002228d9/splineax_klujax-0.5.0.post1-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6adc2ed820c87da770f7800751d160ebd69c885890ac9382921b070b29d16485", size = 2852340, upload-time = "2026-07-15T21:30:10.999Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/89/4603d96a473e49ceff9c377947061040ae54cd8db6a7421b4932b82357bd/splineax_klujax-0.5.0.post1-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6f7ac879796a661faeb4e48296c392f508094ba830887414cccd7f64fe1ce7cf", size = 2916357, upload-time = "2026-07-15T21:30:12.45Z" },
+    { url = "https://files.pythonhosted.org/packages/21/7f/42ee0329adfe959891a36be47a18163afc6f24856cb1de235923f128740e/splineax_klujax-0.5.0.post1-cp312-cp312-win_amd64.whl", hash = "sha256:46954e72c1d393af788eb7d5888394b752ed96ac6eff4e200f38d254dee84e34", size = 184549, upload-time = "2026-07-15T21:30:13.898Z" },
+    { url = "https://files.pythonhosted.org/packages/61/bb/160d2a0008844ecbfb9e5d6376230300f465177862e912910aa8c1484f2c/splineax_klujax-0.5.0.post1-cp312-cp312-win_arm64.whl", hash = "sha256:e55142ed11963d77179f6676098516af83772cec4d803248925af662dc1f0786", size = 168382, upload-time = "2026-07-15T21:30:15.36Z" },
+    { url = "https://files.pythonhosted.org/packages/85/4d/8c04863e139d7f08388231fc4b6e25b1f9f85d230c10352dd196d8093eef/splineax_klujax-0.5.0.post1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:fdd6d0d4d1a44a83425e1b32ad1df2ff8c6359441ed3f90b786781bf2d550cc5", size = 254892, upload-time = "2026-07-15T21:30:16.673Z" },
+    { url = "https://files.pythonhosted.org/packages/33/07/009a79bb84051462c0febae1594cba4b08d99fdf1c56f36c79b51fe90d3f/splineax_klujax-0.5.0.post1-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:941f43d8c9eb93a3e23f9088a85f048df0636d61419f5dc906f69556fb083b29", size = 2852146, upload-time = "2026-07-15T21:30:17.99Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/e3/434f2e79be0ee60c07ee0695399495db9d2dcfa63d474531adb03780a081/splineax_klujax-0.5.0.post1-cp313-cp313-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:209f305bdc1c3f4cd580cd59d23cc96cb329fad8bace8f27da3c41ee7568d1a1", size = 2914981, upload-time = "2026-07-15T21:30:20.034Z" },
+    { url = "https://files.pythonhosted.org/packages/8e/ad/1ef67741dbb40ddb9b8bb72fa00e9da44065c2a14b7c9997e6c22214b07a/splineax_klujax-0.5.0.post1-cp313-cp313-win_amd64.whl", hash = "sha256:e21b5802552ca00c777b31e2b5c7fb919262d4ecf4377160d3c15a7c9cdc841d", size = 184573, upload-time = "2026-07-15T21:30:21.71Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/00/05c36186176cf4a2afc68eb1d92b7f186b592a093055e69911507962c79e/splineax_klujax-0.5.0.post1-cp313-cp313-win_arm64.whl", hash = "sha256:289aeb38566d1b2ac00ff8d96b079256b291436bbb4984e21c40b3ba9e82c6e5", size = 168416, upload-time = "2026-07-15T21:30:22.933Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/f1/352b6cd5cbddccaea052cadb31a637f239a92c63a383dab1e0fac4961428/splineax_klujax-0.5.0.post1-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:86c35259e2d38ad4a94c8752ac5de1cdf4ea894298fa954e38d5b05f099d5db1", size = 255291, upload-time = "2026-07-15T21:30:24.247Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/ea/9e2e23ec489d0b5e4daa505e2eae4ae64c28128f3eb224d2ef8ae079faf0/splineax_klujax-0.5.0.post1-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1158e579869aaf62516a7f0c61d9ba7ebf085e9c2bfcf2856d6dc7f3ad32da9a", size = 2850680, upload-time = "2026-07-15T21:30:25.699Z" },
+    { url = "https://files.pythonhosted.org/packages/37/2b/bf8213796d68f09195ad7ed417c0868868b5775ce5e4f8673f5f47309062/splineax_klujax-0.5.0.post1-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3e250b0f80742532c11c3aeef9b6111daf4be4b26a71ee3218fa5467d7a448b0", size = 2913265, upload-time = "2026-07-15T21:30:27.16Z" },
+    { url = "https://files.pythonhosted.org/packages/96/d8/92a1e90b4e22b237ba23bbf9d1b71b4e527765f7442ae6a4de1f05d78115/splineax_klujax-0.5.0.post1-cp314-cp314-win_amd64.whl", hash = "sha256:7dfa425af82a066cdd4c8274fc6bd2f77a24e80e1c077a405263dedc8a54d0eb", size = 188896, upload-time = "2026-07-15T21:30:28.907Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/55/366cf80396a3840b601836d7222e80a8096b3dca3ac6980805dffbda36be/splineax_klujax-0.5.0.post1-cp314-cp314-win_arm64.whl", hash = "sha256:3d8955cadce55129c6ae416d7bd6f4ff40ed15dcc29b126b0b4ec9ab5b7adceb", size = 174209, upload-time = "2026-07-15T21:30:30.428Z" },
 ]
 
 [[package]]

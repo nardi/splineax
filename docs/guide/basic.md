@@ -48,6 +48,9 @@ transformations work:
 ```{.python continuation}
 import jax
 
+# KLU solver requires 64-bit mode:
+jax.config.update("jax_enable_x64", True)
+
 # Solve the transposed system.
 solution_T = lx.linear_solve(operator.T, b, solver=splineax.KLU())
 
