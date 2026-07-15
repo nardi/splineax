@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  # Publish when a GitHub release is published. Draft a release pointing at a
+  # tag (e.g. v0.0.5) and the wheel and sdist are built and pushed to PyPI.
+  release:
+    types: [published]
+  # Allow a manual run for testing the build without publishing.
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Fail fast if the release tag does not match the version in pyproject.toml.
+      # The tag is expected to be the version with a leading "v", e.g. v0.0.5.
+      - name: Check tag matches project version
+        if: github.event_name == 'release'
+        run: |
+          project_version="$(uv version --short)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "Project version: $project_version"
+          echo "Tag version:     $tag_version"
+          if [ "$project_version" != "$tag_version" ]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match pyproject.toml version '$project_version'."
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only publish to PyPI for an actual release, never for a manual test run.
+    if: github.event_name == 'release'
+    environment:
+      name: pypi
+      url: https://pypi.org/project/splineax/
+    permissions:
+      # Required for PyPI Trusted Publishing via OIDC. No API token is stored.
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
