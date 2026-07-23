@@ -1,13 +1,16 @@
 """Shared test suite for the sparse direct solvers.
 
-Both `Spsolve` (wrapping `jax.experimental.sparse.linalg.spsolve`) and `KLU` (wrapping
-`klujax`) must behave identically against either sparse operator format. The `solver`
-fixture is parametrised over the two solvers and the `make_operator` fixture over
+`Spsolve` (wrapping `jax.experimental.sparse.linalg.spsolve`), `KLU` (wrapping
+`klujax`), `Pardiso` (wrapping `pardiso_mkl_jax`, skipped if not installed), and
+`AutoSparseLinearSolver` must behave identically against either sparse operator format,
+modulo `Pardiso`'s documented real-only limitation (see `test_complex_solve`). The
+`solver` fixture is parametrised over all four and the `make_operator` fixture over
 `["bcoo", "bcsr"]` (both in [conftest.py](conftest.py)), so every test below runs for the full
 solver x format cross-product, with the dense reference matrix as the source of truth.
 
-KLU-specific behaviour (the `factorize()` context manager and its handle lifecycle) lives
-in [test_klu.py](test_klu.py).
+Solver-specific factorization/handle-lifecycle behaviour lives in [test_klu.py](test_klu.py)
+and [test_pardiso.py](test_pardiso.py); `AutoSparseLinearSolver`'s dispatch logic lives in
+[test_auto.py](test_auto.py).
 """
 
 import jax
@@ -17,7 +20,7 @@ import numpy as np
 import pytest
 from jax.experimental.sparse import BCOO, BCSR
 
-from splineax import BCOOLinearOperator, BCSRLinearOperator
+from splineax import BCOOLinearOperator, BCSRLinearOperator, Pardiso
 
 from .conftest import (
     COMPLEX_MATRIX,
@@ -96,6 +99,12 @@ def test_complex_solve(
 ) -> None:
     """Solving a complex system must match `numpy.linalg.solve`, exercising the
     `complex128` path of each backend."""
+    if isinstance(solver, Pardiso):
+        pytest.skip(
+            "`pardiso_mkl_jax` does not support complex matrices yet; "
+            "`AutoSparseLinearSolver` falls back to `KLU` for this case "
+            "(see test_auto.py::test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen)."
+        )
     operator = make_operator(COMPLEX_MATRIX)
     solution = lx.linear_solve(operator, COMPLEX_RIGHT_HAND_SIDE, solver=solver).value
     expected = jnp.linalg.solve(

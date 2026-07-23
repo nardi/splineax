@@ -23,6 +23,9 @@ from .solvers import (
     AutoSparseLinearSolver as AutoSparseLinearSolver,
 )
 from .solvers import (
+    Pardiso as Pardiso,
+)
+from .solvers import (
     SparseLinearSolver as SparseLinearSolver,
 )
 from .solvers import (

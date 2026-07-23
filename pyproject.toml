@@ -14,6 +14,13 @@ dependencies = [
     "asdex>=0.5.1",
 ]
 
+[project.optional-dependencies]
+pardiso = ["pardiso-mkl-jax>=0.1.0"]
+
+[tool.uv.sources]
+# Not yet published to PyPI, so resolved straight from its repository instead.
+pardiso-mkl-jax = { git = "https://github.com/nardi/pardiso-mkl-jax" }
+
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12.0"]
 build-backend = "uv_build"
