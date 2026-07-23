@@ -8,6 +8,10 @@
 
 ---
 
+::: splineax.Pardiso
+
+---
+
 ::: splineax.Spsolve
 
 ---
