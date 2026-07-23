@@ -5,6 +5,9 @@ on:
   # tag (e.g. v0.0.5) and the wheel and sdist are built and pushed to PyPI.
   release:
     types: [published]
+  # Build (but never publish) on PRs, so a broken build fails CI before release.
+  pull_request:
+    branches: [main]
   # Allow a manual run for testing the build without publishing.
   workflow_dispatch:
 
