@@ -31,8 +31,9 @@ from .conftest import (
     OperatorFactory,
 )
 
-# KLU solver requires 64-bit mode:
-jax.config.update("jax_enable_x64", True)
+# KLU requires 64-bit mode but no longer enables it as an import side effect, so every
+# test in this module gets it from the shared `enable_x64` fixture (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("enable_x64")
 
 # ---------------------------------------------------------------------------
 # Spy helpers

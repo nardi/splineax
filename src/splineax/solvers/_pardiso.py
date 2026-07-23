@@ -252,9 +252,9 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
 
     `pardiso_mkl_jax` is **CPU, real-valued, and double-precision only**: `float32`
     inputs are upcast to `float64`, and complex operators raise `TypeError` (Pardiso's
-    complex matrix types aren't supported by `pardiso_mkl_jax` yet). Unlike `klujax`,
-    `pardiso_mkl_jax` does not enable JAX's x64 mode or force the CPU platform on
-    import, so `jax_enable_x64` must already be on before this solver runs.
+    complex matrix types aren't supported by `pardiso_mkl_jax` yet). It does not enable
+    JAX's x64 mode or force the CPU platform on import, so `jax_enable_x64` must already
+    be on before this solver runs.
 
     This solver can only handle square nonsingular operators.
 

@@ -44,10 +44,11 @@ solver = splineax.KLU()
 
 !!! warning "CPU and double precision only"
 
-    `klujax` wraps a CPU-only library. Importing it (which happens lazily, on the first
-    `KLU` solve) **enables JAX's x64 mode and forces the CPU platform globally**.
-    `float32` / `complex64` inputs are upcast to `float64` / `complex128`. If you need to
-    stay on GPU/TPU, use [`Spsolve`][splineax.Spsolve].
+    `klujax` wraps a CPU-only library, and does not enable JAX's x64 mode or force the
+    CPU platform automatically: `jax_enable_x64` must already be on before you solve
+    with `KLU`, or `klujax` raises a clear error. `float32` / `complex64` inputs are
+    upcast to `float64` / `complex128`. If you need to stay on GPU/TPU, use
+    [`Spsolve`][splineax.Spsolve].
 
 ## `Pardiso`
 
@@ -69,11 +70,11 @@ solver = splineax.Pardiso()
 !!! warning "CPU, real-valued, and double precision only, and requires installation"
 
     `pardiso_mkl_jax` wraps a CPU-only library and only supports real-valued matrices
-    (`float32` inputs are upcast to `float64`; complex operators raise `TypeError`).
-    Unlike `klujax`, it does not enable JAX's x64 mode automatically, so you must do
-    that yourself. `Pardiso()` raises `ImportError` if `pardiso-mkl-jax` isn't
-    installed; use [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] for code
-    that should work whether or not it is.
+    (`float32` inputs are upcast to `float64`; complex operators raise `TypeError`). Like
+    `klujax`, it does not enable JAX's x64 mode automatically, so you must do that
+    yourself. `Pardiso()` raises `ImportError` if `pardiso-mkl-jax` isn't installed; use
+    [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] for code that should work
+    whether or not it is.
 
 ## `AutoSparseLinearSolver`
 

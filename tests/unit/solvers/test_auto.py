@@ -110,7 +110,9 @@ def test_select_solver_platform_override(
 # ---------------------------------------------------------------------------
 
 
-def test_auto_solve_matches_numpy(make_operator: OperatorFactory) -> None:
+def test_auto_solve_matches_numpy(
+    make_operator: OperatorFactory, enable_x64: None
+) -> None:
     """`AutoSparseLinearSolver` produces the same solution as `numpy.linalg.solve`."""
     operator = make_operator(SQUARE_MATRIX)
     solution = lx.linear_solve(
@@ -121,7 +123,7 @@ def test_auto_solve_matches_numpy(make_operator: OperatorFactory) -> None:
 
 
 def test_auto_factorize_gives_correct_solution(
-    make_operator: OperatorFactory,
+    make_operator: OperatorFactory, enable_x64: None
 ) -> None:
     """`AutoSparseLinearSolver().factorize(operator)` yields a reusable state that solves
     correctly (delegating to Pardiso or KLU on CPU)."""
@@ -138,7 +140,7 @@ def test_auto_factorize_gives_correct_solution(
 
 
 def test_auto_factorize_symbolic_gives_correct_solution(
-    make_operator: OperatorFactory,
+    make_operator: OperatorFactory, enable_x64: None
 ) -> None:
     """`AutoSparseLinearSolver().factorize_symbolic(...)` yields a scope whose `init` and
     `factorize` both produce correct solutions (delegating to Pardiso or KLU on CPU)."""
@@ -167,12 +169,17 @@ def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
     fall back to `KLU` for a complex operator even when `Pardiso` was otherwise
     selected -- keeping `Auto` able to solve anything `KLU` can."""
     monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
-    complex_matrix = SQUARE_MATRIX.astype(jnp.complex128) * (1 + 1j)
-    right_hand_side = RIGHT_HAND_SIDE.astype(jnp.complex128)
-    operator = make_operator(complex_matrix)
-    expected = jnp.linalg.solve(np.asarray(complex_matrix), np.asarray(right_hand_side))
 
     with jax.enable_x64(True):
+        # Built inside the block: `.astype(jnp.complex128)` outside it would silently
+        # truncate to complex64, since x64 isn't enabled yet at that point.
+        complex_matrix = SQUARE_MATRIX.astype(jnp.complex128) * (1 + 1j)
+        right_hand_side = RIGHT_HAND_SIDE.astype(jnp.complex128)
+        operator = make_operator(complex_matrix)
+        expected = jnp.linalg.solve(
+            np.asarray(complex_matrix), np.asarray(right_hand_side)
+        )
+
         solver = AutoSparseLinearSolver()
         assert isinstance(solver.select_solver(operator), Pardiso)
 
@@ -206,7 +213,7 @@ def test_solvers_satisfy_sparse_linear_solver_protocol() -> None:
 
 
 def test_states_and_scopes_satisfy_protocols(
-    make_operator: OperatorFactory,
+    make_operator: OperatorFactory, enable_x64: None
 ) -> None:
     """Init states, symbolic scopes, and symbolic states satisfy their Protocols, for
     KLU, Spsolve, and (if installed) Pardiso."""

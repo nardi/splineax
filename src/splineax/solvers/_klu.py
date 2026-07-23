@@ -186,7 +186,6 @@ class _KLUSymbolicScope(NamedTuple):
                 )
         Ax = bcoo.data
 
-        # Import klujax to enable x64.
         _klujax()
 
         if Ax.dtype in COMPLEX_DTYPES:
@@ -211,8 +210,8 @@ _KLUState = _KLUBasicState | _KLUSymbolicState | _KLUNumericState
 
 
 def _klujax():
-    # Lazy import: importing klujax enables jax x64 and forces the CPU platform globally,
-    # so we defer it until a KLU solve actually runs (keeping it out of `import splineax`).
+    # Lazy import: deferred until a KLU solve actually runs, so importing splineax
+    # never pays for loading klujax's compiled extension unless the solver is used.
     import klujax
 
     return klujax
@@ -255,8 +254,9 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
     (`BCOOLinearOperator` and `BCSRLinearOperator`).
 
     `klujax` is **CPU and double-precision only**: `float32`/`complex64` inputs are
-    upcast to `float64`/`complex128`, and importing it enables JAX's x64 mode and forces
-    the CPU platform globally (this happens lazily, on the first solve).
+    upcast to `float64`/`complex128`. It does not enable JAX's x64 mode or force the CPU
+    platform on import, so `jax_enable_x64` must already be on before this solver runs;
+    `klujax` raises a clear error otherwise.
 
     This solver can only handle square nonsingular operators.
     """
@@ -289,7 +289,6 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                     f"got {type(operator).__name__}."
                 )
 
-        # Import klujax to enable x64.
         _klujax()
 
         Ai = matrix.indices[:, 0].astype(jnp.int32)
@@ -434,7 +433,6 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         b = ravel_vector(vector, state.packed_structures)
         Ai, Aj, Ax, b = _ensure_cpu((Ai, Aj, Ax, b))
 
-        # Import klujax to enable x64.
         _klujax()
 
         # Upcast right-hand side vector if necessary.
