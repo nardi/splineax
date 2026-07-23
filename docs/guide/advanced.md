@@ -8,14 +8,14 @@ A sparse direct solve has two expensive stages:
 
 If you solve `Ax = b` many times with a fixed matrix, or many matrices that share a
 sparsity pattern, you can compute these stages once and reuse them. `splineax` exposes this
-through the [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol, implemented by all
-three solvers.
+through the [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol, which every solver
+implements.
 
 !!! note
 
-    Only [`KLU`][splineax.KLU] actually reuses factorizations. [`Spsolve`][splineax.Spsolve]
-    implements the same API with **no-op** fallbacks (each solve refactors), so code written
-    against the protocol runs unchanged on any backend.
+    [`KLU`][splineax.KLU] and [`Pardiso`][splineax.Pardiso] really do reuse factorizations.
+    [`Spsolve`][splineax.Spsolve] implements the same API with **no-op** fallbacks (each
+    solve refactors), so code written against the protocol runs unchanged on any backend.
     [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] delegates to whichever it
     picked.
 

@@ -1,5 +1,6 @@
 from ._auto import AutoSparseLinearSolver as AutoSparseLinearSolver
 from ._klu import KLU as KLU
+from ._pardiso import Pardiso as Pardiso
 from ._sparse import (
     AbstractSparseLinearSolver as AbstractSparseLinearSolver,
 )
