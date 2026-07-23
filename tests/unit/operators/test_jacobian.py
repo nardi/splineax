@@ -32,9 +32,6 @@ from splineax import (
     Spsolve,
 )
 
-# KLU solver requires 64-bit mode:
-jax.config.update("jax_enable_x64", True)
-
 
 def elementwise_function(x: jax.Array, args: object) -> jax.Array:
     """An elementwise map, whose Jacobian is diagonal."""
@@ -295,7 +292,7 @@ def test_conflicting_precomputation_arguments_are_rejected() -> None:
 @pytest.mark.parametrize(
     "solver", [KLU(), Spsolve(), AutoSparseLinearSolver()], ids=type
 )
-def test_linear_solve_matches_numpy(solver) -> None:
+def test_linear_solve_matches_numpy(solver, enable_x64: None) -> None:
     """End-to-end integration proof: handing the Jacobian operator straight to
     each splineax solver must reproduce the dense solve. This exercises the
     `materialise` recursion inside every solver's `init`."""
@@ -308,7 +305,7 @@ def test_linear_solve_matches_numpy(solver) -> None:
     assert np.allclose(np.asarray(solution), expected, atol=1e-5)
 
 
-def test_factorize_symbolic_round_trip() -> None:
+def test_factorize_symbolic_round_trip(enable_x64: None) -> None:
     """`KLU.factorize_symbolic` must accept the operator, a bound
     `SparseJacobianLinearOperatorColoring`, and a bare `JacobianColoring`, deriving
     the indices host-side from the stored sparsity pattern in each case. Solving
@@ -378,7 +375,7 @@ def test_from_jacobian_coloring_matches_direct_construction() -> None:
     )
 
 
-def test_jacobian_coloring_through_jit_and_solver() -> None:
+def test_jacobian_coloring_through_jit_and_solver(enable_x64: None) -> None:
     """A `JacobianColoring` is passed as an argument into a
     jitted function, which builds a `SparseJacobianLinearOperator` from it and
     solves with KLU. Because `asdex.ColoredPattern` is a pytree whose treedef
