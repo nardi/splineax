@@ -813,14 +813,23 @@ wheels = [
 
 [[package]]
 name = "pardiso-mkl-jax"
-version = "0.1.0"
-source = { git = "https://github.com/nardi/pardiso-mkl-jax#1444ad3ccc7ada2bbfb120d67b69d391705192c8" }
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "equinox" },
     { name = "jax" },
     { name = "mkl" },
     { name = "numpy" },
     { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/89/3ee433c1786a991ad981173fa41b3873f61b1ad075908e5340096ca9904e/pardiso_mkl_jax-0.1.1.tar.gz", hash = "sha256:fbfd53b1de69375f0de39c1f9c307b4c130f8d1b73d8fc29b98cd731083d37e3", size = 98162, upload-time = "2026-07-23T12:10:08.832Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/55/bbb9af91c28127b32871ae9d9c7d314c35b15d00d8bb86552cd46e92f8bc/pardiso_mkl_jax-0.1.1-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:37e583bfea4e5ddbea2a854594682c1b447c200e21d5c50cdebbb0ffc0b43c5a", size = 84865, upload-time = "2026-07-23T12:10:01.739Z" },
+    { url = "https://files.pythonhosted.org/packages/73/fd/6ed9c4a66484594fb37ce945aa3be311a93361bb552f473461ec94aaefcd/pardiso_mkl_jax-0.1.1-cp311-cp311-win_amd64.whl", hash = "sha256:3ed798db1fed7655b52dc321d5dc704ad8e81254b711c7dfd956e575b79628bc", size = 251746, upload-time = "2026-07-23T12:10:02.929Z" },
+    { url = "https://files.pythonhosted.org/packages/43/1c/3eb1e059fe1a7f20bdf46bbdc14c30cd7acda1becd49dc2493ddcaa37f7b/pardiso_mkl_jax-0.1.1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:156fb8dcf005e5733b87649f910445dea917a1cb29bdd874e8222ce0492369ec", size = 85647, upload-time = "2026-07-23T12:10:04.111Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/3c/2d3e654fe0a5100c8f347bb29f58c2ef8960014f9e6d4aa8bd4891d8ce67/pardiso_mkl_jax-0.1.1-cp312-cp312-win_amd64.whl", hash = "sha256:53e2a4ac0b6880cf96a0828b54749f50b57e4057b7dfe31f9ff5099fad14b3de", size = 251946, upload-time = "2026-07-23T12:10:05.376Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/a9/552ed279f1ede84a4b5db230ce1993a89d31e764f332efcefdf7644e98ff/pardiso_mkl_jax-0.1.1-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6cc4409094b873af060ebe626a532f8e54144e31c8974e610d32da8addbf226f", size = 85279, upload-time = "2026-07-23T12:10:06.612Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/90/2d5dd70335b2dd9d6d57339c1a67b8b8088c2ead6c44138e6436fecf3798/pardiso_mkl_jax-0.1.1-cp313-cp313-win_amd64.whl", hash = "sha256:2f8bd95b84051dfea282812f09f4d540c458ac5b2a0302a303bd850cf1bb3df0", size = 251266, upload-time = "2026-07-23T12:10:07.705Z" },
 ]
 
 [[package]]
@@ -1135,7 +1144,7 @@ requires-dist = [
     { name = "jax", specifier = ">=0.4" },
     { name = "jaxtyping", specifier = ">=0.2" },
     { name = "lineax", specifier = ">=0.1.1" },
-    { name = "pardiso-mkl-jax", marker = "extra == 'pardiso'", git = "https://github.com/nardi/pardiso-mkl-jax" },
+    { name = "pardiso-mkl-jax", marker = "extra == 'pardiso'", specifier = ">=0.1.1" },
     { name = "splineax-klujax", specifier = ">=0.5.0.post1" },
 ]
 provides-extras = ["pardiso"]

@@ -15,11 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-pardiso = ["pardiso-mkl-jax>=0.1.0"]
-
-[tool.uv.sources]
-# Not yet published to PyPI, so resolved straight from its repository instead.
-pardiso-mkl-jax = { git = "https://github.com/nardi/pardiso-mkl-jax" }
+pardiso = ["pardiso-mkl-jax>=0.1.1"]
 
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12.0"]

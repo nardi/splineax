@@ -21,8 +21,8 @@ jobs:
         run: uv python install
 
       - name: Sync dependencies
-        # --extra pardiso pulls in pardiso-mkl-jax (built from source against the mkl
-        # runtime packages), so the Pardiso-specific tests run instead of skipping.
+        # --extra pardiso pulls in pardiso-mkl-jax, so the Pardiso-specific tests run
+        # instead of skipping.
         run: uv sync --locked --extra pardiso
 
       - name: Run tests
