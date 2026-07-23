@@ -18,8 +18,10 @@ from splineax import (
     AutoSparseLinearSolver,
     BCOOLinearOperator,
     BCSRLinearOperator,
+    Pardiso,
     Spsolve,
 )
+from splineax.solvers._pardiso import _pardiso_available
 
 
 class OperatorFactory(Protocol):
@@ -79,13 +81,24 @@ def make_operator(request: pytest.FixtureRequest) -> OperatorFactory:
 
 
 @pytest.fixture(
-    params=[Spsolve, KLU, AutoSparseLinearSolver],
-    ids=["spsolve", "klu", "auto"],
+    params=[
+        Spsolve,
+        KLU,
+        pytest.param(
+            Pardiso,
+            marks=pytest.mark.skipif(
+                not _pardiso_available(), reason="pardiso-mkl-jax is not installed"
+            ),
+        ),
+        AutoSparseLinearSolver,
+    ],
+    ids=["spsolve", "klu", "pardiso", "auto"],
 )
 def solver(request: pytest.FixtureRequest) -> lx.AbstractLinearSolver:
     """Yields an instance of each sparse direct solver under test.
 
-    `AutoSparseLinearSolver` dispatches to `KLU` on the (CPU) test platform when x64 is
-    enabled, otherwise to `Spsolve`.
+    `AutoSparseLinearSolver` dispatches to `Pardiso` (if installed) or `KLU` on the
+    (CPU) test platform when x64 is enabled, otherwise to `Spsolve`. `Pardiso` itself is
+    skipped when its optional dependency isn't installed.
     """
     return request.param()
