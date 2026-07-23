@@ -9,7 +9,7 @@ modulo `Pardiso`'s documented real-only limitation (see `test_complex_solve`). T
 solver x format cross-product, with the dense reference matrix as the source of truth.
 
 Solver-specific factorization/handle-lifecycle behaviour lives in [test_klu.py](test_klu.py)
-and [test_pardiso.py](test_pardiso.py); `AutoSparseLinearSolver`'s dispatch logic lives in
+and [test_pardiso.py](test_pardiso.py). `AutoSparseLinearSolver`'s dispatch logic lives in
 [test_auto.py](test_auto.py).
 """
 
@@ -101,7 +101,7 @@ def test_complex_solve(
     `complex128` path of each backend."""
     if isinstance(solver, Pardiso):
         pytest.skip(
-            "`pardiso_mkl_jax` does not support complex matrices yet; "
+            "`pardiso_mkl_jax` does not support complex matrices yet. "
             "`AutoSparseLinearSolver` falls back to `KLU` for this case "
             "(see test_auto.py::test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen)."
         )

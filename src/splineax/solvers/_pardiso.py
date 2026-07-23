@@ -38,20 +38,20 @@ _CSR = tuple[Integer[Array, " n+1"], Integer[Array, " nse"], Inexact[Array, " ns
 def _pardiso_available() -> bool:
     """Whether `pardiso_mkl_jax` is importable, without actually importing it.
 
-    Checked with `importlib.util.find_spec` (no execution) rather than a real import,
-    so that probing availability -- from `Pardiso.__init__` and
-    `AutoSparseLinearSolver` -- never pays for `pardiso_mkl_jax`'s import-time MKL
-    runtime load. Unlike `klujax`, `pardiso-mkl-jax` is an optional dependency, so this
-    check (with no equivalent in `_klu.py`) is what makes `Pardiso` unconstructible,
-    and `AutoSparseLinearSolver` fall back to `KLU`, when it isn't installed.
+    Checked with `importlib.util.find_spec` (no execution) rather than a real import.
+    That way, probing availability from `Pardiso.__init__` and `AutoSparseLinearSolver`
+    never pays for `pardiso_mkl_jax`'s import-time MKL runtime load. Unlike `klujax`,
+    `pardiso-mkl-jax` is an optional dependency, so this check (with no equivalent in
+    `_klu.py`) is what makes `Pardiso` unconstructible, and `AutoSparseLinearSolver`
+    fall back to `KLU`, when it isn't installed.
     """
     return importlib.util.find_spec("pardiso_mkl_jax") is not None
 
 
 def _pardiso_mkl_jax():
-    # Lazy import: deferred until a Pardiso solve actually runs, so importing
-    # splineax -- and even constructing a `Pardiso` instance -- never loads the MKL
-    # runtime unless the solver is actually used (mirrors `_klu.py`'s `_klujax()`).
+    # Lazy import: deferred until a Pardiso solve actually runs. Importing splineax,
+    # or even constructing a `Pardiso` instance, never loads the MKL runtime unless
+    # the solver is actually used (mirrors `_klu.py`'s `_klujax()`).
     import pardiso_mkl_jax
 
     return pardiso_mkl_jax
@@ -102,8 +102,8 @@ class _PardisoHandle:
     Tracks locally whether `.analyze()`/`.factorize()` have already run, so repeated
     calls with new values choose `.factorize()` vs `.refactorize()` correctly.
     `pardiso_mkl_jax`'s analysis needs a representative values array (its
-    non-symmetric heuristics look at numeric values for scaling and matching), so --
-    unlike `klujax`'s purely structural analysis -- it can't run from sparsity alone.
+    non-symmetric heuristics look at numeric values for scaling and matching).
+    Unlike `klujax`'s purely structural analysis, it can't run from sparsity alone.
     `.factorize()` here defers it to the first values seen, whether that's
     `Pardiso.factorize`'s single-shot numeric reuse or the first `.init()` off a
     `factorize_symbolic` scope.
@@ -210,8 +210,8 @@ class _PardisoSymbolicState(eqx.Module):
     """A directly solvable state reusing a `factorize_symbolic` scope's shared handle.
 
     The numeric factorization has already run eagerly, in
-    `_PardisoSymbolicScope.init` -- see the comment there for why. `compute` and
-    `.factorize()` are consequently identical to `_PardisoNumericState`'s; this type
+    `_PardisoSymbolicScope.init` (see the comment there for why). `compute` and
+    `.factorize()` are consequently identical to `_PardisoNumericState`'s. This type
     exists to satisfy the `SparseSymbolicState` protocol and mark where that eager
     factorization already happened, not because there's a cheaper not-yet-factorized
     tier below it.
@@ -259,7 +259,7 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
     This solver can only handle square nonsingular operators.
 
     Requires the optional `pardiso-mkl-jax` dependency (`pip install
-    splineax[pardiso]`); constructing `Pardiso()` raises `ImportError` if it isn't
+    splineax[pardiso]`). Constructing `Pardiso()` raises `ImportError` if it isn't
     installed. `AutoSparseLinearSolver` prefers `Pardiso` over `KLU` on CPU with x64
     enabled, falling back to `KLU` automatically when `pardiso-mkl-jax` is missing.
     """
@@ -352,9 +352,9 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
         Yields a `_PardisoSymbolicScope`. Inside the block, call:
         - `.init(operator)` to create a `_PardisoSymbolicState` for `lx.linear_solve`.
           The first `compute()` (or explicit `.factorize()`) off any state sharing the
-          scope also runs Pardiso's symbolic analysis, since -- unlike `klujax` --
-          `pardiso_mkl_jax` needs representative values for analysis, not just the
-          pattern; later ones reuse it and only re-run the numeric phase.
+          scope also runs Pardiso's symbolic analysis. Unlike `klujax`, `pardiso_mkl_jax`
+          needs representative values for analysis, not just the pattern. Later ones
+          reuse it and only re-run the numeric phase.
         - `.init(operator).factorize()` or equivalently `.factorize(operator)` to also
           pre-compute the numeric factorization.
 

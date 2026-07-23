@@ -5,7 +5,7 @@ itself is always exercised (via monkeypatching, independent of whether the real 
 is installed), while the factorization-reuse tests are skipped when it isn't.
 
 The generic solve-correctness suite (all solvers, both operator formats) lives in
-test_solvers.py; `AutoSparseLinearSolver`'s dispatch (including the Pardiso/KLU choice)
+test_solvers.py. `AutoSparseLinearSolver`'s dispatch (including the Pardiso/KLU choice)
 lives in test_auto.py.
 """
 
@@ -94,7 +94,7 @@ def test_factorize_closes_solver_on_exit(make_operator: OperatorFactory) -> None
 def test_factorize_symbolic_reuses_analysis_across_init_calls() -> None:
     """Inside a `factorize_symbolic()` block, `.analyze()` must run only once across
     multiple `.init()` calls sharing the scope, while `.factorize()`/`.refactorize()`
-    run once each -- mirroring `pardiso_mkl_jax`'s own "analysis reused, numeric phase
+    run once each, mirroring `pardiso_mkl_jax`'s own "analysis reused, numeric phase
     redone per values" contract."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = Pardiso()

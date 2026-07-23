@@ -46,7 +46,7 @@ class AutoSparseLinearSolver(
 
     On CPU with x64 enabled, dispatches to `Pardiso` (Intel oneMKL Pardiso, factorization
     reuse) if the optional `pardiso-mkl-jax` dependency is installed, otherwise `KLU`
-    (SuiteSparse, factorization reuse) -- both are double precision only, hence the x64
+    (SuiteSparse, factorization reuse). Both are double precision only, hence the x64
     requirement. On any other backend, or on CPU when x64 is disabled, it dispatches to
     `Spsolve`, which works in single or double precision and on any backend. Exposes the
     same factorization API as `Pardiso`/`KLU` (`factorize`, `factorize_symbolic`), so it
@@ -56,9 +56,9 @@ class AutoSparseLinearSolver(
     `pardiso_mkl_jax` does not support complex matrices (see `Pardiso`'s docstring), so
     `init`/`factorize` fall back to `KLU` for a complex operator even when `Pardiso` was
     otherwise selected, keeping `Auto` able to solve anything `KLU` can. `factorize_symbolic`
-    cannot make the same check -- a bare sparsity pattern carries no values to inspect -- so
-    it stays on `Pardiso`; construct `KLU()` directly for symbolic-factorization reuse on a
-    complex operator.
+    cannot make the same check, since a bare sparsity pattern carries no values to
+    inspect, so it stays on `Pardiso`. Construct `KLU()` directly for
+    symbolic-factorization reuse on a complex operator.
     """
 
     platform: str | None = None
@@ -73,7 +73,7 @@ class AutoSparseLinearSolver(
         x64_enabled = jax.config.read("jax_enable_x64")
         # Pardiso and KLU are both double precision only, so either is only a valid
         # choice on CPU when x64 is enabled. Pardiso is preferred when its optional
-        # dependency is installed; KLU (a hard dependency) is always available as a
+        # dependency is installed. KLU (a hard dependency) is always available as a
         # fallback. Everything else falls back to Spsolve, which works in single or
         # double precision and on any backend.
         if platform == "cpu" and x64_enabled:
@@ -110,7 +110,7 @@ class AutoSparseLinearSolver(
             try:
                 return chosen.init(operator, options)
             except TypeError:
-                # `pardiso_mkl_jax` doesn't support complex matrices; fall back to
+                # `pardiso_mkl_jax` doesn't support complex matrices. Fall back to
                 # `KLU`, which does, rather than surfacing Pardiso's error for a case
                 # Auto can transparently handle. `KLU` is a hard dependency, always
                 # available here.

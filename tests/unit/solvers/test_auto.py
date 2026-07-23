@@ -6,7 +6,7 @@ dependency is installed) or otherwise `KLU` on CPU when x64 is enabled, since bo
 double precision only, and `Spsolve` otherwise (CPU without x64, or any other
 platform). It exposes the same factorization API as `Pardiso`/`KLU` so it can be
 substituted verbatim. The generic solve-correctness suite (parametrised over all
-solvers) lives in `test_solvers.py`; this module covers Auto-specific dispatch,
+solvers) lives in `test_solvers.py`. This module covers Auto-specific dispatch,
 Protocol conformance, and the Spsolve no-op factorization behaviour.
 
 The dispatch tests monkeypatch `splineax.solvers._auto._pardiso_available` rather than
@@ -167,7 +167,7 @@ def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
 ) -> None:
     """`pardiso_mkl_jax` doesn't support complex matrices, so `init`/`factorize` must
     fall back to `KLU` for a complex operator even when `Pardiso` was otherwise
-    selected -- keeping `Auto` able to solve anything `KLU` can."""
+    selected, keeping `Auto` able to solve anything `KLU` can."""
     monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
 
     with jax.enable_x64(True):

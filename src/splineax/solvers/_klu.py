@@ -255,7 +255,7 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
 
     `klujax` is **CPU and double-precision only**: `float32`/`complex64` inputs are
     upcast to `float64`/`complex128`. It does not enable JAX's x64 mode or force the CPU
-    platform on import, so `jax_enable_x64` must already be on before this solver runs;
+    platform on import, so `jax_enable_x64` must already be on before this solver runs.
     `klujax` raises a clear error otherwise.
 
     This solver can only handle square nonsingular operators.

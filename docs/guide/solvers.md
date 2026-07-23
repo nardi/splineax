@@ -70,9 +70,9 @@ solver = splineax.Pardiso()
 !!! warning "CPU, real-valued, and double precision only, and requires installation"
 
     `pardiso_mkl_jax` wraps a CPU-only library and only supports real-valued matrices
-    (`float32` inputs are upcast to `float64`; complex operators raise `TypeError`). Like
-    `klujax`, it does not enable JAX's x64 mode automatically, so you must do that
-    yourself. `Pardiso()` raises `ImportError` if `pardiso-mkl-jax` isn't installed; use
+    (`float32` inputs are upcast to `float64`, and complex operators raise `TypeError`).
+    Like `klujax`, it does not enable JAX's x64 mode automatically, so you must do that
+    yourself. `Pardiso()` raises `ImportError` if `pardiso-mkl-jax` isn't installed. Use
     [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] for code that should work
     whether or not it is.
 
@@ -80,9 +80,9 @@ solver = splineax.Pardiso()
 
 Picks a solver based on the JAX platform and what's installed: on CPU with x64 enabled,
 [`Pardiso`][splineax.Pardiso] if the optional `pardiso-mkl-jax` dependency is installed,
-otherwise [`KLU`][splineax.KLU] (both fast direct solves with factorization reuse);
+otherwise [`KLU`][splineax.KLU] (both fast direct solves with factorization reuse), and
 [`Spsolve`][splineax.Spsolve] otherwise. It exposes the same factorization API as
-`Pardiso`/`KLU`, so you can substitute it for either verbatim; on non-CPU backends the
+`Pardiso`/`KLU`, so you can substitute it for either verbatim. On non-CPU backends the
 factorization methods degrade to no-ops via `Spsolve`. Since `pardiso_mkl_jax` doesn't
 support complex matrices, `Auto` falls back to `KLU` for a complex operator even when
 `Pardiso` was otherwise selected.
