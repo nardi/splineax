@@ -14,7 +14,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Generator
 
-import jax
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
@@ -27,8 +26,10 @@ from splineax.solvers._pardiso import _PardisoNumericState
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
-# Pardiso solver requires 64-bit mode:
-jax.config.update("jax_enable_x64", True)
+# Pardiso requires 64-bit mode but does not enable it as an import side effect, so
+# every test in this module gets it from the shared `enable_x64` fixture
+# (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("enable_x64")
 
 
 def test_pardiso_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
