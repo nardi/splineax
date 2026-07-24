@@ -86,14 +86,43 @@ comes from the precomputed sparsity, without materialising the Jacobian numerica
 
 The scope itself, not just the state it produces, can be passed into a jitted function
 that builds the operator inside and calls `scope.init` again, so the analysis is reused
-across solves whose values are only known under the trace. This works for opening the
-scope itself too: `solver.factorize_symbolic(...)` may be written directly inside a
-jitted function, for both solvers, since a factorization handle is an ordinary JAX
-array value rather than a native object tied to the Python side. Solve with
-`solver.compute(state, b, {})` rather than `lx.linear_solve` in that case: opening and
-closing the scope within the same jitted function relies on the solve happening before
-the scope's cleanup, and `lx.linear_solve`'s autodiff-aware wrapping does not preserve
-that ordering.
+across solves whose values are only known under the trace.
+
+## Solving fully inside `jax.jit`
+
+A factorization handle is an ordinary JAX array value rather than a native object tied
+to the Python side, so `solver.factorize_symbolic(...)` may be opened *and* closed
+entirely inside a jitted function too, not just called on from outside it:
+
+```{.python continuation}
+import splineax as splx
+
+
+@jax.jit
+def solve_under_jit(values, b):
+    operator = splineax.BCOOLinearOperator(
+        BCOO((values, sparsity.indices), shape=sparsity.shape)
+    )
+    with solver.factorize_symbolic(operator) as scope:
+        state = scope.init(operator)
+        return splx.linear_solve(operator, b, solver, state=state).value
+
+
+x = solve_under_jit(sparsity.data, b1)
+```
+
+Use [`splineax.linear_solve`][splineax.linear_solve] here, not `lineax.linear_solve`
+directly, whenever the whole `with` block above is itself traced. `lineax.linear_solve`
+stages the solve into a trace nested inside the one being built for `solve_under_jit`,
+so its result is invisible to the scope's cleanup, which runs once the `with` block
+ends, back in the outer trace. `splineax.linear_solve` calls `lineax.linear_solve` and
+then additionally registers its result from the outer trace, so the cleanup can order
+itself after the solve, which matters for a solver (`Pardiso`) whose native release must
+not run before every solve that used the handle has finished. Calling
+`lineax.linear_solve` directly here instead raises a `RuntimeError` explaining why, on
+any solver that owns a handle. Everywhere else, when the scope is opened outside the
+jitted function it is solved within (as throughout the rest of this page), either
+function works the same: there is no nested trace for a result to go missing from.
 
 ## How the states chain
 

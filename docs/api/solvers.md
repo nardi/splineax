@@ -1,5 +1,9 @@
 # Solvers
 
+::: splineax.linear_solve
+
+---
+
 ::: splineax.AutoSparseLinearSolver
 
 ---

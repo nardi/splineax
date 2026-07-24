@@ -18,8 +18,10 @@ import equinox as eqx
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
+import pytest
 from jax.experimental.sparse import BCOO
 
+import splineax as splx
 from splineax import AbstractSparseLinearSolver, BCOOLinearOperator
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
@@ -171,22 +173,23 @@ def test_factorize_symbolic_opens_entirely_under_jit(
     solver: AbstractSparseLinearSolver,
 ) -> None:
     """`factorize_symbolic` itself, not just a state derived from it, can run inside a
-    jitted function: opening the scope, `.init`, and the solve all trace together, for
-    every solver that supports factorization reuse.
+    jitted function: opening the scope, deriving a state, the solve, and the scope's
+    handle free all trace together, for every solver that supports factorization reuse.
 
-    Solves through `solver.compute` directly rather than `lx.linear_solve`. The
-    handle-freeing scope's dependency tracking now uses a stable id carried as pytree
-    aux data (`splineax/solvers/_handle.py`), which survives `lx.linear_solve`
-    rebuilding the state pytree with fresh leaf objects (the case that used to break
-    plain object-identity tracking, and segfault Pardiso). But `lx.linear_solve` also
-    calls `solver.compute` an *extra* time internally, through `eqx.filter_eval_shape`,
-    to probe its own output structure. When the whole scope is opened and closed inside
-    one trace, that probe's own result is a tracer belonging to an already-closed,
-    more deeply nested trace, and registering it as a dependency and later feeding it to
-    `jax.lax.optimization_barrier` from the still-active outer trace being built for
-    this test's own jit call is invalid, independent of how it's keyed. That is a
-    separate lineax/equinox interaction, not the identity bug this module's fix
-    addresses, so this test uses `compute` directly to isolate the latter.
+    Solves through `splineax.linear_solve` rather than `lineax.linear_solve` directly.
+    `lineax.linear_solve` runs the solver's `compute` in a nested trace, so the solve
+    result registered there belongs to that nested trace. The handle-freeing scope's
+    dependency tracking is scoped to the trace the free runs in
+    (`splineax/solvers/_handle.py`), so that leaked nested-trace result is dropped
+    rather than fed to the free from the outer trace (which used to raise
+    `UnexpectedTracerError`, and segfault Pardiso). Dropping it is enough for KLU, whose
+    native free short-circuits under jit, but Pardiso emits a real `release` that must be
+    ordered after the solve, and the only value in the free's own trace that depends on
+    the solve is `lineax.linear_solve`'s return. `splineax.linear_solve` registers
+    exactly that, so the free orders correctly for every solver. Ordered effects (JEP
+    10657) would order the release without needing this, but do not survive lineax's
+    staging: an ordered effect inside `compute` fails to lower because the token is not
+    threaded into lineax's nested call.
     """
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     indices, shape = sparsity.indices, sparsity.shape
@@ -197,8 +200,47 @@ def test_factorize_symbolic_opens_entirely_under_jit(
         operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
         with solver.factorize_symbolic(operator) as scope:
             state = scope.init(operator)
-            return solver.compute(state, b, {})[0]
+            return splx.linear_solve(operator, b, solver, state=state).value
 
     solution = np.asarray(run(solver, sparsity.data, RIGHT_HAND_SIDE))
 
     assert jnp.allclose(solution, expected, atol=1e-5)
+
+
+def test_symbolic_scope_full_jit_raw_linear_solve_raises_helpful_error(
+    solver: AbstractSparseLinearSolver,
+) -> None:
+    """Solving via bare `lineax.linear_solve`, instead of `splineax.linear_solve`, inside
+    a `factorize_symbolic` scope opened and closed entirely under one `jax.jit` call is
+    unsafe for a solver that owns a native handle: see
+    `test_factorize_symbolic_opens_entirely_under_jit` above for why. `HandleDependencies`
+    now catches this at trace time, in `compute`, and raises a clear error pointing at
+    `splineax.linear_solve` instead of letting it surface later as an opaque tracer error
+    or a native use-after-free. `Spsolve` owns no handle, so nothing needs to order its
+    (no-op) release, and it solves normally either way.
+    """
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    indices, shape = sparsity.indices, sparsity.shape
+
+    @eqx.filter_jit
+    def run(solver, data, b):
+        operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
+        with solver.factorize_symbolic(operator) as scope:
+            state = scope.init(operator)
+            return lx.linear_solve(operator, b, solver=solver, state=state).value
+
+    # `AutoSparseLinearSolver` may itself resolve to `Spsolve` on some platforms; ask it
+    # what it would pick here rather than assuming, so this test holds on any backend.
+    resolved = solver
+    if isinstance(solver, splx.AutoSparseLinearSolver):
+        resolved = solver.select_solver(BCOOLinearOperator(sparsity))
+
+    if isinstance(resolved, splx.Spsolve):
+        expected = jnp.linalg.solve(
+            np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE)
+        )
+        solution = np.asarray(run(solver, sparsity.data, RIGHT_HAND_SIDE))
+        assert jnp.allclose(solution, expected, atol=1e-5)
+    else:
+        with pytest.raises(RuntimeError, match="splineax.linear_solve"):
+            run(solver, sparsity.data, RIGHT_HAND_SIDE)
