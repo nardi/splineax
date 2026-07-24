@@ -15,7 +15,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-pardiso = ["pardiso-mkl-jax>=0.1.1"]
+pardiso = ["pardiso-mkl-jax>=0.1.2"]
+
+[tool.uv.sources]
+# `refactor_and_solve` (needed for symbolic reuse under jit) is not on PyPI yet, so
+# resolve from the branch until it is released. Drop this once 0.1.2 is published.
+pardiso-mkl-jax = { git = "https://github.com/nardi/pardiso-mkl-jax", branch = "factor_and_solve" }
 
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12.0"]

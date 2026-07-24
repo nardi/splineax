@@ -4,6 +4,7 @@ from typing import Any, Iterator, NamedTuple, TypeVar
 
 import equinox as eqx
 import jax
+import jax.core
 import jax.numpy as jnp
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
@@ -99,14 +100,13 @@ def _csr_from_coo_pattern(
 class _PardisoHandle:
     """Mutable wrapper around one open `pardiso_mkl_jax.PardisoSolver`.
 
-    Tracks locally whether `.analyze()`/`.factorize()` have already run, so repeated
-    calls with new values choose `.factorize()` vs `.refactorize()` correctly.
-    `pardiso_mkl_jax`'s analysis needs a representative values array (its
-    non-symmetric heuristics look at numeric values for scaling and matching).
-    Unlike `klujax`'s purely structural analysis, it can't run from sparsity alone.
-    `.factorize()` here defers it to the first values seen, whether that's
-    `Pardiso.factorize`'s single-shot numeric reuse or the first `.init()` off a
-    `factorize_symbolic` scope.
+    Tracks whether the symbolic analysis has run, so it is done exactly once. The
+    analysis needs a representative values array (`pardiso_mkl_jax`'s non-symmetric
+    heuristics look at numeric values for scaling and matching), so unlike `klujax`'s
+    purely structural analysis it cannot run from sparsity alone. `refactor_and_solve`
+    reuses that analysis in a single jit-safe call, and is what the symbolic tier uses;
+    `factorize`/`solve` back the numeric tier, whose numeric factorization is done eagerly
+    and reused across solves.
     """
 
     def __init__(self, solver: Any) -> None:
@@ -114,15 +114,29 @@ class _PardisoHandle:
         self._analyzed = False
         self._factorized = False
 
-    def factorize(self, values: Inexact[Array, " nse"]) -> None:
+    def analyze(self, values: Inexact[Array, " nse"]) -> None:
         if not self._analyzed:
             self.solver.analyze(values)
             self._analyzed = True
+
+    def factorize(self, values: Inexact[Array, " nse"]) -> None:
+        self.analyze(values)
         if self._factorized:
             self.solver.refactorize(values)
         else:
             self.solver.factorize(values)
             self._factorized = True
+
+    def refactor_and_solve(
+        self,
+        values: Inexact[Array, " nse"],
+        right_hand_side: Inexact[Array, " n"],
+        *,
+        transpose: bool,
+    ) -> Inexact[Array, " n"]:
+        return self.solver.refactor_and_solve(
+            values, right_hand_side, transpose=transpose
+        )
 
     def solve(
         self, right_hand_side: Inexact[Array, " n"], *, transpose: bool
@@ -184,19 +198,29 @@ class _PardisoSymbolicScope(NamedTuple):
         # `BCSR.from_bcoo` sorts into the same canonical (row, then column) order used
         # to build `self.handle`'s pattern in `Pardiso.factorize_symbolic`, so the
         # reordered values line up with that pattern's indices.
-        values = BCSR.from_bcoo(bcoo).data.astype(jnp.float64)
+        matrix_bcsr = BCSR.from_bcoo(bcoo)
+        indptr = matrix_bcsr.indptr.astype(jnp.int32)
+        indices = matrix_bcsr.indices.astype(jnp.int32)
+        values = matrix_bcsr.data.astype(jnp.float64)
+        packed_structures = pack_structures(operator)
 
-        # Eager, not deferred to `compute()`: `pardiso_mkl_jax`'s analysis needs
-        # representative values (unlike `klujax`'s purely structural analysis), and
-        # `lx.linear_solve` may trace `compute()` more than once for a single call
-        # (e.g. a shape-inference pass ahead of the real one). Flipping the shared
-        # handle's "already analyzed"/"already factorized" bookkeeping from inside
-        # `compute()` would let such a dry-run trace mark it done without the real
-        # native `analyze()`/`factorize()` call ever having run, so this runs here
-        # instead, in a plain (untraced) Python call the caller controls directly.
-        self.handle.factorize(values)
+        if not self.handle._analyzed:
+            # The symbolic analysis needs concrete representative values and must run
+            # exactly once, eagerly. Running it under a trace would bake it into every
+            # solve. Callers reuse the analysis under jit by doing an eager `init` first,
+            # after which this is skipped and only `compute` (a single fused
+            # factor-and-solve call) runs inside the trace.
+            if isinstance(values, jax.core.Tracer):
+                raise RuntimeError(
+                    "`Pardiso.factorize_symbolic` needs an eager `scope.init(...)` before "
+                    "the scope is reused inside a jitted function, so the symbolic "
+                    "analysis runs once outside the trace."
+                )
+            self.handle.analyze(values)
 
-        return _PardisoSymbolicState(pack_structures(operator), self.handle, self.shape)
+        return _PardisoSymbolicState(
+            (indptr, indices, values), packed_structures, self.handle, self.shape
+        )
 
     @contextmanager
     def factorize(
@@ -207,16 +231,16 @@ class _PardisoSymbolicScope(NamedTuple):
 
 
 class _PardisoSymbolicState(eqx.Module):
-    """A directly solvable state reusing a `factorize_symbolic` scope's shared handle.
+    """A solvable state that reuses a `factorize_symbolic` scope's symbolic analysis.
 
-    The numeric factorization has already run eagerly, in
-    `_PardisoSymbolicScope.init` (see the comment there for why). `compute` and
-    `.factorize()` are consequently identical to `_PardisoNumericState`'s. This type
-    exists to satisfy the `SparseSymbolicState` protocol and mark where that eager
-    factorization already happened, not because there's a cheaper not-yet-factorized
-    tier below it.
+    The analysis was run once, eagerly, in `_PardisoSymbolicScope.init`. Each `compute`
+    reuses it and refactors numerically for `csr`'s values in one fused jit-safe call, so
+    the values are carried as dynamic data and may be tracers. `.factorize()` promotes
+    this to a `_PardisoNumericState` by running the numeric factorization eagerly once, to
+    reuse it across many solves.
     """
 
+    csr: _CSR
     packed_structures: PackedStructures
     # `handle`, `shape`, and `transposed` are static metadata, not traced leaves:
     # `handle` wraps a native `PardisoSolver` (not a JAX array) and so cannot be a
@@ -228,6 +252,9 @@ class _PardisoSymbolicState(eqx.Module):
 
     @contextmanager
     def factorize(self) -> Iterator["_PardisoNumericState"]:
+        # The analysis is already done; this runs the numeric factorization eagerly so it
+        # can be reused across the numeric state's solves.
+        self.handle.factorize(self.csr[2])
         yield _PardisoNumericState(
             self.handle, self.packed_structures, self.shape, self.transposed
         )
@@ -351,12 +378,18 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
 
         Yields a `_PardisoSymbolicScope`. Inside the block, call:
         - `.init(operator)` to create a `_PardisoSymbolicState` for `lx.linear_solve`.
-          The first `compute()` (or explicit `.factorize()`) off any state sharing the
-          scope also runs Pardiso's symbolic analysis. Unlike `klujax`, `pardiso_mkl_jax`
-          needs representative values for analysis, not just the pattern. Later ones
-          reuse it and only re-run the numeric phase.
+          The first, eager `.init(operator)` runs Pardiso's symbolic analysis. Unlike
+          `klujax`, `pardiso_mkl_jax` needs representative values for analysis, not just
+          the pattern, so this cannot happen at scope creation. Every solve then reuses
+          the analysis and only re-runs the numeric phase.
         - `.init(operator).factorize()` or equivalently `.factorize(operator)` to also
           pre-compute the numeric factorization.
+
+        Once the analysis has run (an eager `.init`), the scope can be passed into a
+        jitted function that builds the operator inside and calls `.init` again, so the
+        analysis is reused across solves whose values are only known under the trace.
+        Reusing the scope under a trace before that first eager `.init` raises, since the
+        analysis cannot run inside a trace.
 
         The underlying `PardisoSolver` is closed when the `with` block exits.
 
@@ -442,14 +475,16 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
         b = b.astype(jnp.float64)
 
         match state:
-            case (
-                _PardisoNumericState(handle=handle, transposed=transposed)
-                | _PardisoSymbolicState(handle=handle, transposed=transposed)
-            ):
-                # Both tiers are already fully factorized by this point (see
-                # `_PardisoSymbolicScope.init`'s comment for why the symbolic tier's
-                # factorization runs eagerly there rather than here).
+            case _PardisoNumericState(handle=handle, transposed=transposed):
+                # Numeric factorization already done eagerly; just solve against it.
                 x = handle.solve(b, transpose=transposed)
+            case _PardisoSymbolicState(
+                csr=(_, _, values), handle=handle, transposed=transposed
+            ):
+                # Reuse the symbolic analysis, refactor numerically for these values, and
+                # solve in one fused call. Safe under jit: the values are passed
+                # explicitly rather than stored on the native solver.
+                x = handle.refactor_and_solve(values, b, transpose=transposed)
             case _PardisoBasicState(
                 csr=(indptr, indices, values), transposed=transposed
             ):
@@ -485,10 +520,10 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                     handle, packed_structures, shape[::-1], not transposed
                 ), {}
             case _PardisoSymbolicState(
-                handle=handle, shape=shape, transposed=transposed
+                csr=csr, handle=handle, shape=shape, transposed=transposed
             ):
                 return _PardisoSymbolicState(
-                    packed_structures, handle, shape[::-1], not transposed
+                    csr, packed_structures, handle, shape[::-1], not transposed
                 ), {}
             case _PardisoBasicState(csr=csr, shape=shape, transposed=transposed):
                 return _PardisoBasicState(
