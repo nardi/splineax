@@ -8,8 +8,10 @@ modulo `Pardiso`'s documented real-only limitation (see `test_complex_solve`). T
 `["bcoo", "bcsr"]` (both in [conftest.py](conftest.py)), so every test below runs for the full
 solver x format cross-product, with the dense reference matrix as the source of truth.
 
-Solver-specific factorization/handle-lifecycle behaviour lives in [test_klu.py](test_klu.py)
-and [test_pardiso.py](test_pardiso.py). `AutoSparseLinearSolver`'s dispatch logic lives in
+The solver-agnostic factorization-reuse contract lives in
+[test_factorization.py](test_factorization.py), solver-specific
+factorization/handle-lifecycle behaviour in [test_klu.py](test_klu.py) and
+[test_pardiso.py](test_pardiso.py), and `AutoSparseLinearSolver`'s dispatch logic in
 [test_auto.py](test_auto.py).
 """
 

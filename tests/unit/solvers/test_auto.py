@@ -1,13 +1,13 @@
-"""Tests for `AutoSparseLinearSolver`, the sparse-solver Protocols, and the
-no-op factorization API on `Spsolve`.
+"""Tests for `AutoSparseLinearSolver` dispatch and the sparse-solver Protocols.
 
 `AutoSparseLinearSolver` selects `Pardiso` (if the optional `pardiso-mkl-jax`
 dependency is installed) or otherwise `KLU` on CPU when x64 is enabled, since both are
 double precision only, and `Spsolve` otherwise (CPU without x64, or any other
 platform). It exposes the same factorization API as `Pardiso`/`KLU` so it can be
 substituted verbatim. The generic solve-correctness suite (parametrised over all
-solvers) lives in `test_solvers.py`. This module covers Auto-specific dispatch,
-Protocol conformance, and the Spsolve no-op factorization behaviour.
+solvers) lives in `test_solvers.py`, and the shared factorization-reuse contract in
+`test_factorization.py`. This module covers Auto-specific dispatch and Protocol
+conformance.
 
 The dispatch tests monkeypatch `splineax.solvers._auto._pardiso_available` rather than
 relying on whether `pardiso-mkl-jax` actually happens to be installed, so both branches
@@ -27,7 +27,6 @@ import splineax.solvers._auto as _auto_module
 from splineax import (
     KLU,
     AutoSparseLinearSolver,
-    BCOOLinearOperator,
     Pardiso,
     Spsolve,
 )
@@ -122,46 +121,6 @@ def test_auto_solve_matches_numpy(
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 
-def test_auto_factorize_gives_correct_solution(
-    make_operator: OperatorFactory, enable_x64: None
-) -> None:
-    """`AutoSparseLinearSolver().factorize(operator)` yields a reusable state that solves
-    correctly (delegating to Pardiso or KLU on CPU)."""
-    operator = make_operator(SQUARE_MATRIX)
-    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
-
-    solver = AutoSparseLinearSolver()
-    with solver.factorize(operator) as state:
-        solution = lx.linear_solve(
-            operator, RIGHT_HAND_SIDE, solver=solver, state=state
-        ).value
-
-    assert jnp.allclose(solution, expected, atol=1e-5)
-
-
-def test_auto_factorize_symbolic_gives_correct_solution(
-    make_operator: OperatorFactory, enable_x64: None
-) -> None:
-    """`AutoSparseLinearSolver().factorize_symbolic(...)` yields a scope whose `init` and
-    `factorize` both produce correct solutions (delegating to Pardiso or KLU on CPU)."""
-    operator = make_operator(SQUARE_MATRIX)
-    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
-
-    solver = AutoSparseLinearSolver()
-    with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
-        symbolic_state = scope.init(operator)
-        symbolic_solution = lx.linear_solve(
-            operator, RIGHT_HAND_SIDE, solver=solver, state=symbolic_state
-        ).value
-        with scope.factorize(operator) as numeric_state:
-            numeric_solution = lx.linear_solve(
-                operator, RIGHT_HAND_SIDE, solver=solver, state=numeric_state
-            ).value
-
-    assert jnp.allclose(symbolic_solution, expected, atol=1e-5)
-    assert jnp.allclose(numeric_solution, expected, atol=1e-5)
-
-
 def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
     make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -228,45 +187,3 @@ def test_states_and_scopes_satisfy_protocols(
         with solver.factorize_symbolic(sparsity) as scope:
             assert isinstance(scope, SparseSymbolicScope)
             assert isinstance(scope.init(operator), SparseSymbolicState)
-
-
-# ---------------------------------------------------------------------------
-# Spsolve no-op factorization
-# ---------------------------------------------------------------------------
-
-
-def test_spsolve_factorize_noop_solves_correctly(
-    make_operator: OperatorFactory,
-) -> None:
-    """`Spsolve().factorize(operator)` is a no-op that still yields a solvable state."""
-    operator = make_operator(SQUARE_MATRIX)
-    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
-
-    solver = Spsolve()
-    with solver.factorize(operator) as state:
-        solution = lx.linear_solve(
-            operator, RIGHT_HAND_SIDE, solver=solver, state=state
-        ).value
-
-    assert jnp.allclose(solution, expected, atol=1e-5)
-
-
-def test_spsolve_factorize_symbolic_noop_solves_correctly() -> None:
-    """`Spsolve().factorize_symbolic(...)` yields a no-op scope whose `init` and
-    `factorize` both produce solvable states."""
-    operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
-    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
-
-    solver = Spsolve()
-    with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
-        symbolic_state = scope.init(operator)
-        symbolic_solution = lx.linear_solve(
-            operator, RIGHT_HAND_SIDE, solver=solver, state=symbolic_state
-        ).value
-        with scope.factorize(operator) as numeric_state:
-            numeric_solution = lx.linear_solve(
-                operator, RIGHT_HAND_SIDE, solver=solver, state=numeric_state
-            ).value
-
-    assert jnp.allclose(symbolic_solution, expected, atol=1e-5)
-    assert jnp.allclose(numeric_solution, expected, atol=1e-5)
