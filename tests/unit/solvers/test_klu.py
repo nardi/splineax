@@ -22,6 +22,7 @@ import pytest
 from jax.experimental.sparse import BCOO
 
 from splineax import KLU, BCOOLinearOperator
+from splineax.solvers._handle import handle_value
 from splineax.solvers._klu import _KLUNumericState, _KLUSymbolicState
 
 from .conftest import (
@@ -68,7 +69,11 @@ def _spy_frees() -> Generator[tuple[list[int], list[int]], None, None]:
     Under JIT, `manager.close()` short-circuits (the handle is a Tracer and
     cannot be eagerly freed), so `begin_scope()` is the only call site that
     reaches the spy with a `KLUHandleManager`.  In both cases,
-    `id(manager.handle) == id(numeric_state.factorization.symbolic/numeric)`.
+    `id(manager.handle) == id(handle_value(numeric_state.factorization.symbolic/
+    numeric))`: under JIT the state holds a `_HandleToken` wrapping the same
+    array, not the array directly, so callers must unwrap it with
+    `handle_value` before comparing ids (eagerly there is no token, and
+    `handle_value` is a no-op).
     """
     import klujax as klu
 
@@ -167,8 +172,8 @@ def test_factorize_reuses_numeric_solve(
                 # captures the same Tracer ids when begin_scope() exits.
                 captured_handle_ids.append(
                     (
-                        id(numeric_state.factorization.symbolic),
-                        id(numeric_state.factorization.numeric),
+                        id(handle_value(numeric_state.factorization.symbolic)),
+                        id(handle_value(numeric_state.factorization.numeric)),
                     )
                 )
                 # Call `compute` directly rather than through `lx.linear_solve`: its

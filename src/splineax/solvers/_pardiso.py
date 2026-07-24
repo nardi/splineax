@@ -1,7 +1,7 @@
 import importlib.util
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator, NamedTuple, NewType, TypeVar
+from typing import Any, Iterator, NamedTuple, TypeVar
 
 import equinox as eqx
 import jax
@@ -25,6 +25,15 @@ from splineax.operators._jacobian import (
     SparseJacobianLinearOperator,
     SparseJacobianLinearOperatorColoring,
 )
+from splineax.solvers._handle import (
+    HandleDependencies,
+    _HandleToken,
+    handle_value,
+    wrap_handle,
+)
+from splineax.solvers._handle import (
+    rebind_handle as _rebind_token,
+)
 from splineax.solvers._klu import COMPLEX_DTYPES
 from splineax.solvers._sparse import (
     AbstractSparseLinearSolver,
@@ -35,11 +44,12 @@ from splineax.solvers._sparse import (
 # `indptr`, `indices`, `values`: the matrix in CSR form.
 _CSR = tuple[Integer[Array, " n+1"], Integer[Array, " nse"], Inexact[Array, " nse"]]
 
-# A Pardiso factorization handle, the int64 array `pardiso_mkl_jax.primitive.analyze`
-# returns and every later stage threads through. Being an ordinary JAX array value
-# rather than a Python-side id is what lets XLA order the whole analyze-factor-solve-
-# release lifecycle by data dependency, so it composes inside a jitted function.
-_PardisoHandle = NewType("_PardisoHandle", Array)
+# A Pardiso factorization handle: either the raw int64 array
+# `pardiso_mkl_jax.primitive.analyze` returns, or (when created while tracing) a
+# `_HandleToken` wrapping it, see `_handle.py`. Being an ordinary JAX value rather
+# than a Python-side id is what lets XLA order the whole analyze-factor-solve-release
+# lifecycle by data dependency, so it composes inside a jitted function.
+_PardisoHandle = Array | _HandleToken
 
 PyTreeT = TypeVar("PyTreeT", bound=PyTree)
 
@@ -80,60 +90,64 @@ class _PardisoHandleAllocationScopeManager:
     still depends on.
     """
 
-    _handles_allocated_in_scope: ContextVar[list[Array] | None] = ContextVar(
+    _handles_allocated_in_scope: ContextVar[list[_PardisoHandle] | None] = ContextVar(
         "_pardiso_handles_in_use", default=None
     )
 
-    _handle_dependencies: dict[int, list[Any]] = {}
+    _handle_dependencies = HandleDependencies()
 
     @classmethod
     @contextmanager
     def begin_scope(cls) -> Iterator[None]:
         primitive = _pardiso_mkl_jax().primitive
-        handles: list[Array] = []
+        handles: list[_PardisoHandle] = []
         token = cls._handles_allocated_in_scope.set(handles)
 
         yield
 
         for handle in reversed(handles):
-            deps = cls._handle_dependencies.pop(id(handle), [])
+            deps = cls._handle_dependencies.pop(handle)
+            value = handle_value(handle)
             if deps:
                 # Forces release to run after everything that used handle: release and
                 # a solve both merely consume handle, so without this they share no
                 # ordering XLA must respect, and could run in either order.
-                handle, _ = jax.lax.optimization_barrier((handle, deps))
-            primitive.release(handle)
+                value, _ = jax.lax.optimization_barrier((value, deps))
+            primitive.release(value)
 
         cls._handles_allocated_in_scope.reset(token)
 
     @classmethod
-    def register_handle(cls, handle: Array) -> Array:
+    def register_handle(cls, value: Array) -> _PardisoHandle:
         handles = cls._handles_allocated_in_scope.get()
         assert handles is not None
+        handle: _PardisoHandle = wrap_handle(value)
         handles.append(handle)
         return handle
 
     @classmethod
-    def rebind_handle(cls, old_handle: Array, new_handle: Array) -> Array:
+    def rebind_handle(
+        cls, old_handle: _PardisoHandle, new_value: Array
+    ) -> _PardisoHandle:
         """Replace a registered handle with the value `factor` advanced it to.
 
-        Carries forward any dependencies already registered against the old handle, so
-        a scope opened before the rebind still frees the right, current resource, and
-        still waits for whatever depended on the handle under its old identity.
+        Reuses `old_handle`'s token-or-not kind, and its stable id if it is one, so
+        dependencies already registered against it are still found and the scope still
+        frees the right, current resource rather than a stale one.
         """
         handles = cls._handles_allocated_in_scope.get()
         assert handles is not None
+        new_handle: _PardisoHandle = _rebind_token(old_handle, new_value)
         handles[:] = [
             new_handle if handle is old_handle else handle for handle in handles
         ]
-        deps = cls._handle_dependencies.pop(id(old_handle), None)
-        if deps:
-            cls._handle_dependencies[id(new_handle)] = deps
         return new_handle
 
     @classmethod
-    def register_dependency(cls, handle: Array, dependency: PyTreeT) -> PyTreeT:
-        cls._handle_dependencies.setdefault(id(handle), []).append(dependency)
+    def register_dependency(
+        cls, handle: _PardisoHandle, dependency: PyTreeT
+    ) -> PyTreeT:
+        cls._handle_dependencies.register(handle, dependency)
         return dependency
 
 
@@ -197,17 +211,17 @@ class _PardisoBasicState(NamedTuple):
         indptr, indices, values = self.csr
 
         with _PardisoHandleAllocationScopeManager.begin_scope():
-            handle = primitive.analyze(
+            value = primitive.analyze(
                 indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
             )
-            handle = primitive.factor(
-                handle,
+            value = primitive.factor(
+                value,
                 indptr,
                 indices,
                 values,
                 matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
             )
-            _PardisoHandleAllocationScopeManager.register_handle(handle)
+            handle = _PardisoHandleAllocationScopeManager.register_handle(value)
             yield _PardisoNumericState(
                 self.csr, handle, self.packed_structures, self.shape, self.transposed
             )
@@ -291,22 +305,18 @@ class _PardisoSymbolicState(eqx.Module):
         primitive = _pardiso_mkl_jax().primitive
         pmj = _pardiso_mkl_jax()
         indptr, indices, values = self.csr
-        new_handle = primitive.factor(
-            self.handle,
+        new_value = primitive.factor(
+            handle_value(self.handle),
             indptr,
             indices,
             values,
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
         handle = _PardisoHandleAllocationScopeManager.rebind_handle(
-            self.handle, new_handle
+            self.handle, new_value
         )
         yield _PardisoNumericState(
-            self.csr,
-            _PardisoHandle(handle),
-            self.packed_structures,
-            self.shape,
-            self.transposed,
+            self.csr, handle, self.packed_structures, self.shape, self.transposed
         )
 
 
@@ -524,14 +534,14 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
 
         pmj = _pardiso_mkl_jax()
         with _PardisoHandleAllocationScopeManager.begin_scope():
-            handle = pmj.primitive.analyze(
+            value = pmj.primitive.analyze(
                 indptr,
                 indices,
                 analyze_values,
                 matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
             )
-            _PardisoHandleAllocationScopeManager.register_handle(handle)
-            yield _PardisoSymbolicScope(tuple(shape), _PardisoHandle(handle))
+            handle = _PardisoHandleAllocationScopeManager.register_handle(value)
+            yield _PardisoSymbolicScope(tuple(shape), handle)
 
     def compute(
         self,
@@ -555,7 +565,7 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
             ):
                 # Numeric factorization already done eagerly; just solve against it.
                 solution = primitive.solve_stateful(
-                    handle,
+                    handle_value(handle),
                     indptr,
                     indices,
                     values,
@@ -572,7 +582,7 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                 # solve in one fused call. Safe under jit: the values are passed
                 # explicitly rather than stored on any native object.
                 solution = primitive.factor_and_solve_stateful(
-                    handle,
+                    handle_value(handle),
                     indptr,
                     indices,
                     values,

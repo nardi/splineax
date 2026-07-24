@@ -1,7 +1,7 @@
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from enum import Enum, auto
-from typing import Any, NamedTuple, NewType, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import equinox as eqx
 import jax
@@ -27,6 +27,12 @@ from splineax.operators._jacobian import (
     SparseJacobianLinearOperator,
     SparseJacobianLinearOperatorColoring,
 )
+from splineax.solvers._handle import (
+    HandleDependencies,
+    _HandleToken,
+    handle_value,
+    wrap_handle,
+)
 from splineax.solvers._sparse import (
     AbstractSparseLinearSolver,
     SparseNumericState,
@@ -39,7 +45,8 @@ _COO = tuple[Integer[Array, " a"], Integer[Array, " b"], Inexact[Array, " nse"]]
 # Row and column indices only, without values.
 _COOIndices = tuple[Integer[Array, " a"], Integer[Array, " b"]]
 
-_KLUHandle = NewType("_KLUHandle", Array)
+# Either a plain array or a `_HandleToken`, see `_handle.py`.
+_KLUHandle = Array | _HandleToken
 
 
 class _KLUFactorization(NamedTuple):
@@ -57,10 +64,10 @@ PyTreeT = TypeVar("PyTreeT", bound=PyTree)
 
 class _KLUHandleAllocationScopeManager:
     _handles_allocated_in_scope: ContextVar[
-        list[tuple[_KLUHandleType, KLUHandleManager]] | None
+        list[tuple[_KLUHandleType, KLUHandleManager, _KLUHandle]] | None
     ] = ContextVar("_klu_handles_in_use", default=None)
 
-    _handle_dependencies: dict[int, list[Any]] = {}
+    _handle_dependencies = HandleDependencies()
 
     @classmethod
     @contextmanager
@@ -71,8 +78,8 @@ class _KLUHandleAllocationScopeManager:
 
         yield
 
-        for handle_type, manager in reversed(handles):
-            deps = cls._handle_dependencies.pop(id(manager.handle), [])
+        for handle_type, manager, handle in reversed(handles):
+            deps = cls._handle_dependencies.pop(handle)
             match handle_type:
                 case _KLUHandleType.SYMBOLIC:
                     klujax.free_symbolic(manager, deps)
@@ -84,15 +91,16 @@ class _KLUHandleAllocationScopeManager:
     @classmethod
     def register_handle(
         cls, handle_type: _KLUHandleType, manager: KLUHandleManager
-    ) -> KLUHandleManager:
+    ) -> _KLUHandle:
         handles = cls._handles_allocated_in_scope.get()
         assert handles is not None
-        handles.append((handle_type, manager))
-        return manager
+        handle: _KLUHandle = wrap_handle(manager.handle)
+        handles.append((handle_type, manager, handle))
+        return handle
 
     @classmethod
-    def register_dependency(cls, handle: Array, dependency: PyTreeT) -> PyTreeT:
-        cls._handle_dependencies.setdefault(id(handle), []).append(dependency)
+    def register_dependency(cls, handle: _KLUHandle, dependency: PyTreeT) -> PyTreeT:
+        cls._handle_dependencies.register(handle, dependency)
         return dependency
 
 
@@ -111,14 +119,13 @@ class _KLUBasicState(NamedTuple):
                 _KLUHandleType.SYMBOLIC, klujax.analyze(Ai, Aj, self.shape[1])
             )
             numeric = _KLUHandleAllocationScopeManager.register_handle(
-                _KLUHandleType.NUMERIC, klujax.factor(Ai, Aj, Ax, symbolic)
+                _KLUHandleType.NUMERIC,
+                klujax.factor(Ai, Aj, Ax, handle_value(symbolic)),
             )
 
             yield _KLUNumericState(
                 self.coo,
-                _KLUFactorization(
-                    _KLUHandle(symbolic.handle), _KLUHandle(numeric.handle)
-                ),
+                _KLUFactorization(symbolic, numeric),
                 self.packed_structures,
                 self.shape,
             )
@@ -137,13 +144,13 @@ class _KLUSymbolicState(NamedTuple):
         with _KLUHandleAllocationScopeManager.begin_scope():
             # Only the numeric handle is registered here. The symbolic handle is
             # owned and freed by the outer factorize_symbolic() scope.
-            numeric_manager = _KLUHandleAllocationScopeManager.register_handle(
+            numeric = _KLUHandleAllocationScopeManager.register_handle(
                 _KLUHandleType.NUMERIC,
-                _klujax().factor(Ai, Aj, Ax, self.symbolic),
+                _klujax().factor(Ai, Aj, Ax, handle_value(self.symbolic)),
             )
             yield _KLUNumericState(
                 self.coo,
-                _KLUFactorization(self.symbolic, _KLUHandle(numeric_manager.handle)),
+                _KLUFactorization(self.symbolic, numeric),
                 self.packed_structures,
                 self.shape,
             )
@@ -418,7 +425,7 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
             yield _KLUSymbolicScope(
                 (Ai, Aj),
                 tuple(shape),
-                _KLUHandle(symbolic.handle),
+                symbolic,
             )
 
     def compute(
@@ -455,7 +462,7 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                     if transposed
                     else klujax.solve_with_numeric
                 )
-                x = solve(numeric, b, symbolic)
+                x = solve(handle_value(numeric), b, handle_value(symbolic))
                 _KLUHandleAllocationScopeManager.register_dependency(symbolic, x)
                 _KLUHandleAllocationScopeManager.register_dependency(numeric, x)
             case _KLUSymbolicState(symbolic=symbolic, transposed=transposed):
@@ -467,7 +474,7 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                     if transposed
                     else klujax.solve_with_symbol
                 )
-                x = solve(Ai, Aj, Ax, b, symbolic)
+                x = solve(Ai, Aj, Ax, b, handle_value(symbolic))
                 _KLUHandleAllocationScopeManager.register_dependency(symbolic, x)
             case _KLUBasicState():
                 x = klujax.solve(Ai, Aj, Ax, b)
@@ -536,11 +543,11 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                 # the previous numeric handle? Does it matter?
                 numeric = _KLUHandleAllocationScopeManager.register_handle(
                     _KLUHandleType.NUMERIC,
-                    _klujax().factor(Ai, Aj, Ax.conj(), symbolic),
+                    _klujax().factor(Ai, Aj, Ax.conj(), handle_value(symbolic)),
                 )
                 return _KLUNumericState(
                     (Ai, Aj, Ax.conj()),
-                    _KLUFactorization(symbolic, _KLUHandle(numeric.handle)),
+                    _KLUFactorization(symbolic, numeric),
                     packed_structures,
                     shape,
                     transposed,

@@ -174,11 +174,19 @@ def test_factorize_symbolic_opens_entirely_under_jit(
     jitted function: opening the scope, `.init`, and the solve all trace together, for
     every solver that supports factorization reuse.
 
-    Solves through `solver.compute` directly rather than `lx.linear_solve`: the latter's
-    autodiff-aware wrapping rebuilds the state pytree with fresh leaf objects, which
-    breaks the handle-freeing scope's dependency tracking (keyed by Python object
-    identity) when the scope's exit is itself traced into the same jit call as the
-    solve, a narrower case than this test needs to cover.
+    Solves through `solver.compute` directly rather than `lx.linear_solve`. The
+    handle-freeing scope's dependency tracking now uses a stable id carried as pytree
+    aux data (`splineax/solvers/_handle.py`), which survives `lx.linear_solve`
+    rebuilding the state pytree with fresh leaf objects (the case that used to break
+    plain object-identity tracking, and segfault Pardiso). But `lx.linear_solve` also
+    calls `solver.compute` an *extra* time internally, through `eqx.filter_eval_shape`,
+    to probe its own output structure. When the whole scope is opened and closed inside
+    one trace, that probe's own result is a tracer belonging to an already-closed,
+    more deeply nested trace, and registering it as a dependency and later feeding it to
+    `jax.lax.optimization_barrier` from the still-active outer trace being built for
+    this test's own jit call is invalid, independent of how it's keyed. That is a
+    separate lineax/equinox interaction, not the identity bug this module's fix
+    addresses, so this test uses `compute` directly to isolate the latter.
     """
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     indices, shape = sparsity.indices, sparsity.shape
