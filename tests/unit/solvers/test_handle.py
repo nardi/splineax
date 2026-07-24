@@ -3,8 +3,11 @@ by `_klu.py` and `_pardiso.py`.
 
 These test the mechanism directly and in isolation from either solver: that a handle
 is only wrapped in a token while being traced, that the wrapping does not force extra
-recompilation, and that a token's stable id survives being rebuilt with fresh leaf
-objects, the way `lineax.linear_solve` does to a state pytree.
+recompilation, that a token's stable id survives being rebuilt with fresh leaf objects
+the way `lineax.linear_solve` does to a state pytree, that dependency tracking is
+scoped to the trace a dependency was created in, and that registering a dependency in
+the wrong trace without going through `splineax.linear_solve` raises rather than
+silently dropping it.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from splineax.solvers._handle import (
     _HandleToken,
     handle_key,
     handle_value,
+    mark_via_linear_solve,
     rebind_handle,
     wrap_handle,
 )
@@ -124,6 +128,131 @@ def test_reused_scope_does_not_recompile() -> None:
     f(handle)
     f(handle)
     assert trace_count == 1, "a concrete handle passed twice should only trace once"
+
+
+def test_dependencies_from_other_traces_are_dropped() -> None:
+    """A dependency registered in a nested trace is dropped when the handle is popped
+    from the outer trace, while one registered in the same trace as the pop is kept.
+
+    This is the case `lineax.linear_solve` creates: it runs a solve in a nested trace,
+    whose result must not leak into the outer trace's free loop.
+    """
+    deps = HandleDependencies()
+
+    @jax.jit
+    def outer(x, outer_dependency):
+        handle = wrap_handle(x)
+        assert isinstance(handle, _HandleToken)
+        deps.register(handle, outer_dependency)  # registered in the outer trace
+        stable_id = handle.stable_id
+
+        def nested(y):
+            # Same stable id, but a value and registration belonging to a nested trace,
+            # as a `lineax.linear_solve` solve would produce.
+            deps.register(_HandleToken(y, stable_id), y)
+            return y
+
+        jax.jit(nested)(outer_dependency)
+
+        kept = deps.pop(handle)  # popped in the outer trace
+        assert len(kept) == 1
+        assert kept[0] is outer_dependency
+        return handle_value(handle)
+
+    outer(jnp.array(1, dtype=jnp.int64), jnp.array(2.0))
+
+
+def test_register_raises_for_unmarked_cross_trace_dependency() -> None:
+    """Registering a dependency in a different trace than the one the handle was
+    allocated in raises, unless `mark_via_linear_solve` is active.
+
+    This is the check that catches a bare `lineax.linear_solve` call used where
+    `splineax.linear_solve` is required: without it, the dependency would simply be
+    dropped at free time and the handle could be released while still in use.
+    """
+    deps = HandleDependencies()
+
+    @jax.jit
+    def outer(x, y):
+        handle = wrap_handle(x)
+        deps.record_allocation(handle)  # allocated in the outer trace
+
+        def nested(z):
+            with pytest.raises(RuntimeError, match="splineax.linear_solve"):
+                deps.register(handle, z)
+            return z
+
+        jax.jit(nested)(y)
+        return handle_value(handle)
+
+    outer(jnp.array(1, dtype=jnp.int64), jnp.array(2.0))
+
+
+def test_register_allows_cross_trace_dependency_when_marked() -> None:
+    """The same cross-trace registration does not raise while `mark_via_linear_solve`
+    is active, so `splineax.linear_solve` can call `lineax.linear_solve` without
+    tripping the check on the nested dependency `compute` registers internally."""
+    deps = HandleDependencies()
+
+    @jax.jit
+    def outer(x, y):
+        handle = wrap_handle(x)
+        deps.record_allocation(handle)
+
+        def nested(z):
+            with mark_via_linear_solve():
+                deps.register(handle, z)  # does not raise
+            return z
+
+        jax.jit(nested)(y)
+        return handle_value(handle)
+
+    outer(jnp.array(1, dtype=jnp.int64), jnp.array(2.0))
+
+
+def test_register_same_trace_as_allocation_never_raises() -> None:
+    """Registering a dependency in the same trace the handle was allocated in never
+    raises, marked or not: there is no cross-trace mismatch to catch."""
+    deps = HandleDependencies()
+
+    @jax.jit
+    def f(x, y):
+        handle = wrap_handle(x)
+        deps.record_allocation(handle)
+        deps.register(handle, y)  # same trace as record_allocation, does not raise
+        return handle_value(handle)
+
+    f(jnp.array(1, dtype=jnp.int64), jnp.array(2.0))
+
+
+def test_record_allocation_is_a_no_op_for_plain_arrays() -> None:
+    """`record_allocation` only tracks tokens: an eagerly allocated handle has no
+    allocation trace recorded, so `register` never raises for it, matching the eager
+    scope-reuse case where cross-call ordering is already safe (see the module
+    docstring in `_handle.py`)."""
+    deps = HandleDependencies()
+    handle = jnp.array(1, dtype=jnp.int64)  # eager: stays a plain array
+    deps.record_allocation(handle)  # no-op, not a token
+
+    @jax.jit
+    def f(y):
+        deps.register(handle, y)  # does not raise: no allocation trace was recorded
+        return y
+
+    f(jnp.array(2.0))
+
+
+def test_eager_dependencies_round_trip() -> None:
+    """Registering and popping a dependency eagerly (no trace) keeps it: there is no
+    trace to mismatch, and eager execution order already sequences a free after its
+    solves."""
+    deps = HandleDependencies()
+    handle = jnp.array(1, dtype=jnp.int64)  # eager: a plain array
+    dependency = jnp.array(2.0)
+    deps.register(handle, dependency)
+    kept = deps.pop(handle)
+    assert len(kept) == 1
+    assert kept[0] is dependency
 
 
 def test_eqx_module_dynamic_field_can_hold_a_token() -> None:
