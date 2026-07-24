@@ -47,67 +47,70 @@ def test_pardiso_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 pytest.importorskip("pardiso_mkl_jax")
 
-import pardiso_mkl_jax as pmj  # noqa: E402
-from pardiso_mkl_jax import _ffi  # noqa: E402
+from pardiso_mkl_jax import _ffi, primitive  # noqa: E402
 
 
 @contextmanager
 def _spy(name: str) -> Generator[list[bool], None, None]:
-    """Intercept a `pardiso_mkl_jax.PardisoSolver` method and record every call.
+    """Intercept a `pardiso_mkl_jax.primitive` function and record every call.
 
     A `list[bool]` rather than a counter, so the log stays truthful under JIT tracing
     (each trace-time call appends one entry, mirroring `test_klu.py`'s `_spy_solve`).
     """
     call_log: list[bool] = []
-    original = getattr(pmj.PardisoSolver, name)
+    original = getattr(primitive, name)
 
-    def spy(self, *args, **kwargs):
+    def spy(*args, **kwargs):
         call_log.append(True)
-        return original(self, *args, **kwargs)
+        return original(*args, **kwargs)
 
-    setattr(pmj.PardisoSolver, name, spy)
+    setattr(primitive, name, spy)
+    # `_pardiso.py` looks these functions up on the `primitive` module at call time
+    # (through `_pardiso_mkl_jax().primitive`), so patching the module attribute here
+    # is enough to intercept every call.
     try:
         yield call_log
     finally:
-        setattr(pmj.PardisoSolver, name, original)
+        setattr(primitive, name, original)
 
 
 def test_factorize_closes_solver_on_exit(make_operator: OperatorFactory) -> None:
-    """`Pardiso().factorize(operator)` must call `.factorize()` (not just `.analyze()`)
-    exactly once, and close the underlying `PardisoSolver` when the block exits."""
+    """`Pardiso().factorize(operator)` must call `.factor()` (not just `.analyze()`)
+    exactly once, and release the underlying handle when the block exits."""
     operator = make_operator(SQUARE_MATRIX)
     solver = Pardiso()
 
     with (
-        _spy("factorize") as factorize_calls,
-        _spy("close") as close_calls,
+        _spy("factor") as factor_calls,
+        _spy("release") as release_calls,
     ):
         with solver.factorize(operator) as state:
-            assert not close_calls, "solver was closed before the block exited"
+            assert not release_calls, "handle was released before the block exited"
             solution = lx.linear_solve(
                 operator, RIGHT_HAND_SIDE, solver=solver, state=state
             ).value
 
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
     assert jnp.allclose(solution, expected, atol=1e-5)
-    assert factorize_calls, "PardisoSolver.factorize was not called"
-    assert close_calls, "PardisoSolver was not closed when the factorize block exited"
+    assert factor_calls, "primitive.factor was not called"
+    assert release_calls, "the handle was not released when the factorize block exited"
 
 
 def test_factorize_symbolic_reuses_analysis_across_solves() -> None:
     """A `factorize_symbolic` scope analyses once and reuses it across solves, redoing the
-    numeric phase per call through `refactor_and_solve`, and closing on scope exit."""
+    numeric phase per call through `factor_and_solve_stateful`, and releasing on scope
+    exit."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = Pardiso()
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
 
     with (
         _spy("analyze") as analyze_calls,
-        _spy("refactor_and_solve") as refactor_and_solve_calls,
-        _spy("close") as close_calls,
+        _spy("factor_and_solve_stateful") as factor_and_solve_calls,
+        _spy("release") as release_calls,
     ):
         with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
-            solver_id = scope.handle.solver._solver_id
+            handle = scope.handle
 
             first_state = scope.init(operator)
             first_solution = solver.compute(first_state, RIGHT_HAND_SIDE, {})[0]
@@ -115,23 +118,23 @@ def test_factorize_symbolic_reuses_analysis_across_solves() -> None:
             second_state = scope.init(operator)
             second_solution = solver.compute(second_state, RIGHT_HAND_SIDE, {})[0]
 
-            assert not close_calls, "solver was closed before the block exited"
+            assert not release_calls, "handle was released before the block exited"
             # Ground truth from the native side: the symbolic phase ran once.
-            assert _ffi.analysis_count(solver_id) == 1
+            assert _ffi.analysis_count(handle) == 1
 
     assert len(analyze_calls) == 1, (
         f"expected exactly 1 analyze() call, got {len(analyze_calls)}"
     )
-    assert len(refactor_and_solve_calls) == 2, (
-        f"expected 2 refactor_and_solve() calls, got {len(refactor_and_solve_calls)}"
+    assert len(factor_and_solve_calls) == 2, (
+        f"expected 2 factor_and_solve_stateful() calls, got {len(factor_and_solve_calls)}"
     )
-    assert close_calls, "PardisoSolver was not closed when the scope exited"
+    assert release_calls, "the handle was not released when the scope exited"
     assert jnp.allclose(first_solution, expected, atol=1e-5)
     assert jnp.allclose(second_solution, expected, atol=1e-5)
 
 
 def test_symbolic_scope_reused_under_jit_analyses_once() -> None:
-    """The core requirement: perform the symbolic factorization eagerly, then reuse the
+    """The core requirement: open the symbolic factorization scope eagerly, then reuse the
     scope inside a jitted function across different values. The analysis must run exactly
     once (analysis_count stays 1) and every solve must be correct."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
@@ -150,21 +153,40 @@ def test_symbolic_scope_reused_under_jit_analyses_once() -> None:
         return lx.linear_solve(operator, b, solver=solver, state=state).value
 
     with solver.factorize_symbolic(sparsity) as scope:
-        solver_id = scope.handle.solver._solver_id
-        # Perform the symbolic factorization once, eagerly, then reuse it in the jit.
-        scope.init(BCOOLinearOperator(sparsity))
+        handle = scope.handle
         solution = np.asarray(run(scope, sparsity.data, RIGHT_HAND_SIDE))
         other_solution = np.asarray(run(scope, 2.0 * sparsity.data, RIGHT_HAND_SIDE))
-        assert _ffi.analysis_count(solver_id) == 1
+        assert _ffi.analysis_count(handle) == 1
 
     assert jnp.allclose(solution, expected, atol=1e-5)
     assert jnp.allclose(other_solution, other_expected, atol=1e-5)
 
 
+def test_symbolic_scope_handle_released_exactly_once() -> None:
+    """The handle a `factorize_symbolic` scope allocates is released exactly once, on
+    scope exit, whether or not the scope's state is ever used inside a jitted function."""
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    solver = Pardiso()
+
+    with _spy("release") as release_calls:
+        with solver.factorize_symbolic(sparsity) as scope:
+            handle = scope.handle
+            state = scope.init(BCOOLinearOperator(sparsity))
+            solver.compute(state, RIGHT_HAND_SIDE, {})
+            assert not release_calls
+
+    assert len(release_calls) == 1, (
+        f"expected exactly 1 release() call, got {len(release_calls)}"
+    )
+    # The handle's native registry entry is gone, so the analysis-count hook falls
+    # back to reporting 0 for it.
+    assert _ffi.analysis_count(handle) == 0
+
+
 def test_transpose_reuses_factorization() -> None:
     """`solver.transpose()` must reuse the existing factorization: no extra
-    `.analyze()`/`.factorize()`/`.refactorize()` calls, just a `.solve(transpose=True)`
-    against the same handle."""
+    `.analyze()`/`.factor()` calls, just a `solve_stateful(transpose=True)` against the
+    same handle."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = Pardiso()
     expected_transpose = jnp.linalg.solve(
@@ -174,8 +196,7 @@ def test_transpose_reuses_factorization() -> None:
     with solver.init(operator, {}).factorize() as state:
         with (
             _spy("analyze") as analyze_calls,
-            _spy("factorize") as factorize_calls,
-            _spy("refactorize") as refactorize_calls,
+            _spy("factor") as factor_calls,
         ):
             transposed_state, _ = solver.transpose(state, options={})
             assert isinstance(transposed_state, _PardisoNumericState)
@@ -185,8 +206,7 @@ def test_transpose_reuses_factorization() -> None:
             solution = solver.compute(transposed_state, RIGHT_HAND_SIDE, options={})[0]
 
     assert not analyze_calls, "transpose() should not re-analyze"
-    assert not factorize_calls, "transpose() should not re-factorize"
-    assert not refactorize_calls, "transpose() should not refactorize"
+    assert not factor_calls, "transpose() should not re-factor"
     assert jnp.allclose(solution, expected_transpose, atol=1e-5), (
         "transposed solve produced an incorrect solution"
     )

@@ -84,11 +84,16 @@ with solver.factorize_symbolic(sparsity) as scope:
 pattern is read. For the Jacobian operator and the two coloring wrappers, the pattern
 comes from the precomputed sparsity, without materialising the Jacobian numerically.
 
-Once the analysis has run, the scope can be passed into a jitted function that builds
-the operator inside and calls `scope.init` again, so the analysis is reused across
-solves whose values are only known under the trace. With `Pardiso`, run one eager
-`scope.init(operator)` first (this is what performs the analysis, since it needs
-representative values); reusing the scope under a trace before that raises.
+The scope itself, not just the state it produces, can be passed into a jitted function
+that builds the operator inside and calls `scope.init` again, so the analysis is reused
+across solves whose values are only known under the trace. This works for opening the
+scope itself too: `solver.factorize_symbolic(...)` may be written directly inside a
+jitted function, for both solvers, since a factorization handle is an ordinary JAX
+array value rather than a native object tied to the Python side. Solve with
+`solver.compute(state, b, {})` rather than `lx.linear_solve` in that case: opening and
+closing the scope within the same jitted function relies on the solve happening before
+the scope's cleanup, and `lx.linear_solve`'s autodiff-aware wrapping does not preserve
+that ordering.
 
 ## How the states chain
 

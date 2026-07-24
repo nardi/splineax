@@ -813,8 +813,8 @@ wheels = [
 
 [[package]]
 name = "pardiso-mkl-jax"
-version = "0.1.2"
-source = { git = "https://github.com/nardi/pardiso-mkl-jax?branch=factor_and_solve#efcfb36f97b0ba6815d8b5e52dd4318223ded32f" }
+version = "0.1.3"
+source = { git = "https://github.com/nardi/pardiso-mkl-jax?branch=factor_and_solve#82445ba2f3d17837507ab6e4c709faa3379e58e7" }
 dependencies = [
     { name = "equinox" },
     { name = "jax" },
