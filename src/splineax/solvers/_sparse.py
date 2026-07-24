@@ -3,11 +3,15 @@ from contextlib import AbstractContextManager, contextmanager
 from typing import Any, Generic, Iterator, Protocol, TypeVar, runtime_checkable
 
 from jax.experimental.sparse import BCOO, BCSR
-from lineax import AbstractLinearOperator
-from lineax._solve import AbstractLinearSolver
+from jaxtyping import PyTree
+from lineax import AbstractLinearOperator, AutoLinearSolver
+from lineax import linear_solve as _lx_linear_solve
+from lineax._solution import Solution
+from lineax._solve import AbstractLinearSolver, sentinel
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.solvers._handle import mark_via_linear_solve
 
 _Sparsity = BCOO | BCSR | BCOOLinearOperator | BCSRLinearOperator
 
@@ -125,3 +129,44 @@ def factorize_through_init(
     """
     with solver.init(operator, options).factorize() as numeric_state:
         yield numeric_state
+
+
+@runtime_checkable
+class _HandleOwningState(Protocol):
+    """A state that owns a native handle and must register a solve's result against
+    it, implemented by `KLU`'s and `Pardiso`'s symbolic/numeric state classes."""
+
+    def _register_solve_dependency(self, value: Any) -> None: ...
+
+
+def linear_solve(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    solver: AbstractLinearSolver = AutoLinearSolver(well_posed=True),
+    *,
+    options: dict[str, Any] | None = None,
+    state: PyTree[Any] = sentinel,
+    throw: bool = True,
+) -> Solution:
+    """Drop-in replacement for `lineax.linear_solve`, needed for a state derived from
+    `KLU`'s or `Pardiso`'s `factorize_symbolic` scope when the scope is opened and
+    closed entirely inside one `jax.jit` call.
+
+    `lineax.linear_solve` stages the solve into a trace nested inside whichever trace
+    calls it. When the whole scope is traced together with the solve, that leaves the
+    scope's handle-freeing free loop, which runs in the *outer* trace, unable to see
+    the solve's result and unable to order the free after it. This function also
+    registers the result against `state`'s handle(s) itself, from the outer trace,
+    right here, once `lineax.linear_solve` returns.
+
+    Solving without `state` set, or with a state that owns no handle (`Spsolve`, or a
+    solver's `.init()` state before any factorization), behaves exactly like
+    `lineax.linear_solve`: there is nothing to register.
+    """
+    with mark_via_linear_solve():
+        solution = _lx_linear_solve(
+            operator, vector, solver, options=options, state=state, throw=throw
+        )
+    if isinstance(state, _HandleOwningState):
+        state._register_solve_dependency(solution.value)
+    return solution

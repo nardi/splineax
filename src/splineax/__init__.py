@@ -31,3 +31,6 @@ from .solvers import (
 from .solvers import (
     Spsolve as Spsolve,
 )
+from .solvers import (
+    linear_solve as linear_solve,
+)

@@ -122,6 +122,7 @@ class _PardisoHandleAllocationScopeManager:
         handles = cls._handles_allocated_in_scope.get()
         assert handles is not None
         handle: _PardisoHandle = wrap_handle(value)
+        cls._handle_dependencies.record_allocation(handle)
         handles.append(handle)
         return handle
 
@@ -319,6 +320,11 @@ class _PardisoSymbolicState(eqx.Module):
             self.csr, handle, self.packed_structures, self.shape, self.transposed
         )
 
+    def _register_solve_dependency(self, value: Array) -> None:
+        # Lets `splineax.linear_solve` order this state's handle free after `value`,
+        # picked up by `_sparse.linear_solve` via duck typing, see `_handle.py`.
+        _PardisoHandleAllocationScopeManager.register_dependency(self.handle, value)
+
 
 class _PardisoNumericState(eqx.Module):
     csr: _CSR
@@ -326,6 +332,10 @@ class _PardisoNumericState(eqx.Module):
     packed_structures: PackedStructures
     shape: tuple[int, ...] = eqx.field(static=True)
     transposed: bool = eqx.field(static=True, default=False)
+
+    def _register_solve_dependency(self, value: Array) -> None:
+        # Same hook as `_PardisoSymbolicState`, see its comment.
+        _PardisoHandleAllocationScopeManager.register_dependency(self.handle, value)
 
 
 _PardisoState = _PardisoBasicState | _PardisoSymbolicState | _PardisoNumericState

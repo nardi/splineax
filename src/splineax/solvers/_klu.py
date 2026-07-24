@@ -95,6 +95,7 @@ class _KLUHandleAllocationScopeManager:
         handles = cls._handles_allocated_in_scope.get()
         assert handles is not None
         handle: _KLUHandle = wrap_handle(manager.handle)
+        cls._handle_dependencies.record_allocation(handle)
         handles.append((handle_type, manager, handle))
         return handle
 
@@ -155,6 +156,11 @@ class _KLUSymbolicState(NamedTuple):
                 self.shape,
             )
 
+    def _register_solve_dependency(self, value: Array) -> None:
+        # Lets `splineax.linear_solve` order this state's handle free after `value`,
+        # picked up by `_sparse.linear_solve` via duck typing, see `_handle.py`.
+        _KLUHandleAllocationScopeManager.register_dependency(self.symbolic, value)
+
 
 class _KLUNumericState(eqx.Module):
     coo: _COO
@@ -164,6 +170,16 @@ class _KLUNumericState(eqx.Module):
     # `transposed` under AD tracing, where a traced leaf could not be used in `if`.
     shape: tuple[int, ...] = eqx.field(static=True)
     transposed: bool = eqx.field(static=True, default=False)
+
+    def _register_solve_dependency(self, value: Array) -> None:
+        # Both handles were used by this solve (see `compute`'s `_KLUNumericState`
+        # case), so both scopes that own them need this registered to order correctly.
+        _KLUHandleAllocationScopeManager.register_dependency(
+            self.factorization.symbolic, value
+        )
+        _KLUHandleAllocationScopeManager.register_dependency(
+            self.factorization.numeric, value
+        )
 
 
 class _KLUSymbolicScope(NamedTuple):

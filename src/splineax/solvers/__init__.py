@@ -19,5 +19,8 @@ from ._sparse import (
 from ._sparse import (
     SparseSymbolicState as SparseSymbolicState,
 )
+from ._sparse import (
+    linear_solve as linear_solve,
+)
 from ._spsolve import ReorderingScheme as ReorderingScheme
 from ._spsolve import Spsolve as Spsolve
