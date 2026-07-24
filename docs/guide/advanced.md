@@ -84,6 +84,12 @@ with solver.factorize_symbolic(sparsity) as scope:
 pattern is read. For the Jacobian operator and the two coloring wrappers, the pattern
 comes from the precomputed sparsity, without materialising the Jacobian numerically.
 
+Once the analysis has run, the scope can be passed into a jitted function that builds
+the operator inside and calls `scope.init` again, so the analysis is reused across
+solves whose values are only known under the trace. With `Pardiso`, run one eager
+`scope.init(operator)` first (this is what performs the analysis, since it needs
+representative values); reusing the scope under a trace before that raises.
+
 ## How the states chain
 
 The protocol describes a small family of state types

@@ -4,9 +4,10 @@
 itself is always exercised (via monkeypatching, independent of whether the real package
 is installed), while the factorization-reuse tests are skipped when it isn't.
 
-The generic solve-correctness suite (all solvers, both operator formats) lives in
-test_solvers.py. `AutoSparseLinearSolver`'s dispatch (including the Pardiso/KLU choice)
-lives in test_auto.py.
+The solver-agnostic factorization-reuse contract (correctness, reuse, transpose, passing
+states into a jitted function) lives in test_factorization.py, the generic solve suite in
+test_solvers.py, and `AutoSparseLinearSolver`'s dispatch (including the Pardiso/KLU choice)
+in test_auto.py.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Generator
 
+import equinox as eqx
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
@@ -46,6 +48,7 @@ def test_pardiso_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 pytest.importorskip("pardiso_mkl_jax")
 
 import pardiso_mkl_jax as pmj  # noqa: E402
+from pardiso_mkl_jax import _ffi  # noqa: E402
 
 
 @contextmanager
@@ -91,22 +94,21 @@ def test_factorize_closes_solver_on_exit(make_operator: OperatorFactory) -> None
     assert close_calls, "PardisoSolver was not closed when the factorize block exited"
 
 
-def test_factorize_symbolic_reuses_analysis_across_init_calls() -> None:
-    """Inside a `factorize_symbolic()` block, `.analyze()` must run only once across
-    multiple `.init()` calls sharing the scope, while `.factorize()`/`.refactorize()`
-    run once each, mirroring `pardiso_mkl_jax`'s own "analysis reused, numeric phase
-    redone per values" contract."""
+def test_factorize_symbolic_reuses_analysis_across_solves() -> None:
+    """A `factorize_symbolic` scope analyses once and reuses it across solves, redoing the
+    numeric phase per call through `refactor_and_solve`, and closing on scope exit."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = Pardiso()
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
 
     with (
         _spy("analyze") as analyze_calls,
-        _spy("factorize") as factorize_calls,
-        _spy("refactorize") as refactorize_calls,
+        _spy("refactor_and_solve") as refactor_and_solve_calls,
         _spy("close") as close_calls,
     ):
         with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+            solver_id = scope.handle.solver._solver_id
+
             first_state = scope.init(operator)
             first_solution = solver.compute(first_state, RIGHT_HAND_SIDE, {})[0]
 
@@ -114,19 +116,49 @@ def test_factorize_symbolic_reuses_analysis_across_init_calls() -> None:
             second_solution = solver.compute(second_state, RIGHT_HAND_SIDE, {})[0]
 
             assert not close_calls, "solver was closed before the block exited"
+            # Ground truth from the native side: the symbolic phase ran once.
+            assert _ffi.analysis_count(solver_id) == 1
 
     assert len(analyze_calls) == 1, (
         f"expected exactly 1 analyze() call, got {len(analyze_calls)}"
     )
-    assert len(factorize_calls) == 1, (
-        f"expected exactly 1 factorize() call, got {len(factorize_calls)}"
-    )
-    assert len(refactorize_calls) == 1, (
-        f"expected exactly 1 refactorize() call, got {len(refactorize_calls)}"
+    assert len(refactor_and_solve_calls) == 2, (
+        f"expected 2 refactor_and_solve() calls, got {len(refactor_and_solve_calls)}"
     )
     assert close_calls, "PardisoSolver was not closed when the scope exited"
     assert jnp.allclose(first_solution, expected, atol=1e-5)
     assert jnp.allclose(second_solution, expected, atol=1e-5)
+
+
+def test_symbolic_scope_reused_under_jit_analyses_once() -> None:
+    """The core requirement: perform the symbolic factorization eagerly, then reuse the
+    scope inside a jitted function across different values. The analysis must run exactly
+    once (analysis_count stays 1) and every solve must be correct."""
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    indices, shape = sparsity.indices, sparsity.shape
+    solver = Pardiso()
+    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
+    other_matrix = 2.0 * SQUARE_MATRIX
+    other_expected = jnp.linalg.solve(
+        np.asarray(other_matrix), np.asarray(RIGHT_HAND_SIDE)
+    )
+
+    @eqx.filter_jit
+    def run(scope, data, b):
+        operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
+        state = scope.init(operator)
+        return lx.linear_solve(operator, b, solver=solver, state=state).value
+
+    with solver.factorize_symbolic(sparsity) as scope:
+        solver_id = scope.handle.solver._solver_id
+        # Perform the symbolic factorization once, eagerly, then reuse it in the jit.
+        scope.init(BCOOLinearOperator(sparsity))
+        solution = np.asarray(run(scope, sparsity.data, RIGHT_HAND_SIDE))
+        other_solution = np.asarray(run(scope, 2.0 * sparsity.data, RIGHT_HAND_SIDE))
+        assert _ffi.analysis_count(solver_id) == 1
+
+    assert jnp.allclose(solution, expected, atol=1e-5)
+    assert jnp.allclose(other_solution, other_expected, atol=1e-5)
 
 
 def test_transpose_reuses_factorization() -> None:
