@@ -5,8 +5,9 @@ context manager: that solves inside the block call `solve_with_numeric` /
 `tsolve_with_numeric` rather than `klujax.solve`, and that every allocated
 handle (symbolic and numeric) is freed exactly once when the block exits.
 
-The generic solve-correctness suite (both solvers, both operator formats) lives
-in `test_solvers.py`.
+The solver-agnostic factorization-reuse contract (correctness, reuse, transpose,
+passing states into a jitted function) lives in `test_factorization.py`, and the
+basic solve suite in `test_solvers.py`.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from typing import Generator
 
 import jax
 import jax.numpy as jnp
-import lineax as lx
 import numpy as np
 import pytest
 from jax.experimental.sparse import BCOO
@@ -171,9 +171,10 @@ def test_factorize_reuses_numeric_solve(
                         id(numeric_state.factorization.numeric),
                     )
                 )
-                return lx.linear_solve(
-                    operator, right_hand_side, solver=solver, state=numeric_state
-                ).value
+                # Call `compute` directly rather than through `lx.linear_solve`: its
+                # internal `filter_jit` cache (possibly warmed by an earlier test)
+                # would skip re-tracing and the trace-time spy would never fire.
+                return solver.compute(numeric_state, right_hand_side, {})[0]
 
         solve_fn = jax.jit(run) if use_jit else run
         solve_fn(RIGHT_HAND_SIDE)
@@ -437,25 +438,4 @@ def test_factorize_symbolic_transpose_uses_tsolve_with_symbol(
     )
     assert jnp.allclose(solution, expected_transpose, atol=1e-5), (
         "tsolve_with_symbol produced incorrect transposed solution"
-    )
-
-
-def test_klu_factorize_gives_correct_solution(
-    make_operator: OperatorFactory,
-) -> None:
-    """`KLU().factorize(operator)` is a convenience method equivalent to
-    `KLU().init(operator).factorize()`.  It must yield a `_KLUNumericState` that
-    produces the same solution as the full lineax solve path.
-    """
-    operator = make_operator(SQUARE_MATRIX)
-    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
-
-    with KLU().factorize(operator) as state:
-        assert isinstance(state, _KLUNumericState)
-        solution = lx.linear_solve(
-            operator, RIGHT_HAND_SIDE, solver=KLU(), state=state
-        ).value
-
-    assert jnp.allclose(solution, expected, atol=1e-5), (
-        "KLU.factorize produced incorrect solution"
     )
