@@ -156,11 +156,41 @@ def test_symbolic_scope_solve_under_jit(solver: AbstractSparseLinearSolver) -> N
         return lx.linear_solve(operator, b, solver=solver, state=state).value
 
     with solver.factorize_symbolic(sparsity) as scope:
-        # Perform the symbolic factorization once, eagerly, then reuse it inside the jit
-        # with two different value arrays on the same pattern.
-        scope.init(BCOOLinearOperator(sparsity))
+        # Reuse the scope inside the jit with two different value arrays on the same
+        # pattern, without ever calling `scope.init` eagerly first: both `KLU` and
+        # `Pardiso` allocate their factorization handle as an ordinary JAX array value,
+        # so the analysis performed when the scope was opened is what gets reused here.
         solution = np.asarray(run(scope, sparsity.data, RIGHT_HAND_SIDE))
         other_solution = np.asarray(run(scope, 2.0 * sparsity.data, RIGHT_HAND_SIDE))
 
     assert jnp.allclose(solution, expected, atol=1e-5)
     assert jnp.allclose(other_solution, other_expected, atol=1e-5)
+
+
+def test_factorize_symbolic_opens_entirely_under_jit(
+    solver: AbstractSparseLinearSolver,
+) -> None:
+    """`factorize_symbolic` itself, not just a state derived from it, can run inside a
+    jitted function: opening the scope, `.init`, and the solve all trace together, for
+    every solver that supports factorization reuse.
+
+    Solves through `solver.compute` directly rather than `lx.linear_solve`: the latter's
+    autodiff-aware wrapping rebuilds the state pytree with fresh leaf objects, which
+    breaks the handle-freeing scope's dependency tracking (keyed by Python object
+    identity) when the scope's exit is itself traced into the same jit call as the
+    solve, a narrower case than this test needs to cover.
+    """
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    indices, shape = sparsity.indices, sparsity.shape
+    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
+
+    @eqx.filter_jit
+    def run(solver, data, b):
+        operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
+        with solver.factorize_symbolic(operator) as scope:
+            state = scope.init(operator)
+            return solver.compute(state, b, {})[0]
+
+    solution = np.asarray(run(solver, sparsity.data, RIGHT_HAND_SIDE))
+
+    assert jnp.allclose(solution, expected, atol=1e-5)
