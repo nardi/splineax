@@ -30,7 +30,7 @@ import jax.numpy as jnp
 import lineax as lx
 from jax.experimental.sparse import BCOO
 
-import splineax
+import splineax as splx
 
 # KLU solver requires 64-bit mode:
 jax.config.update("jax_enable_x64", True)
@@ -47,8 +47,8 @@ b1 = jnp.array([1.0, 2.0, 3.0, 4.0])
 b2 = b1[::-1]
 b3 = b1 + 1.0
 
-operator = splineax.BCOOLinearOperator(BCOO.fromdense(dense))
-solver = splineax.KLU()
+operator = splx.BCOOLinearOperator(BCOO.fromdense(dense))
+solver = splx.KLU()
 
 with solver.factorize(operator) as state:
     x1 = lx.linear_solve(operator, b1, solver=solver, state=state).value
@@ -95,12 +95,9 @@ to the Python side, so `solver.factorize_symbolic(...)` may be opened *and* clos
 entirely inside a jitted function too, not just called on from outside it:
 
 ```{.python continuation}
-import splineax as splx
-
-
 @jax.jit
 def solve_under_jit(values, b):
-    operator = splineax.BCOOLinearOperator(
+    operator = splx.BCOOLinearOperator(
         BCOO((values, sparsity.indices), shape=sparsity.shape)
     )
     with solver.factorize_symbolic(operator) as scope:
@@ -165,7 +162,7 @@ def solve_many(solver: AbstractSparseLinearSolver, operator, right_hand_sides):
 
 
 # Fast factorization reuse on CPU, plain (re)solves elsewhere, same code:
-solve_many(splineax.AutoSparseLinearSolver(), operator, [b1, b2, b3])
+solve_many(splx.AutoSparseLinearSolver(), operator, [b1, b2, b3])
 ```
 
 The [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol describes the same surface

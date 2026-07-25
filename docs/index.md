@@ -41,7 +41,7 @@ import lineax as lx
 import numpy as np
 from jax.experimental.sparse import BCOO
 
-import splineax
+import splineax as splx
 
 n = 10000
 np.random.seed(0)
@@ -58,9 +58,9 @@ values = jnp.concatenate(
 )
 matrix = BCOO((values, indices), shape=(n, n)).sum_duplicates()
 
-operator = splineax.BCOOLinearOperator(matrix)
+operator = splx.BCOOLinearOperator(matrix)
 vectors = [jnp.ones(n), jnp.arange(n) % 2]
-solver = splineax.AutoSparseLinearSolver()
+solver = splx.AutoSparseLinearSolver()
 
 # Calculate factorization once...
 with solver.factorize(operator) as factorized_state:
