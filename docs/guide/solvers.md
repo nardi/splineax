@@ -19,10 +19,10 @@ Wraps `jax.experimental.sparse.linalg.spsolve`, which performs a sparse QR facto
 backend.
 
 ```python
-import splineax
+import splineax as splx
 
-solver = splineax.Spsolve(
-    tol=1e-6, reorder=splineax.solvers.ReorderingScheme.SYMRCM
+solver = splx.Spsolve(
+    tol=1e-6, reorder=splx.solvers.ReorderingScheme.SYMRCM
 )
 ```
 
@@ -39,7 +39,7 @@ sparse LU solver. It keeps the operator in coordinate form and supports reusing 
 and/or numeric factorization across many solves (see [Advanced usage](advanced.md)).
 
 ```{.python continuation}
-solver = splineax.KLU()
+solver = splx.KLU()
 ```
 
 !!! warning "CPU and double precision only"
@@ -64,7 +64,7 @@ pip install splineax[pardiso]
 ```
 
 ```{.python notest}
-solver = splineax.Pardiso()
+solver = splx.Pardiso()
 ```
 
 !!! warning "CPU, real-valued, and double precision only, and requires installation"
@@ -91,19 +91,19 @@ support complex matrices, `Auto` falls back to `KLU` for a complex operator even
 import jax.numpy as jnp
 from jax.experimental.sparse import BCOO
 
-import splineax
+import splineax as splx
 
-operator = splineax.BCOOLinearOperator(
+operator = splx.BCOOLinearOperator(
     BCOO.fromdense(jnp.array([[2.0, 1.0], [1.0, 3.0]]))
 )
-solver = splineax.AutoSparseLinearSolver()
+solver = splx.AutoSparseLinearSolver()
 
 # Inspect what it will dispatch to (mirrors lineax.AutoLinearSolver.select_solver).
 chosen = solver.select_solver(operator)
 
 # Force a specific platform's choice.
-cpu_solver = splineax.AutoSparseLinearSolver(platform="cpu")  # -> Pardiso, or KLU
-gpu_solver = splineax.AutoSparseLinearSolver(platform="gpu")  # -> Spsolve
+cpu_solver = splx.AutoSparseLinearSolver(platform="cpu")  # -> Pardiso, or KLU
+gpu_solver = splx.AutoSparseLinearSolver(platform="gpu")  # -> Spsolve
 ```
 
 This is the recommended default when you want portable code that uses `Pardiso`/`KLU`

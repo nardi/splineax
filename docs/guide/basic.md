@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import lineax as lx
 from jax.experimental.sparse import BCOO
 
-import splineax
+import splineax as splx
 
 # A sparse matrix A and a right-hand side b.
 dense = jnp.array(
@@ -22,10 +22,10 @@ dense = jnp.array(
         [0.0, 0.0, 1.0, 12.0],
     ]
 )
-operator = splineax.BCOOLinearOperator(BCOO.fromdense(dense))
+operator = splx.BCOOLinearOperator(BCOO.fromdense(dense))
 b = jnp.array([1.0, 2.0, 3.0, 4.0])
 
-solution = lx.linear_solve(operator, b, solver=splineax.AutoSparseLinearSolver())
+solution = lx.linear_solve(operator, b, solver=splx.AutoSparseLinearSolver())
 x = solution.value
 ```
 
@@ -52,10 +52,10 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 # Solve the transposed system.
-solution_T = lx.linear_solve(operator.T, b, solver=splineax.KLU())
+solution_T = lx.linear_solve(operator.T, b, solver=splx.KLU())
 
 # Solve under jit.
-solve = jax.jit(lambda v: lx.linear_solve(operator, v, solver=splineax.KLU()).value)
+solve = jax.jit(lambda v: lx.linear_solve(operator, v, solver=splx.KLU()).value)
 x = solve(b)
 
 # Batch over many right-hand sides with vmap.
@@ -72,7 +72,7 @@ It is common to solve `Ax = b` for the same `A` and many different `b`. Lineax l
 compute the operator-only part once with `init`, then reuse the resulting `state`:
 
 ```{.python continuation}
-solver = splineax.KLU()
+solver = splx.KLU()
 state = solver.init(operator, options={})
 
 x1 = lx.linear_solve(operator, b, solver=solver, state=state).value
