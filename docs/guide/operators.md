@@ -19,12 +19,12 @@ products the usual way: `mv` takes a vector of shape `(b,)` and returns one of s
 import jax.numpy as jnp
 from jax.experimental.sparse import BCOO, BCSR
 
-import splineax
+import splineax as splx
 
 dense = jnp.array([[2.0, 0.0, 1.0], [0.0, 3.0, 0.0], [1.0, 0.0, 4.0]])
 
-bcoo_operator = splineax.BCOOLinearOperator(BCOO.fromdense(dense))
-bcsr_operator = splineax.BCSRLinearOperator(BCSR.fromdense(dense))
+bcoo_operator = splx.BCOOLinearOperator(BCOO.fromdense(dense))
+bcsr_operator = splx.BCSRLinearOperator(BCSR.fromdense(dense))
 ```
 
 You can build the underlying `BCOO` / `BCSR` however you like (`fromdense`, or directly
@@ -49,7 +49,7 @@ Like other Lineax operators, you can attach `tags` describing structural propert
 ```{.python continuation}
 import lineax as lx
 
-operator = splineax.BCOOLinearOperator(
+operator = splx.BCOOLinearOperator(
     BCOO.fromdense(dense), tags=lx.symmetric_tag
 )
 ```
@@ -73,7 +73,7 @@ JVP or VJP per color rather than one per column or row. For example, a function 
 ```python
 import jax.numpy as jnp
 
-import splineax
+import splineax as splx
 
 
 def residual(y, args):
@@ -81,7 +81,7 @@ def residual(y, args):
 
 
 y0 = jnp.linspace(0.5, 1.5, 5)
-operator = splineax.SparseJacobianLinearOperator(residual, y0)
+operator = splx.SparseJacobianLinearOperator(residual, y0)
 
 # One JVP per color, decompressed into a sparse BCOO matrix.
 jacobian = operator.as_bcoo()
@@ -98,7 +98,7 @@ import lineax as lx
 jax.config.update("jax_enable_x64", True)
 
 b = jnp.arange(1.0, 6.0)
-solution = lx.linear_solve(operator, b, solver=splineax.KLU()).value
+solution = lx.linear_solve(operator, b, solver=splx.KLU()).value
 ```
 
 Three construction paths are available, from least to most precomputed:
@@ -122,11 +122,11 @@ detect once with
 and build cheap operators from it:
 
 ```{.python continuation}
-coloring = splineax.SparseJacobianLinearOperatorColoring.detect(residual, y0)
+coloring = splx.SparseJacobianLinearOperatorColoring.detect(residual, y0)
 
 for step in range(3):
     step_operator = coloring.operator_at(y0)
-    y0 = y0 - lx.linear_solve(step_operator, residual(y0, None), solver=splineax.KLU()).value
+    y0 = y0 - lx.linear_solve(step_operator, residual(y0, None), solver=splx.KLU()).value
 ```
 
 All operators built from one `SparseJacobianLinearOperatorColoring` share their pytree
@@ -148,11 +148,11 @@ import equinox as eqx
 
 @eqx.filter_jit
 def newton_step(coloring, point, b):
-    operator = splineax.SparseJacobianLinearOperator(residual, point, coloring=coloring)
-    return point - lx.linear_solve(operator, b, solver=splineax.KLU()).value
+    operator = splx.SparseJacobianLinearOperator(residual, point, coloring=coloring)
+    return point - lx.linear_solve(operator, b, solver=splx.KLU()).value
 
 
-coloring = splineax.JacobianColoring.detect(residual, y0)
+coloring = splx.JacobianColoring.detect(residual, y0)
 y0 = newton_step(coloring, y0, residual(y0, None))
 ```
 
