@@ -1,21 +1,12 @@
 from contextlib import AbstractContextManager
 from functools import cached_property
-from typing import Any
+from typing import Any, Literal, overload
 
 import jax
-from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, PyTree
 from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
-
-from splineax.operators._bcoo import BCOOLinearOperator
-from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.operators._jacobian import (
-    JacobianColoring,
-    SparseJacobianLinearOperator,
-    SparseJacobianLinearOperatorColoring,
-)
 
 from ._klu import KLU
 from ._pardiso import (
@@ -29,7 +20,11 @@ from ._sparse import (
     AbstractSparseLinearSolver,
     SparseBasicState,
     SparseNumericState,
+    SparseSymbolicScope,
     SparseSymbolicState,
+    SymbolicScopedSparseLinearSolver,
+    _Sparsity,
+    as_scoped_solver,
 )
 from ._spsolve import Spsolve
 
@@ -152,17 +147,25 @@ class AutoSparseLinearSolver(
             return init_state.factorize()
         return chosen.factorize(operator, options)
 
+    @overload
     def factorize_symbolic(
-        self,
-        sparsity: BCOO
-        | BCSR
-        | BCOOLinearOperator
-        | BCSRLinearOperator
-        | SparseJacobianLinearOperator
-        | SparseJacobianLinearOperatorColoring
-        | JacobianColoring,
-    ):
-        return self._chosen_solver.factorize_symbolic(sparsity)
+        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
+    ) -> AbstractContextManager[SparseSymbolicScope]: ...
+
+    @overload
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: Literal[True]
+    ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
+
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: bool = False
+    ) -> AbstractContextManager[SparseSymbolicScope | SymbolicScopedSparseLinearSolver]:
+        scope = self._chosen_solver.factorize_symbolic(sparsity)
+        # Pair the scope with `self`, not with the chosen solver: solving through
+        # `AutoSparseLinearSolver` dispatches to the same solver anyway (see
+        # `_solver_for_state`), and this keeps the scoped solver as substitutable for
+        # `AutoSparseLinearSolver` as the rest of its API is.
+        return as_scoped_solver(self, scope) if as_solver else scope
 
 
 AutoSparseLinearSolver.__init__.__doc__ = """**Arguments:**

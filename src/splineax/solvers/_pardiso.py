@@ -1,7 +1,7 @@
 import importlib.util
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator, NamedTuple, TypeVar
+from typing import Any, Iterator, Literal, NamedTuple, TypeVar, overload
 
 import equinox as eqx
 import jax
@@ -38,6 +38,9 @@ from splineax.solvers._klu import COMPLEX_DTYPES
 from splineax.solvers._sparse import (
     AbstractSparseLinearSolver,
     SparseNumericState,
+    SymbolicScopedSparseLinearSolver,
+    _Sparsity,
+    as_scoped_solver,
     factorize_through_init,
 )
 
@@ -434,17 +437,21 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
         """
         return factorize_through_init(self, operator, options)
 
-    @contextmanager
+    @overload
     def factorize_symbolic(
-        self,
-        sparsity: BCOO
-        | BCSR
-        | BCOOLinearOperator
-        | BCSRLinearOperator
-        | SparseJacobianLinearOperator
-        | SparseJacobianLinearOperatorColoring
-        | JacobianColoring,
-    ) -> Iterator[_PardisoSymbolicScope]:
+        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
+    ) -> AbstractContextManager[_PardisoSymbolicScope]: ...
+
+    @overload
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: Literal[True]
+    ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
+
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: bool = False
+    ) -> AbstractContextManager[
+        _PardisoSymbolicScope | SymbolicScopedSparseLinearSolver
+    ]:
         """Open a scope with a pre-computed Pardiso sparsity pattern.
 
         Yields a `_PardisoSymbolicScope`. Inside the block, call:
@@ -472,7 +479,20 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                       `BCOOLinearOperator`, `BCSRLinearOperator`,
                       `SparseJacobianLinearOperator`,
                       `SparseJacobianLinearOperatorColoring`, or `JacobianColoring`.
+            as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
+                       with this solver, instead of the bare scope, so that the two
+                       need not be passed around together.
         """
+        scope = self._factorize_symbolic(sparsity)
+        return as_scoped_solver(self, scope) if as_solver else scope
+
+    @contextmanager
+    def _factorize_symbolic(
+        self, sparsity: _Sparsity
+    ) -> Iterator[_PardisoSymbolicScope]:
+        # The scope itself, kept separate from `factorize_symbolic` above so that the
+        # public method can be overloaded on `as_solver` (`@contextmanager` and
+        # `@overload` do not compose).
         values = None
         match sparsity:
             case SparseJacobianLinearOperator(transposed=True):

@@ -20,6 +20,9 @@ from ._sparse import (
     SparseSymbolicState as SparseSymbolicState,
 )
 from ._sparse import (
+    SymbolicScopedSparseLinearSolver as SymbolicScopedSparseLinearSolver,
+)
+from ._sparse import (
     linear_solve as linear_solve,
 )
 from ._spsolve import ReorderingScheme as ReorderingScheme
