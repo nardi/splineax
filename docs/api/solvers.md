@@ -22,6 +22,10 @@
 
 ::: splineax.solvers.ReorderingScheme
 
+---
+
+::: splineax.SymbolicScopedSparseLinearSolver
+
 ## Base class and protocols
 
 All solvers subclass `AbstractSparseLinearSolver` and structurally satisfy the

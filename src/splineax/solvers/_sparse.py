@@ -1,19 +1,44 @@
 import abc
 from contextlib import AbstractContextManager, contextmanager
-from typing import Any, Generic, Iterator, Protocol, TypeVar, runtime_checkable
+from typing import (
+    Any,
+    Generic,
+    Iterator,
+    Literal,
+    Protocol,
+    TypeVar,
+    overload,
+    runtime_checkable,
+)
 
+import equinox as eqx
+import jax
 from jax.experimental.sparse import BCOO, BCSR
-from jaxtyping import PyTree
+from jaxtyping import Array, PyTree
 from lineax import AbstractLinearOperator, AutoLinearSolver
 from lineax import linear_solve as _lx_linear_solve
-from lineax._solution import Solution
+from lineax._solution import RESULTS, Solution
 from lineax._solve import AbstractLinearSolver, sentinel
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.operators._jacobian import (
+    JacobianColoring,
+    SparseJacobianLinearOperator,
+    SparseJacobianLinearOperatorColoring,
+)
 from splineax.solvers._handle import mark_via_linear_solve
 
-_Sparsity = BCOO | BCSR | BCOOLinearOperator | BCSRLinearOperator
+# Everything `factorize_symbolic` accepts as a sparsity pattern.
+_Sparsity = (
+    BCOO
+    | BCSR
+    | BCOOLinearOperator
+    | BCSRLinearOperator
+    | SparseJacobianLinearOperator
+    | SparseJacobianLinearOperatorColoring
+    | JacobianColoring
+)
 
 
 class SparseNumericState(Protocol):
@@ -81,10 +106,26 @@ class SparseLinearSolver(Protocol):
         """Pre-compute a full factorization for reuse across multiple solves."""
         ...
 
+    @overload
     def factorize_symbolic(
-        self, sparsity: _Sparsity
-    ) -> AbstractContextManager[SparseSymbolicScope]:
-        """Pre-compute a symbolic factorization from a known sparsity pattern."""
+        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
+    ) -> AbstractContextManager[SparseSymbolicScope]: ...
+
+    @overload
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: Literal[True]
+    ) -> AbstractContextManager["SymbolicScopedSparseLinearSolver"]: ...
+
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: bool = False
+    ) -> AbstractContextManager[
+        "SparseSymbolicScope | SymbolicScopedSparseLinearSolver"
+    ]:
+        """Pre-compute a symbolic factorization from a known sparsity pattern.
+
+        Yields a `SparseSymbolicScope`, or a `SymbolicScopedSparseLinearSolver`
+        bundling that scope with this solver when `as_solver=True`.
+        """
         ...
 
 
@@ -109,11 +150,128 @@ class AbstractSparseLinearSolver(
     ) -> AbstractContextManager[SparseNumericState]:
         """Pre-compute a full factorization for reuse across multiple solves."""
 
+    @overload
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
+    ) -> AbstractContextManager[SparseSymbolicScope]: ...
+
+    @overload
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: Literal[True]
+    ) -> AbstractContextManager["SymbolicScopedSparseLinearSolver"]: ...
+
     @abc.abstractmethod
     def factorize_symbolic(
-        self, sparsity: _Sparsity
-    ) -> AbstractContextManager[SparseSymbolicScope]:
-        """Pre-compute a symbolic factorization from a known sparsity pattern."""
+        self, sparsity: _Sparsity, *, as_solver: bool = False
+    ) -> AbstractContextManager[
+        "SparseSymbolicScope | SymbolicScopedSparseLinearSolver"
+    ]:
+        """Pre-compute a symbolic factorization from a known sparsity pattern.
+
+        Yields a `SparseSymbolicScope`, or a `SymbolicScopedSparseLinearSolver`
+        bundling that scope with this solver when `as_solver=True`.
+        """
+
+
+class SymbolicScopedSparseLinearSolver(
+    AbstractLinearSolver["SparseSymbolicState | SparseNumericState"]
+):
+    """A solver bound to one open symbolic-factorization scope.
+
+    Returned by `solver.factorize_symbolic(sparsity, as_solver=True)`, for the common
+    case where a solver and a scope derived from it are used together and would
+    otherwise have to be passed around as a pair:
+
+    ```python
+    with solver.factorize_symbolic(sparsity, as_solver=True) as scoped_solver:
+        x = lx.linear_solve(operator, b, solver=scoped_solver).value
+    ```
+
+    This is an ordinary `lineax.AbstractLinearSolver`, so it can be passed as
+    `solver=` anywhere the solver it came from can. The difference is its `init`,
+    which is the scope's `init`: every solve made through it reuses the scope's
+    symbolic factorization, and it is therefore only valid for operators sharing the
+    sparsity pattern the scope was opened with. Solving happens through the original
+    solver, so the numerical result is exactly that of passing `solver=solver,
+    state=scope.init(operator)` by hand.
+
+    Like the scope it wraps, it is only usable inside the `with` block that yielded
+    it: once that block exits, the underlying factorization is freed.
+    """
+
+    solver: AbstractSparseLinearSolver[Any]
+    """The solver the scope was opened from, which performs every solve."""
+    scope: SparseSymbolicScope
+    """The open symbolic-factorization scope every state is derived from."""
+
+    def init(
+        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
+    ) -> SparseSymbolicState:
+        """Build a state reusing the scope's symbolic factorization.
+
+        Identical to the scope's own `init`, which is what restricts this solver to
+        operators with the scope's sparsity pattern.
+        """
+        return self.scope.init(operator, options)
+
+    def factorize(
+        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
+    ) -> AbstractContextManager[SparseNumericState]:
+        """Also pre-compute the numeric factorization, reusing the symbolic one.
+
+        Identical to the scope's own `factorize`. `options` is accepted for parity
+        with `AbstractSparseLinearSolver.factorize` and unused, since a scope's
+        `factorize` takes none.
+        """
+        del options
+        return self.scope.factorize(operator)
+
+    def compute(
+        self,
+        state: SparseSymbolicState | SparseNumericState,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
+        return self.solver.compute(state, vector, options)
+
+    def transpose(
+        self, state: SparseSymbolicState | SparseNumericState, options: dict[str, Any]
+    ) -> tuple[Any, dict[str, Any]]:
+        return self.solver.transpose(state, options)
+
+    def conj(
+        self, state: SparseSymbolicState | SparseNumericState, options: dict[str, Any]
+    ) -> tuple[Any, dict[str, Any]]:
+        return self.solver.conj(state, options)
+
+    def assume_full_rank(self) -> bool:
+        return self.solver.assume_full_rank()
+
+
+SymbolicScopedSparseLinearSolver.__init__.__doc__ = """**Arguments:**
+
+- `solver`: the sparse solver performing the solves.
+- `scope`: an open symbolic-factorization scope, as opened by that solver's
+    `factorize_symbolic`.
+
+Usually not constructed directly: call `solver.factorize_symbolic(sparsity,
+as_solver=True)` instead, which opens the scope and pairs it with the solver.
+"""
+
+
+@contextmanager
+def as_scoped_solver(
+    solver: AbstractSparseLinearSolver[Any],
+    scope_manager: AbstractContextManager[SparseSymbolicScope],
+) -> Iterator[SymbolicScopedSparseLinearSolver]:
+    """Wrap an unopened `factorize_symbolic` scope into a scoped solver.
+
+    Shared implementation of `factorize_symbolic(..., as_solver=True)` for every
+    solver: opening and closing the scoped solver opens and closes the scope itself,
+    so the factorization lives exactly as long as it would have.
+    """
+    with scope_manager as scope:
+        yield SymbolicScopedSparseLinearSolver(solver, scope)
 
 
 @contextmanager
@@ -162,7 +320,21 @@ def linear_solve(
     Solving without `state` set, or with a state that owns no handle (`Spsolve`, or a
     solver's `.init()` state before any factorization), behaves exactly like
     `lineax.linear_solve`: there is nothing to register.
+
+    A `SymbolicScopedSparseLinearSolver` carries its scope instead of being handed a
+    state, so there `lineax.linear_solve` would build the (handle-owning) state itself
+    and never hand it back in time to be registered. This function runs that `init`
+    first, exactly as `lineax.linear_solve` would have, and then registers against the
+    state it gets, so a scoped solver is safe under one traced scope too.
     """
+    if state is sentinel and isinstance(solver, SymbolicScopedSparseLinearSolver):
+        # Same stop-gradient treatment `lineax.linear_solve` gives the operator before
+        # its own `init` call, so the state carries no tangents either way.
+        dynamic_operator, static_operator = eqx.partition(operator, eqx.is_array)
+        stopped_operator = eqx.combine(
+            jax.lax.stop_gradient(dynamic_operator), static_operator
+        )
+        state = solver.init(stopped_operator, {} if options is None else options)
     with mark_via_linear_solve():
         solution = _lx_linear_solve(
             operator, vector, solver, options=options, state=state, throw=throw

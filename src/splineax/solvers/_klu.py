@@ -1,7 +1,7 @@
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from enum import Enum, auto
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, Iterator, Literal, NamedTuple, TypeVar, overload
 
 import equinox as eqx
 import jax
@@ -36,6 +36,9 @@ from splineax.solvers._handle import (
 from splineax.solvers._sparse import (
     AbstractSparseLinearSolver,
     SparseNumericState,
+    SymbolicScopedSparseLinearSolver,
+    _Sparsity,
+    as_scoped_solver,
     factorize_through_init,
 )
 
@@ -339,17 +342,19 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         """
         return factorize_through_init(self, operator, options)
 
-    @contextmanager
+    @overload
     def factorize_symbolic(
-        self,
-        sparsity: BCOO
-        | BCSR
-        | BCOOLinearOperator
-        | BCSRLinearOperator
-        | SparseJacobianLinearOperator
-        | SparseJacobianLinearOperatorColoring
-        | JacobianColoring,
-    ):
+        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
+    ) -> AbstractContextManager["_KLUSymbolicScope"]: ...
+
+    @overload
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: Literal[True]
+    ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
+
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: bool = False
+    ) -> AbstractContextManager["_KLUSymbolicScope | SymbolicScopedSparseLinearSolver"]:
         """Open a scope with a pre-computed KLU symbolic factorization.
 
         Yields a `_KLUSymbolicScope`. Inside the block, call:
@@ -371,7 +376,18 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                       Jacobian numerically. That host-side read means the coloring
                       must be concrete here, not a traced value inside a jitted
                       function.
+            as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
+                       with this solver, instead of the bare scope, so that the two
+                       need not be passed around together.
         """
+        scope = self._factorize_symbolic(sparsity)
+        return as_scoped_solver(self, scope) if as_solver else scope
+
+    @contextmanager
+    def _factorize_symbolic(self, sparsity: _Sparsity) -> Iterator["_KLUSymbolicScope"]:
+        # The scope itself, kept separate from `factorize_symbolic` above so that the
+        # public method can be overloaded on `as_solver` (`@contextmanager` and
+        # `@overload` do not compose).
         match sparsity:
             case SparseJacobianLinearOperator(transposed=True):
                 # The stored pattern describes the forward Jacobian. asdex emits

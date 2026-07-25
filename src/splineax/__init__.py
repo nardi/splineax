@@ -32,5 +32,8 @@ from .solvers import (
     Spsolve as Spsolve,
 )
 from .solvers import (
+    SymbolicScopedSparseLinearSolver as SymbolicScopedSparseLinearSolver,
+)
+from .solvers import (
     linear_solve as linear_solve,
 )
