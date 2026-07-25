@@ -1,10 +1,10 @@
 from contextlib import AbstractContextManager, contextmanager
 from enum import IntEnum
-from typing import Any, Iterator, NamedTuple
+from typing import Any, Iterator, Literal, NamedTuple, overload
 
 import equinox as eqx
 from jax import custom_batching
-from jax.experimental.sparse import BCOO, BCSR
+from jax.experimental.sparse import BCSR
 from jax.experimental.sparse.linalg import _csr_transpose, spsolve
 from jaxtyping import Array, Inexact, PyTree
 from lineax import AbstractLinearOperator, materialise
@@ -20,13 +20,14 @@ from lineax._solver.misc import (
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
-    JacobianColoring,
     SparseJacobianLinearOperator,
-    SparseJacobianLinearOperatorColoring,
 )
 from splineax.solvers._sparse import (
     AbstractSparseLinearSolver,
     SparseNumericState,
+    SymbolicScopedSparseLinearSolver,
+    _Sparsity,
+    as_scoped_solver,
     factorize_through_init,
 )
 
@@ -153,19 +154,41 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
         # No-op factorization for parity with KLU: yields the ordinary solver state.
         return factorize_through_init(self, operator, options)
 
-    @contextmanager
+    @overload
     def factorize_symbolic(
-        self,
-        sparsity: BCOO
-        | BCSR
-        | BCOOLinearOperator
-        | BCSRLinearOperator
-        | SparseJacobianLinearOperator
-        | SparseJacobianLinearOperatorColoring
-        | JacobianColoring,
+        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
+    ) -> AbstractContextManager[_SpsolveSymbolicScope]: ...
+
+    @overload
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: Literal[True]
+    ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
+
+    def factorize_symbolic(
+        self, sparsity: _Sparsity, *, as_solver: bool = False
+    ) -> AbstractContextManager[
+        _SpsolveSymbolicScope | SymbolicScopedSparseLinearSolver
+    ]:
+        """Open a no-op symbolic-factorization scope, for parity with `KLU`.
+
+        Args:
+            sparsity: accepted and ignored, since `Spsolve` cannot pre-analyze a
+                      sparsity pattern.
+            as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
+                       with this solver, instead of the bare scope, so that the two
+                       need not be passed around together.
+        """
+        scope = self._factorize_symbolic(sparsity)
+        return as_scoped_solver(self, scope) if as_solver else scope
+
+    @contextmanager
+    def _factorize_symbolic(
+        self, sparsity: _Sparsity
     ) -> Iterator[_SpsolveSymbolicScope]:
         # No-op symbolic factorization: the sparsity is accepted for parity with KLU but
-        # not used, since Spsolve cannot pre-analyze a sparsity pattern.
+        # not used, since Spsolve cannot pre-analyze a sparsity pattern. Kept separate
+        # from `factorize_symbolic` above so that the public method can be overloaded on
+        # `as_solver` (`@contextmanager` and `@overload` do not compose).
         del sparsity
         yield _SpsolveSymbolicScope(self)
 

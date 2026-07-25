@@ -88,6 +88,43 @@ The scope itself, not just the state it produces, can be passed into a jitted fu
 that builds the operator inside and calls `scope.init` again, so the analysis is reused
 across solves whose values are only known under the trace.
 
+## Bundling the scope into a solver
+
+A scope is only usable together with the solver it came from, so the two normally
+travel as a pair: every call site takes both, and every `linear_solve` repeats
+`solver=solver, state=scope.init(operator)`. Passing `as_solver=True` to
+`factorize_symbolic` collapses that pair into a single object, a
+[`SymbolicScopedSparseLinearSolver`][splineax.SymbolicScopedSparseLinearSolver]:
+
+```{.python continuation}
+with solver.factorize_symbolic(sparsity, as_solver=True) as scoped_solver:
+    x1 = lx.linear_solve(operator, b1, solver=scoped_solver).value
+    x2 = lx.linear_solve(operator, b2, solver=scoped_solver).value
+```
+
+It is an ordinary `lineax.AbstractLinearSolver`, so it goes wherever the solver it came
+from goes, and no `state=` is needed: its `init` *is* the scope's `init`, so
+`lineax.linear_solve` builds a state that reuses the symbolic analysis by itself. That
+also means it is not a general-purpose solver. It only solves operators sharing the
+sparsity pattern its scope was opened with, which is exactly the guarantee that makes
+it safe to hand to code that knows nothing about scopes:
+
+```{.python continuation}
+def solve_all(solver, operator, right_hand_sides):
+    # Knows nothing about factorization reuse, yet reuses the analysis.
+    return [lx.linear_solve(operator, b, solver=solver).value for b in right_hand_sides]
+
+
+with solver.factorize_symbolic(sparsity, as_solver=True) as scoped_solver:
+    xs = solve_all(scoped_solver, operator, [b1, b2, b3])
+```
+
+The numeric tier is reachable the same way as on the scope itself:
+`scoped_solver.factorize(operator)` is `scope.factorize(operator)`, yielding a state to
+pass as `state=` for full reuse across right-hand sides. Like the scope it wraps, the
+scoped solver is only valid inside its `with` block: the factorization is freed on
+exit.
+
 ## Solving fully inside `jax.jit`
 
 A factorization handle is an ordinary JAX array value rather than a native object tied
@@ -121,6 +158,26 @@ any solver that owns a handle. Everywhere else, when the scope is opened outside
 jitted function it is solved within (as throughout the rest of this page), either
 function works the same: there is no nested trace for a result to go missing from.
 
+A scoped solver may be opened and closed under one `jax.jit` call in the same way, and
+carries no state to pass along:
+
+```{.python continuation}
+@jax.jit
+def solve_scoped_under_jit(values, b):
+    operator = splx.BCOOLinearOperator(
+        BCOO((values, sparsity.indices), shape=sparsity.shape)
+    )
+    with solver.factorize_symbolic(operator, as_solver=True) as scoped_solver:
+        return splx.linear_solve(operator, b, scoped_solver).value
+
+
+x = solve_scoped_under_jit(sparsity.data, b1)
+```
+
+`splineax.linear_solve` is required here for the same reason, and does a little more
+work for it: with no `state=` given it runs the scoped solver's `init` itself, so that
+there is a state to register the solve against at all.
+
 ## How the states chain
 
 The protocol describes a small family of state types
@@ -138,9 +195,16 @@ solver.factorize(operator)                            -> SparseNumericState   (c
 solver.factorize_symbolic(sparsity)                   -> SparseSymbolicScope  (context manager)
        .init(operator)                                -> SparseSymbolicState
        .factorize(operator)                           -> SparseNumericState   (context manager)
+
+solver.factorize_symbolic(sparsity, as_solver=True)   -> SymbolicScopedSparseLinearSolver
+                                                                               (context manager)
+       .init(operator)                                -> SparseSymbolicState
+       .factorize(operator)                           -> SparseNumericState   (context manager)
 ```
 
-Any of these states can be passed as `state=` to `lineax.linear_solve`.
+Any of these states can be passed as `state=` to `lineax.linear_solve`. The last one is
+the scope's two methods again, on an object that is itself a solver, so its states also
+get built for you when it is passed as `solver=` without a `state=`.
 
 ## Writing backend-agnostic code
 
