@@ -13,9 +13,10 @@ implements.
 
 !!! note
 
-    [`KLU`][splineax.KLU] and [`Pardiso`][splineax.Pardiso] really do reuse factorizations.
-    [`Spsolve`][splineax.Spsolve] implements the same API with **no-op** fallbacks (each
-    solve refactors), so code written against the protocol runs unchanged on any backend.
+    [`KLU`][splineax.KLU], [`Pardiso`][splineax.Pardiso], and [`CuDSS`][splineax.CuDSS]
+    really do reuse factorizations. [`Spsolve`][splineax.Spsolve] implements the same
+    API with **no-op** fallbacks (each solve refactors), so code written against the
+    protocol runs unchanged on any backend.
     [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] delegates to whichever it
     picked.
 
@@ -178,6 +179,27 @@ x = solve_scoped_under_jit(sparsity.data, b1)
 work for it: with no `state=` given it runs the scoped solver's `init` itself, so that
 there is a state to register the solve against at all.
 
+## CuDSS: a cache instead of a handle
+
+Every other solver here frees its factorization through a native handle: a value that
+must be released, and released in the right order relative to the solves that used it.
+[`CuDSS`][splineax.CuDSS] works differently. Every factorization lives in a global,
+size-bounded cache instead, so there is nothing to free by hand. Calling `release()` on
+a factorization only matters as an early memory-pressure hint; skip it and the cache
+evicts old entries on its own once it is full.
+
+The one place this shows up in `splineax` itself: `factorize`/`factorize_symbolic`
+scopes for `KLU`/`Pardiso` release their handle eagerly when the `with` block exits,
+*unless* the whole block was traced inside `jax.jit`, in which case the release is
+deferred and ordered by `splineax.linear_solve` (see above). `CuDSS` skips that release
+step entirely when the block was traced, since there is no handle-freeing primitive to
+order in the first place. This is not a correctness gap: an evicted-but-still-referenced
+factorization transparently rebuilds itself from its own stored arrays the next time
+it's used, so a scope closed under `jax.jit` is always correct, just possibly slower if
+the cache is under enough pressure to have evicted it. cuDSS exposes a rebuild counter
+(on the machine actually running the solve) that counts how often that happens, and a
+rising count means the cache is too small for the working set.
+
 ## How the states chain
 
 The protocol describes a small family of state types
@@ -208,7 +230,7 @@ get built for you when it is passed as `solver=` without a `state=`.
 
 ## Writing backend-agnostic code
 
-All three solvers subclass
+All solvers subclass
 [`AbstractSparseLinearSolver`][splineax.AbstractSparseLinearSolver] (and so are usable both
 with `lineax.linear_solve` and the factorization API). Type a routine against it and let the
 caller pick the solver:
@@ -225,7 +247,7 @@ def solve_many(solver: AbstractSparseLinearSolver, operator, right_hand_sides):
         ]
 
 
-# Fast factorization reuse on CPU, plain (re)solves elsewhere, same code:
+# Fast factorization reuse on CPU or a CUDA GPU, plain (re)solves elsewhere, same code:
 solve_many(splx.AutoSparseLinearSolver(), operator, [b1, b2, b3])
 ```
 

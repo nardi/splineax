@@ -1,6 +1,6 @@
 # Solvers
 
-`splineax` provides four sparse direct solvers. All implement Lineax's
+`splineax` provides five sparse direct solvers. All implement Lineax's
 `AbstractLinearSolver` interface (so they work with `lineax.linear_solve`) and the
 [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol (factorization reuse, see
 [Advanced usage](advanced.md)). All handle **square, nonsingular** operators only.
@@ -10,6 +10,7 @@
 | [`Spsolve`][splineax.Spsolve] | any | input dtype | no (no-op fallbacks) |
 | [`KLU`][splineax.KLU] | CPU only | float64 / complex128 | yes |
 | [`Pardiso`][splineax.Pardiso] | CPU only | float64 | yes |
+| [`CuDSS`][splineax.CuDSS] | CUDA GPU only | input dtype (f32/f64/complex) | yes |
 | [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] | any | depends on choice | delegates |
 
 ## `Spsolve`
@@ -76,16 +77,45 @@ solver = splx.Pardiso()
     [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] for code that should work
     whether or not it is.
 
+## `CuDSS`
+
+Wraps NVIDIA's cuDSS library, a direct sparse solver with an explicit analysis /
+factorization / refactorization / solve phase split. It is the only solver in this
+package that both runs on GPU **and** keeps real factorization reuse (see
+[Advanced usage](advanced.md)) — `Spsolve` runs on GPU too, but its factorization methods
+are no-ops.
+
+`CuDSS` is an **optional dependency**: install it with
+
+```bash
+pip install splineax[cudss]
+```
+
+```{.python notest}
+solver = splx.CuDSS()
+```
+
+!!! warning "CUDA GPU only, and requires installation"
+
+    cuDSS is a CUDA-only library: `CuDSS` raises an error at trace time if solved on
+    any other platform. Unlike `KLU`/`Pardiso`, it needs no upcasting: `float32`,
+    `float64`, `complex64`, and `complex128` are all supported directly. `CuDSS()`
+    raises `ImportError` if the optional dependency isn't installed. Use
+    [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] for code that should work
+    whether or not it is.
+
 ## `AutoSparseLinearSolver`
 
 Picks a solver based on the JAX platform and what's installed: on CPU with x64 enabled,
 [`Pardiso`][splineax.Pardiso] if the optional `pardiso-mkl-jax` dependency is installed,
-otherwise [`KLU`][splineax.KLU] (both fast direct solves with factorization reuse), and
-[`Spsolve`][splineax.Spsolve] otherwise. It exposes the same factorization API as
-`Pardiso`/`KLU`, so you can substitute it for either verbatim. On non-CPU backends the
-factorization methods degrade to no-ops via `Spsolve`. Since `pardiso_mkl_jax` doesn't
-support complex matrices, `Auto` falls back to `KLU` for a complex operator even when
-`Pardiso` was otherwise selected.
+otherwise [`KLU`][splineax.KLU] (both fast direct solves with factorization reuse); on a
+CUDA GPU, [`CuDSS`][splineax.CuDSS] if its optional dependency is installed (no x64
+requirement); and [`Spsolve`][splineax.Spsolve] otherwise. It exposes the same
+factorization API as `Pardiso`/`KLU`/`CuDSS`, so you can substitute it for any of them
+verbatim. When it dispatches to `Spsolve`, the factorization methods degrade to no-ops.
+Since `pardiso_mkl_jax` doesn't support complex matrices, `Auto` falls back to `KLU` for
+a complex operator even when `Pardiso` was otherwise selected; `CuDSS` needs no
+equivalent fallback, since it supports complex directly.
 
 ```python
 import jax.numpy as jnp
@@ -103,8 +133,8 @@ chosen = solver.select_solver(operator)
 
 # Force a specific platform's choice.
 cpu_solver = splx.AutoSparseLinearSolver(platform="cpu")  # -> Pardiso, or KLU
-gpu_solver = splx.AutoSparseLinearSolver(platform="gpu")  # -> Spsolve
+gpu_solver = splx.AutoSparseLinearSolver(platform="gpu")  # -> CuDSS if installed, else Spsolve
 ```
 
-This is the recommended default when you want portable code that uses `Pardiso`/`KLU`
-where available and `Spsolve` elsewhere.
+This is the recommended default when you want portable code that uses
+`Pardiso`/`KLU`/`CuDSS` where available and `Spsolve` elsewhere.

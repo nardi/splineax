@@ -9,7 +9,9 @@ plugs straight into `lineax.linear_solve`. It also interfaces with [asdex](https
 
 - **Operators**: `BCOOLinearOperator`, `BCSRLinearOperator`, `SparseJacobianLinearOperator`.
 - **Solvers**: `Spsolve` (any backend), `KLU` (CPU-only, SuiteSparse, factorization reuse),
-  and `AutoSparseLinearSolver` (picks one based on the platform).
+  `Pardiso` (CPU-only, Intel oneMKL, factorization reuse), `CuDSS` (CUDA GPU-only,
+  NVIDIA cuDSS, factorization reuse), and `AutoSparseLinearSolver` (picks one based on
+  the platform).
 - A `SparseLinearSolver` protocol for separating factorization from solving.
 
 ## Installation
@@ -63,6 +65,18 @@ with solver.factorize(operator) as factorized_state:
     )
     assert jnp.allclose(matrix @ solution.value, vectors[1], atol=1e-4)
 ```
+
+## Testing on a GPU
+
+`CuDSS` wraps NVIDIA's cuDSS library, which is CUDA-only, so its tests skip on ordinary
+(CPU) CI. The easiest way to run them for real is
+[`notebooks/colab_gpu_tests.ipynb`](notebooks/colab_gpu_tests.ipynb):
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/nardi/splineax/blob/main/notebooks/colab_gpu_tests.ipynb)
+
+Open it, enable a GPU runtime, and run the cells in order: it clones a branch, installs
+`splineax[cudss]`, and runs the suite. Alternatively, on any machine with a CUDA 13 GPU
+and Python 3.12: `uv sync --extra cudss && uv run pytest tests/unit/solvers`.
 
 ## Documentation
 
