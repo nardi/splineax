@@ -11,3 +11,7 @@ wheels/
 
 # MkDocs build output
 site/
+
+# Benchmark output (JSON, plots, fitted tables)
+benchmarks/results/
+.benchmarks/
