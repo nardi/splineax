@@ -20,9 +20,12 @@ from splineax import (
     AutoSparseLinearSolver,
     BCOOLinearOperator,
     BCSRLinearOperator,
+    CuDSS,
     Pardiso,
     Spsolve,
 )
+from splineax.solvers._auto import _cuda_backend_available
+from splineax.solvers._cudss import _cudss_available
 from splineax.solvers._pardiso import _pardiso_available
 
 
@@ -121,17 +124,27 @@ def make_operator(request: pytest.FixtureRequest) -> OperatorFactory:
                 not _pardiso_available(), reason="pardiso-mkl-jax is not installed"
             ),
         ),
+        pytest.param(
+            CuDSS,
+            marks=pytest.mark.skipif(
+                not (_cudss_available() and _cuda_backend_available()),
+                reason="the optional cuDSS dependency is not installed, or no CUDA "
+                "GPU is visible",
+            ),
+        ),
         AutoSparseLinearSolver,
     ],
-    ids=["spsolve", "klu", "pardiso", "auto"],
+    ids=["spsolve", "klu", "pardiso", "cudss", "auto"],
 )
 def solver(request: pytest.FixtureRequest, enable_x64: None) -> lx.AbstractLinearSolver:
     """Yields an instance of each sparse direct solver under test.
 
     `AutoSparseLinearSolver` dispatches to `Pardiso` (if installed) or `KLU` on the
     (CPU) test platform when x64 is enabled, otherwise to `Spsolve`. `Pardiso` itself is
-    skipped when its optional dependency isn't installed. Depends on `enable_x64` (from
-    the top-level conftest) so every test using this fixture runs with x64 enabled for
-    its whole body, since `KLU`/`Pardiso` require it but no longer enable it themselves.
+    skipped when its optional dependency isn't installed, and `CuDSS` when it isn't
+    installed or no CUDA GPU is visible. Depends on `enable_x64` (from the top-level
+    conftest) so every test using this fixture runs with x64 enabled for its whole
+    body, since `KLU`/`Pardiso` require it but no longer enable it themselves (`CuDSS`
+    has no such requirement, but running under x64 doesn't hurt it either).
     """
     return request.param()

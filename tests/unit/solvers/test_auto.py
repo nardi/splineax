@@ -24,9 +24,11 @@ import pytest
 from jax.experimental.sparse import BCOO
 
 import splineax.solvers._auto as _auto_module
+import splineax.solvers._cudss as _cudss_module
 from splineax import (
     KLU,
     AutoSparseLinearSolver,
+    CuDSS,
     Pardiso,
     Spsolve,
 )
@@ -36,6 +38,7 @@ from splineax.solvers import (
     SparseSymbolicScope,
     SparseSymbolicState,
 )
+from splineax.solvers._cudss import _cudss_available
 from splineax.solvers._klu import _KLUBasicState, _KLUNumericState, _KLUSymbolicState
 from splineax.solvers._pardiso import _pardiso_available
 
@@ -104,6 +107,69 @@ def test_select_solver_platform_override(
         )
 
 
+def test_select_solver_prefers_cudss_on_gpu(
+    make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With cuDSS installed and a CUDA device visible, `AutoSparseLinearSolver` selects
+    `CuDSS` on the GPU platform. No x64 requirement, unlike `Pardiso`/`KLU`.
+
+    Patches the availability check in both `_auto.py` (which gates the dispatch
+    branch) and `_cudss.py` (which `CuDSS.__init__` itself checks), since `Pardiso`'s
+    equivalent tests get away with patching only the former by relying on
+    `pardiso-mkl-jax` actually being installed in the test environment; cuDSS's real
+    dependency is never installed here (it needs a CUDA GPU), so both must be patched
+    for construction to succeed.
+    """
+    monkeypatch.setattr(_auto_module, "_cudss_available", lambda: True)
+    monkeypatch.setattr(_auto_module, "_cuda_backend_available", lambda: True)
+    monkeypatch.setattr(_cudss_module, "_cudss_available", lambda: True)
+    operator = make_operator(SQUARE_MATRIX)
+    with jax.enable_x64(False):
+        assert isinstance(
+            AutoSparseLinearSolver(platform="gpu").select_solver(operator), CuDSS
+        )
+
+
+def test_select_solver_falls_back_to_spsolve_when_cudss_unavailable(
+    make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On GPU with a CUDA device visible but the optional cuDSS dependency not
+    installed, `AutoSparseLinearSolver` falls back to `Spsolve`."""
+    monkeypatch.setattr(_auto_module, "_cudss_available", lambda: False)
+    monkeypatch.setattr(_auto_module, "_cuda_backend_available", lambda: True)
+    operator = make_operator(SQUARE_MATRIX)
+    assert isinstance(
+        AutoSparseLinearSolver(platform="gpu").select_solver(operator), Spsolve
+    )
+
+
+def test_select_solver_falls_back_to_spsolve_on_rocm(
+    make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ROCm GPU also reports platform "gpu", but has no CUDA device: even with
+    cuDSS installed, `AutoSparseLinearSolver` must not select `CuDSS`, since `spineax`
+    only registers its FFI targets on the CUDA platform."""
+    monkeypatch.setattr(_auto_module, "_cudss_available", lambda: True)
+    monkeypatch.setattr(_auto_module, "_cuda_backend_available", lambda: False)
+    operator = make_operator(SQUARE_MATRIX)
+    assert isinstance(
+        AutoSparseLinearSolver(platform="gpu").select_solver(operator), Spsolve
+    )
+
+
+def test_select_solver_cpu_unaffected_by_cudss_availability(
+    make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`CuDSS` availability must not change CPU dispatch: `Pardiso`/`KLU` are still
+    chosen on CPU with x64 enabled, regardless of what cuDSS reports."""
+    monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
+    monkeypatch.setattr(_auto_module, "_cudss_available", lambda: True)
+    monkeypatch.setattr(_auto_module, "_cuda_backend_available", lambda: True)
+    operator = make_operator(SQUARE_MATRIX)
+    with jax.enable_x64(True):
+        assert isinstance(AutoSparseLinearSolver().select_solver(operator), Pardiso)
+
+
 # ---------------------------------------------------------------------------
 # Solve correctness through Auto
 # ---------------------------------------------------------------------------
@@ -169,6 +235,8 @@ def test_solvers_satisfy_sparse_linear_solver_protocol() -> None:
     assert isinstance(AutoSparseLinearSolver(), SparseLinearSolver)
     if _pardiso_available():
         assert isinstance(Pardiso(), SparseLinearSolver)
+    if _cudss_available():
+        assert isinstance(CuDSS(), SparseLinearSolver)
 
 
 def test_states_and_scopes_satisfy_protocols(
