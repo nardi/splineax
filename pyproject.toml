@@ -30,6 +30,16 @@ dev = [
     "ruff>=0.15.17",
     "ty>=0.0.59",
 ]
+# Opt-in group for the solver benchmarks in `benchmarks/`, which are not part of the
+# default test run. `numpy` and `scipy` are otherwise only transitive dependencies, so
+# they are declared here because the generators import them directly.
+bench = [
+    "pytest-benchmark>=5",
+    "matplotlib>=3.9",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "environs>=11",
+]
 
 [tool.pytest.ini_options]
 # Execute the code examples in the markdown docs (and README) as tests via
