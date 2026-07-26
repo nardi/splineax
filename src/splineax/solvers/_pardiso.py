@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
-from lineax import AbstractLinearOperator, materialise
+from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
     PackedStructures,
@@ -18,12 +18,10 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
-from splineax.operators._bcoo import BCOOLinearOperator
-from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.operators._jacobian import (
-    JacobianColoring,
-    SparseJacobianLinearOperator,
-    SparseJacobianLinearOperatorColoring,
+from splineax.solvers._conversion import (
+    csr_from_coo_pattern,
+    operator_to_sparse_matrix,
+    sparsity_to_coo_pattern,
 )
 from splineax.solvers._handle import (
     HandleDependencies,
@@ -177,31 +175,6 @@ def _ensure_cpu(args: T) -> T:
     )
 
 
-def _csr_from_coo_pattern(
-    rows: Integer[Array, " nse"],
-    cols: Integer[Array, " nse"],
-    shape: tuple[int, ...],
-    values: Inexact[Array, " nse"] | None = None,
-) -> tuple[Integer[Array, " n+1"], Integer[Array, " nse"], Inexact[Array, " nse"]]:
-    """Convert a COO `(row, col)` sparsity pattern to sorted CSR `(indptr, indices, values)`.
-
-    `values` is optional because some `factorize_symbolic` inputs (a bare sparsity
-    pattern, with no associated matrix) carry no numeric data. When omitted, a dummy
-    `1.0` is used instead, exactly as for the pattern-only conversion this replaces:
-    the symbolic analysis this feeds only needs *some* representative values to run,
-    not necessarily meaningful ones, and every later solve refactors with the real
-    values from the operator being solved.
-    """
-    if values is None:
-        values = jnp.ones(rows.shape[0], dtype=jnp.float64)
-    else:
-        values = values.astype(jnp.float64)
-    bcsr = BCSR.from_bcoo(
-        BCOO((values, jnp.stack([rows, cols], axis=1)), shape=tuple(shape))
-    )
-    return bcsr.indptr.astype(jnp.int32), bcsr.indices.astype(jnp.int32), bcsr.data
-
-
 class _PardisoBasicState(NamedTuple):
     csr: _CSR
     shape: tuple[int, ...]
@@ -238,22 +211,10 @@ class _PardisoSymbolicScope(NamedTuple):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> "_PardisoSymbolicState":
-        match operator:
-            case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
-                return self.init(materialise(operator), options)
-            case BCSRLinearOperator(matrix):
-                bcoo = matrix.to_bcoo()
-            case BCOOLinearOperator(matrix):
-                bcoo = matrix
-            case _:
-                raise TypeError(
-                    "`Pardiso.factorize_symbolic` scope's `.init` requires a "
-                    "`BCOOLinearOperator`, `BCSRLinearOperator`, or "
-                    "`SparseJacobianLinearOperator`; got "
-                    f"{type(operator).__name__}."
-                )
+        matrix = operator_to_sparse_matrix(
+            operator, error_prefix="`Pardiso.factorize_symbolic` scope's `.init`"
+        )
+        bcoo = matrix if isinstance(matrix, BCOO) else matrix.to_bcoo()
 
         if bcoo.data.dtype in COMPLEX_DTYPES:
             raise TypeError(
@@ -388,31 +349,16 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
         # `pardiso_mkl_jax` consumes a CSR triple with int32 indptr/indices, sorted
         # within each row. We assume the matrix is coalesced (no duplicate indices),
         # matching `KLU`/`Spsolve`.
-        match operator:
-            case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
-                return self.init(materialise(operator), options)
-            case BCSRLinearOperator(matrix):
-                # Round-trip an unsorted `BCSR` through `BCOO`, since
-                # `BCSR.from_bcoo` sorts.
-                matrix_bcsr = (
-                    matrix
-                    if matrix.indices_sorted
-                    else BCSR.from_bcoo(matrix.to_bcoo())
-                )
-            case BCOOLinearOperator(matrix):
-                # `BCSR.from_bcoo` sorts the indices itself when they are not
-                # already sorted.
-                matrix_bcsr = BCSR.from_bcoo(matrix)
-            case _:
-                raise TypeError(
-                    "`Pardiso` requires a sparse operator backed by a `BCOO` or `BCSR` "
-                    "matrix (e.g. `splineax.BCOOLinearOperator` or "
-                    "`splineax.BCSRLinearOperator`), or a "
-                    f"`splineax.SparseJacobianLinearOperator`; "
-                    f"got {type(operator).__name__}."
-                )
+        matrix = operator_to_sparse_matrix(operator, error_prefix="`Pardiso`")
+        # Round-trip an unsorted `BCSR` through `BCOO`, since `BCSR.from_bcoo` sorts;
+        # skip the round trip when it's already sorted.
+        matrix_bcsr = (
+            matrix
+            if isinstance(matrix, BCSR) and matrix.indices_sorted
+            else BCSR.from_bcoo(
+                matrix if isinstance(matrix, BCOO) else matrix.to_bcoo()
+            )
+        )
 
         if matrix_bcsr.dtype in COMPLEX_DTYPES:
             raise TypeError(
@@ -493,58 +439,9 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
         # The scope itself, kept separate from `factorize_symbolic` above so that the
         # public method can be overloaded on `as_solver` (`@contextmanager` and
         # `@overload` do not compose).
-        values = None
-        match sparsity:
-            case SparseJacobianLinearOperator(transposed=True):
-                # See `KLU.factorize_symbolic`'s matching case for why rows/columns
-                # are swapped here.
-                pattern = sparsity.coloring.sparsity
-                rows = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                cols = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                shape = pattern.shape[::-1]
-            case (
-                SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring()
-            ):
-                pattern = sparsity.coloring.sparsity
-                rows = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                cols = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                shape = pattern.shape
-            case JacobianColoring():
-                pattern = sparsity.sparsity
-                rows = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                cols = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                shape = pattern.shape
-            case BCSRLinearOperator():
-                bcoo = sparsity.matrix.to_bcoo()
-                rows = bcoo.indices[:, 0].astype(jnp.int32)
-                cols = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-                values = bcoo.data
-            case BCOOLinearOperator():
-                bcoo = sparsity.matrix
-                rows = bcoo.indices[:, 0].astype(jnp.int32)
-                cols = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-                values = bcoo.data
-            case BCSR():
-                bcoo = sparsity.to_bcoo()
-                rows = bcoo.indices[:, 0].astype(jnp.int32)
-                cols = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-                values = bcoo.data
-            case BCOO():
-                rows = sparsity.indices[:, 0].astype(jnp.int32)
-                cols = sparsity.indices[:, 1].astype(jnp.int32)
-                shape = sparsity.shape
-                values = sparsity.data
-            case _:
-                raise TypeError(
-                    "`Pardiso.factorize_symbolic` requires a `BCOO`, `BCSR`, "
-                    "`BCOOLinearOperator`, `BCSRLinearOperator`, "
-                    "`SparseJacobianLinearOperator`, "
-                    "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
-                    f"got {type(sparsity).__name__}."
-                )
+        rows, cols, shape, values = sparsity_to_coo_pattern(
+            sparsity, error_prefix="`Pardiso.factorize_symbolic`"
+        )
 
         if shape[0] != shape[1]:
             raise ValueError(
@@ -558,8 +455,8 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                 f"not support complex matrix types yet. Got dtype {values.dtype}."
             )
 
-        indptr, indices, analyze_values = _csr_from_coo_pattern(
-            rows, cols, shape, values
+        indptr, indices, analyze_values = csr_from_coo_pattern(
+            rows, cols, shape, values, dtype=jnp.float64
         )
 
         pmj = _pardiso_mkl_jax()
