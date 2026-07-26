@@ -1,3 +1,4 @@
+import functools
 from contextlib import AbstractContextManager
 from functools import cached_property
 from typing import Any, Literal, overload
@@ -8,6 +9,7 @@ from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 
+from ._cudss import CuDSS, _cudss_available
 from ._klu import KLU
 from ._pardiso import (
     Pardiso,
@@ -31,6 +33,24 @@ from ._spsolve import Spsolve
 _PARDISO_STATE_TYPES = (_PardisoBasicState, _PardisoNumericState, _PardisoSymbolicState)
 
 
+@functools.lru_cache(maxsize=1)
+def _cuda_backend_available() -> bool:
+    """Whether a CUDA (not ROCm, not CPU) device is visible to JAX.
+
+    `jax.default_backend()`/`self.platform == "gpu"` cannot tell CUDA and ROCm
+    apart: both report as `"gpu"`. `spineax` registers its FFI targets on the CUDA
+    platform only, so `CuDSS` needs this more specific check to avoid claiming a
+    ROCm GPU it cannot actually run on. `jax.devices("cuda")` raises `RuntimeError`
+    when no CUDA backend is registered at all (e.g. on CPU-only or ROCm builds),
+    which is the "not available" case here. Cached because the set of backends JAX
+    was built with cannot change within a process.
+    """
+    try:
+        return bool(jax.devices("cuda"))
+    except RuntimeError:
+        return False
+
+
 class AutoSparseLinearSolver(
     AbstractSparseLinearSolver[
         SparseBasicState | SparseSymbolicState | SparseNumericState
@@ -42,37 +62,48 @@ class AutoSparseLinearSolver(
     On CPU with x64 enabled, dispatches to `Pardiso` (Intel oneMKL Pardiso, factorization
     reuse) if the optional `pardiso-mkl-jax` dependency is installed, otherwise `KLU`
     (SuiteSparse, factorization reuse). Both are double precision only, hence the x64
-    requirement. On any other backend, or on CPU when x64 is disabled, it dispatches to
-    `Spsolve`, which works in single or double precision and on any backend. Exposes the
-    same factorization API as `Pardiso`/`KLU` (`factorize`, `factorize_symbolic`), so it
-    can be substituted for either verbatim. When it dispatches to `Spsolve`, these
-    factorization calls degrade to no-ops.
+    requirement. On a CUDA GPU, dispatches to `CuDSS` (factorization reuse, any
+    precision) if its optional dependency is installed, no x64 requirement. On any
+    other backend, or on CPU when x64 is disabled, it dispatches to `Spsolve`, which
+    works in single or double precision and on any backend. Exposes the same
+    factorization API as `Pardiso`/`KLU`/`CuDSS` (`factorize`, `factorize_symbolic`),
+    so it can be substituted for any of them verbatim. When it dispatches to
+    `Spsolve`, these factorization calls degrade to no-ops.
 
     `pardiso_mkl_jax` does not support complex matrices (see `Pardiso`'s docstring), so
     `init`/`factorize` fall back to `KLU` for a complex operator even when `Pardiso` was
     otherwise selected, keeping `Auto` able to solve anything `KLU` can. `factorize_symbolic`
     cannot make the same check, since a bare sparsity pattern carries no values to
     inspect, so it stays on `Pardiso`. Construct `KLU()` directly for
-    symbolic-factorization reuse on a complex operator.
+    symbolic-factorization reuse on a complex operator. `CuDSS` has no such gap (it
+    supports complex directly), so it needs no equivalent fallback.
     """
 
     platform: str | None = None
     """Platform to select for. If None, `jax.default_backend()` is used. Set to e.g.
     "cpu", "gpu", or "tpu" to override the choice explicitly. `Pardiso`/`KLU` are chosen
-    only when this resolves to "cpu" and x64 is enabled, otherwise `Spsolve` is
-    chosen."""
+    only when this resolves to "cpu" and x64 is enabled; `CuDSS` only when this resolves
+    to "gpu" and a CUDA (not ROCm) device is visible; otherwise `Spsolve` is chosen."""
 
     @cached_property
-    def _chosen_solver(self) -> Pardiso | KLU | Spsolve:
+    def _chosen_solver(self) -> Pardiso | KLU | CuDSS | Spsolve:
         platform = self.platform if self.platform is not None else jax.default_backend()
         x64_enabled = jax.config.read("jax_enable_x64")
         # Pardiso and KLU are both double precision only, so either is only a valid
         # choice on CPU when x64 is enabled. Pardiso is preferred when its optional
         # dependency is installed. KLU (a hard dependency) is always available as a
-        # fallback. Everything else falls back to Spsolve, which works in single or
-        # double precision and on any backend.
+        # fallback.
         if platform == "cpu" and x64_enabled:
             return Pardiso() if _pardiso_available() else KLU()
+        # CuDSS has no x64 gate: it supports f32 and f64 (and complex) directly, a
+        # real advantage over the CPU solvers above. `_cuda_backend_available` is the
+        # extra check `platform == "gpu"` can't make on its own, since that string
+        # covers ROCm too, which `CuDSS` cannot run on.
+        if platform == "gpu" and _cudss_available() and _cuda_backend_available():
+            return CuDSS()
+        # Everything else (TPU, ROCm, GPU without CuDSS installed, CPU without x64)
+        # falls back to Spsolve, which works in single or double precision and on
+        # any backend.
         return Spsolve()
 
     def select_solver(self, operator: AbstractLinearOperator) -> AbstractLinearSolver:
@@ -84,7 +115,7 @@ class AutoSparseLinearSolver(
         del operator
         return self._chosen_solver
 
-    def _solver_for_state(self, state: Any) -> Pardiso | KLU | Spsolve:
+    def _solver_for_state(self, state: Any) -> Pardiso | KLU | CuDSS | Spsolve:
         """The concrete solver that must handle `state`.
 
         Usually `self._chosen_solver`, except when it's `Pardiso` but `state` isn't
@@ -172,6 +203,7 @@ AutoSparseLinearSolver.__init__.__doc__ = """**Arguments:**
 
 - `platform`: optional platform string ("cpu", "gpu", "tpu") overriding the
     automatically detected `jax.default_backend()`. `Pardiso` (if installed) or `KLU`
-    are chosen only when this resolves to "cpu" and x64 is enabled, otherwise
-    `Spsolve` is chosen.
+    are chosen only when this resolves to "cpu" and x64 is enabled. `CuDSS` (if
+    installed) is chosen only when this resolves to "gpu" and a CUDA device is
+    visible. Otherwise `Spsolve` is chosen.
 """

@@ -1,4 +1,7 @@
 from ._auto import AutoSparseLinearSolver as AutoSparseLinearSolver
+from ._cudss import CuDSS as CuDSS
+from ._cudss import CuDSSMemory as CuDSSMemory
+from ._cudss import CuDSSReordering as CuDSSReordering
 from ._klu import KLU as KLU
 from ._pardiso import Pardiso as Pardiso
 from ._sparse import (
