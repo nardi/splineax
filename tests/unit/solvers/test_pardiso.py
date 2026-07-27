@@ -23,10 +23,16 @@ import pytest
 from jax.experimental.sparse import BCOO
 
 import splineax.solvers._pardiso as _pardiso_module
-from splineax import BCOOLinearOperator, Pardiso
+from splineax import KLU, BCOOLinearOperator, Pardiso
 from splineax.solvers._pardiso import _PardisoNumericState
 
-from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
+from .conftest import (
+    RIGHT_HAND_SIDE,
+    SQUARE_MATRIX,
+    ZERO_DIAGONAL_MATRIX,
+    ZERO_DIAGONAL_RIGHT_HAND_SIDE,
+    OperatorFactory,
+)
 
 # Pardiso requires 64-bit mode but does not enable it as an import side effect, so
 # every test in this module gets it from the shared `enable_x64` fixture
@@ -221,3 +227,45 @@ def test_conj_real_is_noop() -> None:
     with solver.init(operator, {}).factorize() as state:
         conj_state, _ = solver.conj(state, options={})
         assert conj_state is state
+
+
+def test_zero_diagonal_matrix_solves_accurately() -> None:
+    """A matrix with zeros on its diagonal must solve to a small residual.
+
+    A regression test for pardiso-mkl-jax's `iparm` defaults, exercised from the
+    splineax side, since that is where the failure was first seen. Pardiso needs
+    weighted matching to factor a matrix like this stably; without it, it perturbs the
+    tiny pivots it finds on the zero diagonal and returns a solution whose residual is
+    many orders of magnitude too large — while still reporting `RESULTS.successful`, so
+    the residual is the only thing that catches it.
+
+    All three of `Pardiso`'s state paths are covered, because each reaches Pardiso
+    through a different native entry point (`solve`, `factor_and_solve_stateful`, and
+    `solve_stateful` respectively) and each re-initialises `iparm` on its own.
+    """
+    matrix = jnp.asarray(ZERO_DIAGONAL_MATRIX)
+    vector = jnp.asarray(ZERO_DIAGONAL_RIGHT_HAND_SIDE)
+    operator = BCOOLinearOperator(BCOO.fromdense(matrix))
+    solver = Pardiso()
+
+    def residual(solution: jnp.ndarray) -> float:
+        return float(jnp.abs(matrix @ solution - vector).max())
+
+    # KLU first, as an independent check that the system itself is well posed: if this
+    # one ever fails, the fixture is at fault rather than Pardiso.
+    assert residual(lx.linear_solve(operator, vector, solver=KLU()).value) < 1e-10
+
+    basic = lx.linear_solve(operator, vector, solver=solver).value
+    assert residual(basic) < 1e-10, "one-shot solve perturbed its pivots"
+
+    with solver.factorize_symbolic(operator) as scope:
+        symbolic = lx.linear_solve(
+            operator, vector, solver=solver, state=scope.init(operator)
+        ).value
+        assert residual(symbolic) < 1e-10, "symbolic-scope solve perturbed its pivots"
+
+        with scope.factorize(operator) as numeric_state:
+            numeric = lx.linear_solve(
+                operator, vector, solver=solver, state=numeric_state
+            ).value
+    assert residual(numeric) < 1e-10, "pre-factorized solve perturbed its pivots"

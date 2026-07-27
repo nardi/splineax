@@ -10,7 +10,9 @@ from typing import Protocol
 import jax
 import jax.numpy as jnp
 import lineax as lx
+import numpy as np
 import pytest
+import scipy.sparse
 from jax.experimental.sparse import BCOO, BCSR
 
 from splineax import (
@@ -43,6 +45,35 @@ SQUARE_MATRIX: jax.Array = jnp.array(
     ]
 ) + 10.0 * jnp.eye(4)
 RIGHT_HAND_SIDE: jax.Array = jnp.array([1.0, 2.0, 3.0, 4.0])
+
+
+def _zero_diagonal_saddle_point(half: int, seed: int) -> np.ndarray:
+    """A well-conditioned `[[0, B], [B.T, -C]]` matrix with an all-zero leading diagonal.
+
+    Every other reference matrix here is diagonally dominant, which is the easiest case
+    a sparse direct solver ever sees. This one is the opposite: half its diagonal
+    entries are structurally zero, so the solver has to permute large entries onto the
+    diagonal to factor it stably rather than perturbing the tiny pivots it finds there.
+    A solver that gets that wrong still returns a solution and still reports success —
+    only the residual gives it away — so this shape is worth pinning explicitly.
+    """
+    random_state = np.random.default_rng(seed)
+    block = scipy.sparse.random(
+        half, half, density=0.3, random_state=random_state, format="csr"
+    ).toarray()
+    assert np.linalg.matrix_rank(block) == half, "off-diagonal block is singular"
+    lower_right = np.diag(random_state.uniform(0.5, 1.5, size=half))
+    return np.block([[np.zeros((half, half)), block], [block.T, -lower_right]])
+
+
+# Kept as float64 NumPy arrays rather than `jax.Array`s like the constants above: this
+# module is imported before any test enables x64, so a `jnp.asarray` here would round
+# the matrix to float32 at import time and blunt the very distinction it exists to
+# draw. Tests convert them under the `enable_x64` fixture instead.
+ZERO_DIAGONAL_MATRIX: np.ndarray = _zero_diagonal_saddle_point(half=16, seed=0)
+ZERO_DIAGONAL_RIGHT_HAND_SIDE: np.ndarray = np.random.default_rng(1).uniform(
+    -1.0, 1.0, size=ZERO_DIAGONAL_MATRIX.shape[0]
+)
 # A non-square (wide) matrix, to confirm the square-only contract is enforced.
 WIDE_MATRIX: jax.Array = jnp.array([[1.0, 0.0, 2.0], [0.0, 3.0, 0.0]])
 # A diagonally dominant complex matrix, to exercise the complex128 solve path.
