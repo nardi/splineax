@@ -8,6 +8,9 @@ from .operators import (
     JacobianColoring as JacobianColoring,
 )
 from .operators import (
+    SparseFunctionLinearOperator as SparseFunctionLinearOperator,
+)
+from .operators import (
     SparseJacobianLinearOperator as SparseJacobianLinearOperator,
 )
 from .operators import (
