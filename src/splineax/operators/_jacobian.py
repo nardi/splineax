@@ -115,8 +115,8 @@ class JacobianColoring(eqx.Module):
 
         **Arguments:**
 
-        - `fn`: a function `(x, args) -> y`, where both `x` and `y` are
-            one-dimensional arrays of real dtype. Its Jacobian's sparsity is detected.
+        - `fn`: a function `(x, args) -> y`, where `x` is a one-dimensional array of
+            real dtype. Its Jacobian's sparsity is detected.
         - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
             Only its shape and dtype are used.
         - `args`: extra arguments to `fn` that are not differentiated.
@@ -198,8 +198,14 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
     `asdex.ColoredPattern` or a [`splineax.JacobianColoring`][]) to skip detection,
     which is what makes it cheap to build many operators for the same sparsity.
 
-    Only real dtypes are supported. To build many operators for the same
-    function at different points without repeating sparsity detection, use
+    The point `x` must be a one-dimensional array of real dtype, both of which are
+    checked at construction. The shape of `fn`'s output is not: `as_bcoo` materialises
+    whatever asdex returns, which for a non-one-dimensional output is a `BCOO` of
+    matching rank rather than a matrix, and `lineax.materialise` (and so every splineax
+    solver) then rejects it as not two-dimensional.
+
+    To build many operators for the same function at different points without repeating
+    sparsity detection, use
     [`splineax.SparseJacobianLinearOperatorColoring`][]. To convert an existing dense
     `lineax.JacobianLinearOperator`, use
     [`splineax.SparseJacobianLinearOperator.from_jacobian_operator`][].
@@ -229,9 +235,8 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
     ):
         """**Arguments:**
 
-        - `fn`: a function `(x, args) -> y`, where both `x` and `y` are
-            one-dimensional arrays of real dtype. Its Jacobian `d(fn)/dx` is the
-            linear operator.
+        - `fn`: a function `(x, args) -> y`, where `x` is a one-dimensional array of
+            real dtype. Its Jacobian `d(fn)/dx` is the linear operator.
         - `x`: the point at which to evaluate `d(fn)/dx`.
         - `args`: extra arguments to `fn` that are not differentiated.
         - `sparsity`: optional known sparsity pattern of the Jacobian, as an
@@ -325,9 +330,9 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         difference is how it is materialised: one JVP or VJP per color instead of one
         per column or row.
 
-        The wrapped function must map a one-dimensional real array to a
-        one-dimensional real array, which is narrower than what
-        `lineax.JacobianLinearOperator` itself accepts.
+        The point `x` must be a one-dimensional array of real dtype, which is
+        narrower than the arbitrary pytrees `lineax.JacobianLinearOperator` itself
+        accepts.
 
         **Arguments:**
 
@@ -462,9 +467,8 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
         **Arguments:**
 
         - `coloring`: the coloring to bind, as a [`splineax.JacobianColoring`][].
-        - `fn`: a function `(x, args) -> y`, where both `x` and `y` are
-            one-dimensional arrays of real dtype. Its Jacobian must have the sparsity
-            the coloring describes.
+        - `fn`: a function `(x, args) -> y`, where `x` is a one-dimensional array of
+            real dtype. Its Jacobian must have the sparsity the coloring describes.
         - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
             Only its shape and dtype matter here, used to closure-convert `fn`.
         - `args`: extra arguments to `fn` that are not differentiated.
@@ -490,8 +494,8 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
 
         **Arguments:**
 
-        - `fn`: a function `(x, args) -> y`, where both `x` and `y` are
-            one-dimensional arrays of real dtype.
+        - `fn`: a function `(x, args) -> y`, where `x` is a one-dimensional array of
+            real dtype.
         - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
             Only its shape and dtype matter, since sparsity detection is structural.
         - `args`: extra arguments to `fn` that are not differentiated.
@@ -519,8 +523,8 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
 
         **Arguments:**
 
-        - `fn`: a function `(x, args) -> y`, where both `x` and `y` are
-            one-dimensional arrays of real dtype.
+        - `fn`: a function `(x, args) -> y`, where `x` is a one-dimensional array of
+            real dtype.
         - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
             Not used for detection, but required to closure-convert `fn`.
         - `sparsity`: the known sparsity pattern of the Jacobian, as an

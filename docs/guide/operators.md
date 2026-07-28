@@ -110,9 +110,11 @@ Three construction paths are available, from least to most precomputed:
   [`JacobianColoring`][splineax.JacobianColoring]): both steps are skipped.
 
 The optional `mode=` argument selects `"fwd"` (column coloring, JVPs) or `"bwd"` (row
-coloring, VJPs), spelled as lineax and JAX spell it. The function must map a
-one-dimensional real array to a one-dimensional real array. Complex dtypes are
-rejected.
+coloring, VJPs), spelled as lineax and JAX spell it. The point `x` must be a
+one-dimensional array of real dtype, unlike `lineax.JacobianLinearOperator`, which
+takes any pytree: other shapes and complex dtypes are rejected at construction. The
+output shape is not checked, but only a one-dimensional output materialises to a
+matrix the solvers accept.
 
 ### Converting a dense Jacobian operator
 
