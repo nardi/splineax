@@ -7,7 +7,7 @@ from jax import custom_batching
 from jax.experimental.sparse import BCSR
 from jax.experimental.sparse.linalg import _csr_transpose, spsolve
 from jaxtyping import Array, Inexact, PyTree
-from lineax import AbstractLinearOperator, materialise
+from lineax import AbstractLinearOperator, JacobianLinearOperator
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
     PackedStructures,
@@ -29,6 +29,7 @@ from splineax.solvers._sparse import (
     _Sparsity,
     as_scoped_solver,
     factorize_through_init,
+    sparse_jacobian_operator,
 )
 
 
@@ -45,11 +46,19 @@ class _SpsolveState(NamedTuple):
 class _SpsolveSymbolicScope(NamedTuple):
     solver: "Spsolve"
     """The originating solver, so built states keep its tol/reorder config."""
+    sparsity: _Sparsity
+    """The object the scope was opened from, kept to sparsely materialise a
+    `lineax.JacobianLinearOperator` handed to `init`."""
 
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _SpsolveState:
         # No-op symbolic reuse: Spsolve cannot pre-analyze, so this is a normal init.
+        # The one thing the scope does add is its sparsity, which turns a dense lineax
+        # Jacobian operator into its sparse analogue, materialised with one JVP or VJP
+        # per color rather than one per column or row.
+        if isinstance(operator, JacobianLinearOperator):
+            operator = sparse_jacobian_operator(operator, self.sparsity)
         return self.solver.init(operator, options)
 
     @contextmanager
@@ -122,9 +131,10 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
         # only ensure the sorting here.
         match operator:
             case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
-                return self.init(materialise(operator), options)
+                # Materialise the Jacobian and sort it, as the `BCOO` case below does.
+                # `operator` stays bound to it, so `pack_structures` sees the caller's
+                # structures rather than the flat pair a materialised operator reports.
+                matrix_bcsr = BCSR.from_bcoo(operator.as_bcoo())
             case BCSRLinearOperator(matrix):
                 # Round-trip an unsorted `BCSR` through `BCOO`, since
                 # `BCSR.from_bcoo` sorts.
@@ -172,8 +182,10 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
         """Open a no-op symbolic-factorization scope, for parity with `KLU`.
 
         Args:
-            sparsity: accepted and ignored, since `Spsolve` cannot pre-analyze a
-                      sparsity pattern.
+            sparsity: accepted for parity with `KLU`, since `Spsolve` cannot
+                      pre-analyze a sparsity pattern. It is only kept so that the
+                      scope's `init` can sparsely materialise a
+                      `lineax.JacobianLinearOperator` against it.
             as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
                        with this solver, instead of the bare scope, so that the two
                        need not be passed around together.
@@ -185,12 +197,12 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
     def _factorize_symbolic(
         self, sparsity: _Sparsity
     ) -> Iterator[_SpsolveSymbolicScope]:
-        # No-op symbolic factorization: the sparsity is accepted for parity with KLU but
-        # not used, since Spsolve cannot pre-analyze a sparsity pattern. Kept separate
-        # from `factorize_symbolic` above so that the public method can be overloaded on
+        # No-op symbolic factorization: no pattern is analyzed, since Spsolve cannot
+        # pre-analyze one. The sparsity is only kept for the same `init` handling of
+        # Jacobian operators the other solvers offer. Kept separate from
+        # `factorize_symbolic` above so that the public method can be overloaded on
         # `as_solver` (`@contextmanager` and `@overload` do not compose).
-        del sparsity
-        yield _SpsolveSymbolicScope(self)
+        yield _SpsolveSymbolicScope(self, sparsity)
 
     def compute(
         self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]

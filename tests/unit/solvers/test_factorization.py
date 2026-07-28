@@ -16,12 +16,15 @@ lives in [test_solvers.py](test_solvers.py).
 
 from __future__ import annotations
 
+import asdex
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
 import pytest
 from jax.experimental.sparse import BCOO
+from lineax import _operator as lineax_operator
 
 import splineax as splx
 from splineax import (
@@ -29,6 +32,7 @@ from splineax import (
     BCOOLinearOperator,
     SymbolicScopedSparseLinearSolver,
 )
+from splineax.solvers._sparse import sparse_jacobian_operator
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
@@ -84,6 +88,146 @@ def test_factorize_symbolic_solves_correctly(
 
     assert jnp.allclose(symbolic_solution, expected, atol=1e-5)
     assert jnp.allclose(numeric_solution, expected, atol=1e-5)
+
+
+def coupled_residual(y: jnp.ndarray, args: object) -> jnp.ndarray:
+    """A nonlinear map whose Jacobian is banded, so a coloring buys something."""
+    del args
+    return 13.0 * y + y**2 + 0.5 * jnp.roll(y, 1) * y
+
+
+JACOBIAN_POINT = jnp.linspace(0.5, 1.5, RIGHT_HAND_SIDE.shape[0])
+
+
+@pytest.mark.parametrize("sparsity_kind", ["coloring", "operator_coloring", "matrix"])
+def test_symbolic_scope_init_accepts_a_dense_jacobian_operator(
+    solver: AbstractSparseLinearSolver, sparsity_kind: str
+) -> None:
+    """A scope's `init` accepts a dense `lineax.JacobianLinearOperator`: it is rebuilt
+    as a `SparseJacobianLinearOperator` and materialised sparsely, so the solve matches
+    the dense reference. A scope opened from a coloring hands that coloring over, and
+    one opened from a plain matrix colors the matrix instead. Every source must solve
+    correctly, through the symbolic tier and the numeric one."""
+    dense_jacobian = jax.jacfwd(lambda point: coupled_residual(point, None))(
+        JACOBIAN_POINT
+    )
+    operator = lx.JacobianLinearOperator(coupled_residual, JACOBIAN_POINT)
+    sparsity = {
+        "coloring": lambda: splx.JacobianColoring.detect(
+            coupled_residual, JACOBIAN_POINT
+        ),
+        "operator_coloring": lambda: splx.SparseJacobianLinearOperatorColoring.detect(
+            coupled_residual, JACOBIAN_POINT
+        ),
+        "matrix": lambda: BCOO.fromdense(dense_jacobian),
+    }[sparsity_kind]()
+    expected = jnp.linalg.solve(np.asarray(dense_jacobian), np.asarray(RIGHT_HAND_SIDE))
+
+    with solver.factorize_symbolic(sparsity) as scope:
+        symbolic_state = scope.init(operator)
+        symbolic_solution = splx.linear_solve(
+            operator, RIGHT_HAND_SIDE, solver=solver, state=symbolic_state
+        ).value
+        with scope.factorize(operator) as numeric_state:
+            numeric_solution = splx.linear_solve(
+                operator, RIGHT_HAND_SIDE, solver=solver, state=numeric_state
+            ).value
+
+    assert jnp.allclose(symbolic_solution, expected, atol=1e-5)
+    assert jnp.allclose(numeric_solution, expected, atol=1e-5)
+
+
+def pytree_residual(y: dict, args: object) -> dict:
+    """A square map between pytrees, whose Jacobian is diagonally dominant so the solve
+    is well posed, and coupled across the two leaves so the structure matters."""
+    del args
+    return {
+        "head": 13.0 * y["head"] + y["head"] ** 2 + 0.5 * y["tail"][0],
+        "tail": 13.0 * y["tail"] + jnp.sum(y["head"]) * y["tail"],
+    }
+
+
+PYTREE_POINT = {"head": jnp.array([0.5, 1.0]), "tail": jnp.array([1.5, 2.0])}
+PYTREE_RIGHT_HAND_SIDE = {"head": jnp.array([1.0, 2.0]), "tail": jnp.array([3.0, 4.0])}
+
+
+def test_pytree_jacobian_operator_solves_and_keeps_its_structure(
+    solver: AbstractSparseLinearSolver,
+) -> None:
+    """A Jacobian operator over pytrees solves like any other, and the solution comes
+    back shaped like `x` rather than raveled. The solvers take the matrix from
+    `as_bcoo` and pack the operator's own structures, so nothing is flattened along the
+    way."""
+    operator = splx.SparseJacobianLinearOperator(pytree_residual, PYTREE_POINT)
+    dense_operator = lx.JacobianLinearOperator(pytree_residual, PYTREE_POINT)
+    expected = lx.linear_solve(
+        dense_operator, PYTREE_RIGHT_HAND_SIDE, solver=lx.LU()
+    ).value
+
+    solution = splx.linear_solve(operator, PYTREE_RIGHT_HAND_SIDE, solver=solver).value
+
+    assert jax.tree.structure(solution) == jax.tree.structure(PYTREE_POINT)
+    for leaf, expected_leaf in zip(
+        jax.tree.leaves(solution), jax.tree.leaves(expected)
+    ):
+        assert jnp.allclose(leaf, expected_leaf, atol=1e-5)
+
+    # The same holds through a symbolic scope, which packs structures of its own.
+    with solver.factorize_symbolic(operator) as scope:
+        scoped_solution = splx.linear_solve(
+            operator,
+            PYTREE_RIGHT_HAND_SIDE,
+            solver=solver,
+            state=scope.init(operator),
+        ).value
+    for leaf, expected_leaf in zip(
+        jax.tree.leaves(scoped_solution), jax.tree.leaves(expected)
+    ):
+        assert jnp.allclose(leaf, expected_leaf, atol=1e-5)
+
+
+def test_scope_sparsity_hands_over_a_carried_coloring() -> None:
+    """The conversion behind that `init` takes the coloring straight from an object
+    carrying one, rather than recomputing it, and colors a plain matrix instead when
+    there is none to take."""
+    operator = lx.JacobianLinearOperator(coupled_residual, JACOBIAN_POINT)
+    dense_jacobian = jax.jacfwd(lambda point: coupled_residual(point, None))(
+        JACOBIAN_POINT
+    )
+    coloring = splx.JacobianColoring.detect(coupled_residual, JACOBIAN_POINT)
+    bound_coloring = splx.SparseJacobianLinearOperatorColoring.detect(
+        coupled_residual, JACOBIAN_POINT
+    )
+
+    assert sparse_jacobian_operator(operator, coloring).coloring is coloring.coloring
+    assert (
+        sparse_jacobian_operator(operator, bound_coloring).coloring
+        is bound_coloring.coloring.coloring
+    )
+    from_matrix = sparse_jacobian_operator(operator, BCOO.fromdense(dense_jacobian))
+    assert jnp.allclose(from_matrix.as_matrix(), dense_jacobian)
+
+    with pytest.raises(TypeError, match="symbolic scope's sparsity"):
+        sparse_jacobian_operator(operator, object())  # ty: ignore[invalid-argument-type]
+
+
+def test_matrix_scope_colors_only_when_a_jacobian_operator_arrives(
+    make_operator: OperatorFactory,
+    solver: AbstractSparseLinearSolver,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coloring a plain matrix is host-side work, so a scope opened from one must defer
+    it until a dense Jacobian operator actually reaches `init`, and never pay for it on
+    the ordinary sparse-operator path."""
+
+    def unexpected_coloring(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the scope's sparsity was colored without needing it")
+
+    monkeypatch.setattr(splx.JacobianColoring, "from_sparsity", unexpected_coloring)
+    operator = make_operator(SQUARE_MATRIX)
+
+    with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+        scope.init(operator)
 
 
 def test_transpose_of_numeric_state_solves_transposed(
@@ -411,3 +555,52 @@ def test_as_solver_full_jit_raw_linear_solve_raises_helpful_error(
     else:
         with pytest.raises(RuntimeError, match="splineax.linear_solve"):
             run(solver, sparsity.data, RIGHT_HAND_SIDE)
+
+
+def test_as_solver_routes_a_dense_jacobian_operator_through_the_sparse_path(
+    solver: AbstractSparseLinearSolver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dense `lineax.JacobianLinearOperator` handed to a scoped solver, with no state
+    of its own, must be solved through the colored sparse materialisation rather than by
+    densifying the Jacobian.
+
+    The value alone does not distinguish the two, so this pins the route: the Jacobian
+    has to reach `asdex.jacobian_from_coloring` under the scope's own coloring, which
+    costs one JVP per color, and neither of lineax's dense paths (`as_matrix` and the
+    `jacobian` helper behind `lineax.materialise`) may run at all.
+    """
+    expected = jnp.linalg.solve(
+        np.asarray(
+            jax.jacfwd(lambda point: coupled_residual(point, None))(JACOBIAN_POINT)
+        ),
+        np.asarray(RIGHT_HAND_SIDE),
+    )
+    operator = lx.JacobianLinearOperator(coupled_residual, JACOBIAN_POINT)
+    coloring = splx.JacobianColoring.detect(coupled_residual, JACOBIAN_POINT)
+    colorings_used = []
+    materialise_sparsely = asdex.jacobian_from_coloring
+
+    def spy_on_sparse_materialisation(fn, used_coloring, *args, **kwargs):
+        colorings_used.append(used_coloring)
+        return materialise_sparsely(fn, used_coloring, *args, **kwargs)
+
+    def densified(*args: object, **kwargs: object):
+        raise AssertionError("the Jacobian was densified instead of colored")
+
+    monkeypatch.setattr(asdex, "jacobian_from_coloring", spy_on_sparse_materialisation)
+    monkeypatch.setattr(lx.JacobianLinearOperator, "as_matrix", densified)
+    monkeypatch.setattr(lineax_operator, "jacobian", densified)
+
+    with solver.factorize_symbolic(coloring, as_solver=True) as scoped_solver:
+        solution = splx.linear_solve(
+            operator, RIGHT_HAND_SIDE, solver=scoped_solver
+        ).value
+
+    assert jnp.allclose(solution, expected, atol=1e-5)
+    assert colorings_used, "the Jacobian never reached the sparse materialisation"
+    assert all(used is coloring.coloring for used in colorings_used), (
+        "the scope's own coloring was not the one used"
+    )
+    # Without this the sparse route would cost the same as the dense one, and the
+    # assertions above would hold vacuously.
+    assert coloring.num_colors < JACOBIAN_POINT.shape[0]

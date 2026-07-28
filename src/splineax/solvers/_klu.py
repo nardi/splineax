@@ -10,7 +10,7 @@ import numpy as np
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import KLUHandleManager
-from lineax import AbstractLinearOperator, materialise
+from lineax import AbstractLinearOperator, JacobianLinearOperator
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
     PackedStructures,
@@ -40,6 +40,7 @@ from splineax.solvers._sparse import (
     _Sparsity,
     as_scoped_solver,
     factorize_through_init,
+    sparse_jacobian_operator,
 )
 
 # `Ai` (row indices), `Aj` (column indices), `Ax` (values): the matrix in COO form.
@@ -190,6 +191,9 @@ class _KLUSymbolicScope(NamedTuple):
     """Row and column indices of the analyzed matrix, without values."""
     shape: tuple[int, ...]
     symbolic: _KLUHandle
+    sparsity: _Sparsity
+    """The object the pattern was analyzed from, kept to sparsely materialise a
+    `lineax.JacobianLinearOperator` handed to `init`."""
 
     def init(
         self,
@@ -199,7 +203,16 @@ class _KLUSymbolicScope(NamedTuple):
         Ai, Aj = self.indices
         match operator:
             case SparseJacobianLinearOperator():
-                return self.init(materialise(operator), options)
+                # Take the matrix, but leave `operator` bound to the Jacobian operator,
+                # so that the structures packed below stay the caller's own.
+                bcoo = operator.as_bcoo()
+            case JacobianLinearOperator():
+                # A dense lineax Jacobian operator: rebuild it as its sparse analogue
+                # against the scope's sparsity, so it materialises with one JVP or VJP
+                # per color rather than one per column or row.
+                return self.init(
+                    sparse_jacobian_operator(operator, self.sparsity), options
+                )
             case BCSRLinearOperator(matrix):
                 bcoo = matrix.to_bcoo()
             case BCOOLinearOperator(matrix):
@@ -207,8 +220,8 @@ class _KLUSymbolicScope(NamedTuple):
             case _:
                 raise TypeError(
                     "`_KLUSymbolicScope.init` requires a `BCOOLinearOperator`, "
-                    "`BCSRLinearOperator`, or `SparseJacobianLinearOperator`; "
-                    f"got {type(operator).__name__}."
+                    "`BCSRLinearOperator`, `SparseJacobianLinearOperator`, or "
+                    f"`lineax.JacobianLinearOperator`; got {type(operator).__name__}."
                 )
         Ax = bcoo.data
 
@@ -299,9 +312,10 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         # duplicate indices); KLU builds CSC internally, so the index order is irrelevant.
         match operator:
             case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
-                return self.init(materialise(operator), options)
+                # Materialise the Jacobian and reuse the BCOO path below. `operator`
+                # stays bound to it, so `pack_structures` sees the caller's structures
+                # rather than the flat pair a materialised operator would report.
+                matrix = operator.as_bcoo()
             case BCSRLinearOperator(matrix):
                 matrix = matrix.to_bcoo()
             case BCOOLinearOperator(matrix):
@@ -375,7 +389,9 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                       precomputed asdex sparsity pattern, without materialising the
                       Jacobian numerically. That host-side read means the coloring
                       must be concrete here, not a traced value inside a jitted
-                      function.
+                      function. The scope also keeps this object itself, and colors
+                      it (or reuses the coloring it carries) to sparsely materialise
+                      any `lineax.JacobianLinearOperator` passed to its `.init`.
             as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
                        with this solver, instead of the bare scope, so that the two
                        need not be passed around together.
@@ -458,6 +474,7 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                 (Ai, Aj),
                 tuple(shape),
                 symbolic,
+                sparsity,
             )
 
     def compute(
