@@ -113,6 +113,21 @@ The optional `mode=` argument selects `"fwd"` (column coloring, JVPs) or `"rev"`
 coloring, VJPs). The function must map a one-dimensional real array to a
 one-dimensional real array. Complex dtypes are rejected.
 
+### Converting a dense Jacobian operator
+
+An existing `lineax.JacobianLinearOperator` can be converted with
+[`from_jacobian_operator`][splineax.SparseJacobianLinearOperator.from_jacobian_operator],
+which carries over its function, point, arguments and tags:
+
+```{.python continuation}
+dense_operator = lx.JacobianLinearOperator(residual, y0)
+sparse_operator = splx.SparseJacobianLinearOperator.from_jacobian_operator(dense_operator)
+```
+
+The sparsity is detected here, unless a coloring is passed as the second argument. When
+the dense operator was built with `jac="fwd"` or `jac="bwd"`, detection uses the
+matching mode.
+
 ### Reusing a coloring across points
 
 Sparsity and coloring depend only on the computation graph of `fn`, not on the values

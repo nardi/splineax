@@ -17,6 +17,7 @@ lives in [test_solvers.py](test_solvers.py).
 from __future__ import annotations
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
@@ -79,6 +80,46 @@ def test_factorize_symbolic_solves_correctly(
         ).value
         with scope.factorize(operator) as numeric_state:
             numeric_solution = lx.linear_solve(
+                operator, RIGHT_HAND_SIDE, solver=solver, state=numeric_state
+            ).value
+
+    assert jnp.allclose(symbolic_solution, expected, atol=1e-5)
+    assert jnp.allclose(numeric_solution, expected, atol=1e-5)
+
+
+def coupled_residual(y: jnp.ndarray, args: object) -> jnp.ndarray:
+    """A nonlinear map whose Jacobian is banded, so a coloring buys something."""
+    del args
+    return 13.0 * y + y**2 + 0.5 * jnp.roll(y, 1) * y
+
+
+JACOBIAN_POINT = jnp.linspace(0.5, 1.5, RIGHT_HAND_SIDE.shape[0])
+
+
+@pytest.mark.parametrize("with_coloring", [True, False])
+def test_symbolic_scope_init_accepts_a_dense_jacobian_operator(
+    solver: AbstractSparseLinearSolver, with_coloring: bool
+) -> None:
+    """A scope's `init` accepts a dense `lineax.JacobianLinearOperator`: it is rebuilt
+    as a `SparseJacobianLinearOperator` and materialised sparsely, so the solve matches
+    the dense reference. When the scope was opened from a coloring, that coloring is
+    reused; when it was opened from a plain matrix, the sparsity is detected instead.
+    Both must solve correctly, through the symbolic tier and the numeric one."""
+    dense_jacobian = jax.jacfwd(lambda point: coupled_residual(point, None))(
+        JACOBIAN_POINT
+    )
+    operator = lx.JacobianLinearOperator(coupled_residual, JACOBIAN_POINT)
+    coloring = splx.JacobianColoring.detect(coupled_residual, JACOBIAN_POINT)
+    sparsity = coloring if with_coloring else BCOO.fromdense(dense_jacobian)
+    expected = jnp.linalg.solve(np.asarray(dense_jacobian), np.asarray(RIGHT_HAND_SIDE))
+
+    with solver.factorize_symbolic(sparsity) as scope:
+        symbolic_state = scope.init(operator)
+        symbolic_solution = splx.linear_solve(
+            operator, RIGHT_HAND_SIDE, solver=solver, state=symbolic_state
+        ).value
+        with scope.factorize(operator) as numeric_state:
+            numeric_solution = splx.linear_solve(
                 operator, RIGHT_HAND_SIDE, solver=solver, state=numeric_state
             ).value
 

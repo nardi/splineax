@@ -424,3 +424,69 @@ def test_jacobian_coloring_through_jit_and_solver(enable_x64: None) -> None:
     detected_solution = solve(detected_coloring, SQUARE_POINT, RIGHT_HAND_SIDE)
     assert np.allclose(np.asarray(detected_solution), expected, atol=1e-5)
     assert len(trace_log) == 1, "a detection-built coloring retraced the jitted solve"
+
+
+def test_from_jacobian_operator_matches_the_dense_operator() -> None:
+    """Converting a `lineax.JacobianLinearOperator` must preserve the Jacobian it
+    represents, along with the function, the point, the extra arguments and the tags.
+    Only the way the Jacobian is materialised changes."""
+    dense_operator = lx.JacobianLinearOperator(
+        elementwise_function, EVALUATION_POINT, tags=lx.diagonal_tag
+    )
+    converted = SparseJacobianLinearOperator.from_jacobian_operator(dense_operator)
+
+    assert isinstance(converted, SparseJacobianLinearOperator)
+    assert jnp.allclose(
+        converted.as_matrix(), dense_jacobian(elementwise_function, EVALUATION_POINT)
+    )
+    assert jnp.allclose(converted.x, dense_operator.x)
+    assert converted.args == dense_operator.args
+    assert converted.tags == dense_operator.tags
+    assert lx.is_diagonal(converted)
+
+    # A rectangular Jacobian keeps its (differing) structures too.
+    rectangular = SparseJacobianLinearOperator.from_jacobian_operator(
+        lx.JacobianLinearOperator(banded_function, EVALUATION_POINT)
+    )
+    assert jnp.allclose(
+        rectangular.as_matrix(), dense_jacobian(banded_function, EVALUATION_POINT)
+    )
+    assert rectangular.in_structure() == jax.ShapeDtypeStruct(
+        (6,), EVALUATION_POINT.dtype
+    )
+    assert rectangular.out_structure() == jax.ShapeDtypeStruct(
+        (5,), EVALUATION_POINT.dtype
+    )
+
+
+def test_from_jacobian_operator_reuses_a_given_coloring() -> None:
+    """A supplied coloring must be stored as-is, skipping detection, and must give
+    the same Jacobian as the detected one."""
+    coloring = JacobianColoring.detect(banded_function, EVALUATION_POINT)
+    dense_operator = lx.JacobianLinearOperator(banded_function, EVALUATION_POINT)
+    from_given = SparseJacobianLinearOperator.from_jacobian_operator(
+        dense_operator, coloring
+    )
+    from_detection = SparseJacobianLinearOperator.from_jacobian_operator(dense_operator)
+
+    assert from_given.coloring is coloring.coloring
+    assert jnp.allclose(from_given.as_matrix(), from_detection.as_matrix())
+
+
+@pytest.mark.parametrize(
+    ("jac", "expected_mode"), [("fwd", "fwd"), ("bwd", "rev"), (None, None)]
+)
+def test_from_jacobian_operator_translates_the_jac_argument(jac, expected_mode) -> None:
+    """lineax's `jac` names reverse mode `"bwd"` where asdex names it `"rev"`, so the
+    conversion must translate it when detecting. An unset `jac` leaves the choice to
+    asdex, whichever mode it then picks."""
+    dense_operator = lx.JacobianLinearOperator(
+        banded_function, EVALUATION_POINT, jac=jac
+    )
+    converted = SparseJacobianLinearOperator.from_jacobian_operator(dense_operator)
+
+    if expected_mode is not None:
+        assert converted.coloring.mode == expected_mode
+    assert jnp.allclose(
+        converted.as_matrix(), dense_jacobian(banded_function, EVALUATION_POINT)
+    )

@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
-from lineax import AbstractLinearOperator, materialise
+from lineax import AbstractLinearOperator, JacobianLinearOperator, materialise
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
     PackedStructures,
@@ -41,6 +41,7 @@ from splineax.solvers._sparse import (
     SymbolicScopedSparseLinearSolver,
     _Sparsity,
     as_scoped_solver,
+    coloring_of,
     factorize_through_init,
 )
 
@@ -234,6 +235,9 @@ class _PardisoBasicState(NamedTuple):
 class _PardisoSymbolicScope(NamedTuple):
     shape: tuple[int, ...]
     handle: _PardisoHandle
+    coloring: JacobianColoring | None = None
+    """The coloring the analyzed sparsity came with, if any, used to sparsely
+    materialise a `lineax.JacobianLinearOperator` handed to `init`."""
 
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
@@ -243,6 +247,16 @@ class _PardisoSymbolicScope(NamedTuple):
                 # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
                 # BCOO path below.
                 return self.init(materialise(operator), options)
+            case JacobianLinearOperator():
+                # A dense lineax Jacobian operator: rebuild it as its sparse analogue
+                # against the scope's coloring, so it materialises with one JVP or VJP
+                # per color rather than one per column or row.
+                return self.init(
+                    SparseJacobianLinearOperator.from_jacobian_operator(
+                        operator, self.coloring
+                    ),
+                    options,
+                )
             case BCSRLinearOperator(matrix):
                 bcoo = matrix.to_bcoo()
             case BCOOLinearOperator(matrix):
@@ -250,9 +264,9 @@ class _PardisoSymbolicScope(NamedTuple):
             case _:
                 raise TypeError(
                     "`Pardiso.factorize_symbolic` scope's `.init` requires a "
-                    "`BCOOLinearOperator`, `BCSRLinearOperator`, or "
-                    "`SparseJacobianLinearOperator`; got "
-                    f"{type(operator).__name__}."
+                    "`BCOOLinearOperator`, `BCSRLinearOperator`, "
+                    "`SparseJacobianLinearOperator`, or "
+                    f"`lineax.JacobianLinearOperator`; got {type(operator).__name__}."
                 )
 
         if bcoo.data.dtype in COMPLEX_DTYPES:
@@ -479,6 +493,9 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                       `BCOOLinearOperator`, `BCSRLinearOperator`,
                       `SparseJacobianLinearOperator`,
                       `SparseJacobianLinearOperatorColoring`, or `JacobianColoring`.
+                      For the latter three, the scope also keeps the coloring, and uses
+                      it to sparsely materialise any `lineax.JacobianLinearOperator`
+                      passed to its `.init`.
             as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
                        with this solver, instead of the bare scope, so that the two
                        need not be passed around together.
@@ -571,7 +588,7 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                 matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
             )
             handle = _PardisoHandleAllocationScopeManager.register_handle(value)
-            yield _PardisoSymbolicScope(tuple(shape), handle)
+            yield _PardisoSymbolicScope(tuple(shape), handle, coloring_of(sparsity))
 
     def compute(
         self,

@@ -28,6 +28,7 @@ from jax.experimental.sparse import BCOO
 from jaxtyping import Array, ArrayLike, Inexact, PyTree
 from lineax import (
     AbstractLinearOperator,
+    JacobianLinearOperator,
     has_unit_diagonal,
     is_diagonal,
     is_lower_triangular,
@@ -190,7 +191,9 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
 
     Only real dtypes are supported. To build many operators for the same
     function at different points without repeating sparsity detection, use
-    [`splineax.SparseJacobianLinearOperatorColoring`][].
+    [`splineax.SparseJacobianLinearOperatorColoring`][]. To convert an existing dense
+    `lineax.JacobianLinearOperator`, use
+    [`splineax.SparseJacobianLinearOperator.from_jacobian_operator`][].
     """
 
     fn: Callable
@@ -296,6 +299,53 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         else:
             self._in_structure = forward_in_structure
             self._out_structure = forward_out_structure
+
+    @classmethod
+    def from_jacobian_operator(
+        cls,
+        operator: JacobianLinearOperator,
+        coloring: ColoredPattern | JacobianColoring | None = None,
+    ) -> "SparseJacobianLinearOperator":
+        """Converts a `lineax.JacobianLinearOperator` into its sparse analogue.
+
+        The function, the point, the extra arguments and the tags are taken straight
+        from `operator`, so the two operators represent the same Jacobian. The
+        difference is how it is materialised: one JVP or VJP per color instead of one
+        per column or row.
+
+        Without a `coloring` the sparsity is detected and colored here, which costs one
+        structural trace of the function. Detection runs host-side, so either call this
+        outside `jax.jit` or pass a coloring in. When `operator` was built with
+        `jac="fwd"` or `jac="bwd"`, the matching asdex mode is used for detection.
+
+        The wrapped function must map a one-dimensional real array to a
+        one-dimensional real array, which is narrower than what
+        `lineax.JacobianLinearOperator` itself accepts.
+
+        **Arguments:**
+
+        - `operator`: the dense Jacobian operator to convert.
+        - `coloring`: optional precomputed coloring of that Jacobian, either an
+            `asdex.ColoredPattern` or a [`splineax.JacobianColoring`][]. If not given,
+            the sparsity is detected with [`splineax.JacobianColoring.detect`][].
+        """
+        if coloring is None:
+            coloring = JacobianColoring.detect(
+                operator.fn,
+                operator.x,
+                operator.args,
+                mode=_mode_from_jac(operator.jac),
+            )
+        # `lineax.JacobianLinearOperator` closure-converts its function on
+        # construction, so converting it again here would only repeat that trace.
+        return cls(
+            operator.fn,
+            operator.x,
+            operator.args,
+            coloring=coloring,
+            tags=operator.tags,
+            closure_convert=False,
+        )
 
     def _function_of_point(self) -> Callable[[Array], Array]:
         """Returns the forward map `x -> fn(x, args)` with `args` bound."""
@@ -503,6 +553,14 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
             tags=tags,
             closure_convert=False,
         )
+
+
+def _mode_from_jac(jac: Literal["fwd", "bwd"] | None) -> JacobianMode | None:
+    """Translates the `jac` argument of a `lineax.JacobianLinearOperator` into an asdex
+    coloring mode. Both spell forward mode `"fwd"`, but lineax calls reverse mode
+    `"bwd"` where asdex calls it `"rev"`. `None` is passed through, leaving the choice
+    to asdex."""
+    return "rev" if jac == "bwd" else jac
 
 
 def _example_point(

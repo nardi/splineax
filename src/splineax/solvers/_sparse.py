@@ -41,6 +41,35 @@ _Sparsity = (
 )
 
 
+def coloring_of(sparsity: _Sparsity) -> JacobianColoring | None:
+    """The Jacobian coloring a `factorize_symbolic` sparsity carries, if it carries one.
+
+    Every symbolic scope keeps this alongside its analysis, so that a
+    `lineax.JacobianLinearOperator` passed to the scope's `init` can be rebuilt as a
+    `SparseJacobianLinearOperator` and materialised sparsely, instead of having its
+    sparsity detected again on every call. A plain matrix or matrix operator carries no
+    coloring, in which case `None` is returned and detection is left to
+    `SparseJacobianLinearOperator.from_jacobian_operator`.
+    """
+    match sparsity:
+        case SparseJacobianLinearOperator(transposed=True):
+            # The analyzed pattern is the transpose of the one this coloring describes,
+            # so a Jacobian materialised with it would not line up with the analysis.
+            # Detection on the incoming operator gets that right instead.
+            return None
+        case SparseJacobianLinearOperator():
+            # The operator stores a bare `asdex.ColoredPattern`, which the scopes and
+            # the operator constructor both take wrapped or unwrapped. Wrapping it
+            # keeps the field type of every scope a single type.
+            return JacobianColoring(sparsity.coloring)
+        case SparseJacobianLinearOperatorColoring():
+            return sparsity.coloring
+        case JacobianColoring():
+            return sparsity
+        case _:
+            return None
+
+
 class SparseNumericState(Protocol):
     """A fully factorized sparse solver state, ready to pass to `lineax.linear_solve`.
 
@@ -81,7 +110,12 @@ class SparseSymbolicScope(Protocol):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> SparseSymbolicState:
-        """Build a directly-solvable state reusing the scope's symbolic factorization."""
+        """Build a directly-solvable state reusing the scope's symbolic factorization.
+
+        A `lineax.JacobianLinearOperator` is accepted here as well: it is rebuilt as a
+        `SparseJacobianLinearOperator` against the coloring the scope was opened with,
+        and materialised sparsely.
+        """
         ...
 
     def factorize(

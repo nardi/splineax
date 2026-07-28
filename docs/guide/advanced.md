@@ -84,6 +84,13 @@ with solver.factorize_symbolic(sparsity) as scope:
 pattern is read. For the Jacobian operator and the two coloring wrappers, the pattern
 comes from the precomputed sparsity, without materialising the Jacobian numerically.
 
+Besides the sparse operators, a scope's `init` accepts a dense
+`lineax.JacobianLinearOperator` too. It is rebuilt as a
+[`SparseJacobianLinearOperator`][splineax.SparseJacobianLinearOperator] against the
+coloring the scope was opened with, and then materialised, so it costs one JVP or VJP
+per color rather than one per column or row. A scope opened from a plain matrix carries
+no coloring, in which case the sparsity of the incoming operator is detected instead.
+
 The scope itself, not just the state it produces, can be passed into a jitted function
 that builds the operator inside and calls `scope.init` again, so the analysis is reused
 across solves whose values are only known under the trace.
