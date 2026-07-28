@@ -109,9 +109,10 @@ Three construction paths are available, from least to most precomputed:
 - Pass `coloring=` (an `asdex.ColoredPattern` or a
   [`JacobianColoring`][splineax.JacobianColoring]): both steps are skipped.
 
-The optional `mode=` argument selects `"fwd"` (column coloring, JVPs) or `"rev"` (row
-coloring, VJPs). The function must map a one-dimensional real array to a
-one-dimensional real array. Complex dtypes are rejected.
+The optional `mode=` argument selects `"fwd"` (column coloring, JVPs) or `"bwd"` (row
+coloring, VJPs), spelled as lineax and JAX spell it. The function must map a
+one-dimensional real array to a one-dimensional real array. Complex dtypes are
+rejected.
 
 ### Converting a dense Jacobian operator
 
@@ -124,9 +125,9 @@ dense_operator = lx.JacobianLinearOperator(residual, y0)
 sparse_operator = splx.SparseJacobianLinearOperator.from_jacobian_operator(dense_operator)
 ```
 
-The sparsity is detected here, unless a coloring is passed as the second argument. When
-the dense operator was built with `jac="fwd"` or `jac="bwd"`, detection uses the
-matching mode.
+The `sparsity`, `coloring` and `mode` arguments of the constructor are accepted here
+too, so the same three construction paths are available. Left out, the sparsity is
+detected, using the operator's own `jac` as the mode.
 
 ### Reusing a coloring across points
 

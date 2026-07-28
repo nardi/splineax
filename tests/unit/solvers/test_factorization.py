@@ -30,6 +30,7 @@ from splineax import (
     BCOOLinearOperator,
     SymbolicScopedSparseLinearSolver,
 )
+from splineax.solvers._sparse import sparse_jacobian_operator
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
@@ -96,21 +97,28 @@ def coupled_residual(y: jnp.ndarray, args: object) -> jnp.ndarray:
 JACOBIAN_POINT = jnp.linspace(0.5, 1.5, RIGHT_HAND_SIDE.shape[0])
 
 
-@pytest.mark.parametrize("with_coloring", [True, False])
+@pytest.mark.parametrize("sparsity_kind", ["coloring", "operator_coloring", "matrix"])
 def test_symbolic_scope_init_accepts_a_dense_jacobian_operator(
-    solver: AbstractSparseLinearSolver, with_coloring: bool
+    solver: AbstractSparseLinearSolver, sparsity_kind: str
 ) -> None:
     """A scope's `init` accepts a dense `lineax.JacobianLinearOperator`: it is rebuilt
     as a `SparseJacobianLinearOperator` and materialised sparsely, so the solve matches
-    the dense reference. When the scope was opened from a coloring, that coloring is
-    reused; when it was opened from a plain matrix, the sparsity is detected instead.
-    Both must solve correctly, through the symbolic tier and the numeric one."""
+    the dense reference. A scope opened from a coloring hands that coloring over, and
+    one opened from a plain matrix colors the matrix instead. Every source must solve
+    correctly, through the symbolic tier and the numeric one."""
     dense_jacobian = jax.jacfwd(lambda point: coupled_residual(point, None))(
         JACOBIAN_POINT
     )
     operator = lx.JacobianLinearOperator(coupled_residual, JACOBIAN_POINT)
-    coloring = splx.JacobianColoring.detect(coupled_residual, JACOBIAN_POINT)
-    sparsity = coloring if with_coloring else BCOO.fromdense(dense_jacobian)
+    sparsity = {
+        "coloring": lambda: splx.JacobianColoring.detect(
+            coupled_residual, JACOBIAN_POINT
+        ),
+        "operator_coloring": lambda: splx.SparseJacobianLinearOperatorColoring.detect(
+            coupled_residual, JACOBIAN_POINT
+        ),
+        "matrix": lambda: BCOO.fromdense(dense_jacobian),
+    }[sparsity_kind]()
     expected = jnp.linalg.solve(np.asarray(dense_jacobian), np.asarray(RIGHT_HAND_SIDE))
 
     with solver.factorize_symbolic(sparsity) as scope:
@@ -125,6 +133,50 @@ def test_symbolic_scope_init_accepts_a_dense_jacobian_operator(
 
     assert jnp.allclose(symbolic_solution, expected, atol=1e-5)
     assert jnp.allclose(numeric_solution, expected, atol=1e-5)
+
+
+def test_scope_sparsity_hands_over_a_carried_coloring() -> None:
+    """The conversion behind that `init` takes the coloring straight from an object
+    carrying one, rather than recomputing it, and colors a plain matrix instead when
+    there is none to take."""
+    operator = lx.JacobianLinearOperator(coupled_residual, JACOBIAN_POINT)
+    dense_jacobian = jax.jacfwd(lambda point: coupled_residual(point, None))(
+        JACOBIAN_POINT
+    )
+    coloring = splx.JacobianColoring.detect(coupled_residual, JACOBIAN_POINT)
+    bound_coloring = splx.SparseJacobianLinearOperatorColoring.detect(
+        coupled_residual, JACOBIAN_POINT
+    )
+
+    assert sparse_jacobian_operator(operator, coloring).coloring is coloring.coloring
+    assert (
+        sparse_jacobian_operator(operator, bound_coloring).coloring
+        is bound_coloring.coloring.coloring
+    )
+    from_matrix = sparse_jacobian_operator(operator, BCOO.fromdense(dense_jacobian))
+    assert jnp.allclose(from_matrix.as_matrix(), dense_jacobian)
+
+    with pytest.raises(TypeError, match="symbolic scope's sparsity"):
+        sparse_jacobian_operator(operator, object())  # ty: ignore[invalid-argument-type]
+
+
+def test_matrix_scope_colors_only_when_a_jacobian_operator_arrives(
+    make_operator: OperatorFactory,
+    solver: AbstractSparseLinearSolver,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coloring a plain matrix is host-side work, so a scope opened from one must defer
+    it until a dense Jacobian operator actually reaches `init`, and never pay for it on
+    the ordinary sparse-operator path."""
+
+    def unexpected_coloring(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the scope's sparsity was colored without needing it")
+
+    monkeypatch.setattr(splx.JacobianColoring, "from_sparsity", unexpected_coloring)
+    operator = make_operator(SQUARE_MATRIX)
+
+    with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+        scope.init(operator)
 
 
 def test_transpose_of_numeric_state_solves_transposed(

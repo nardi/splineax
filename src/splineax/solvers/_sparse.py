@@ -15,7 +15,7 @@ import equinox as eqx
 import jax
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, PyTree
-from lineax import AbstractLinearOperator, AutoLinearSolver
+from lineax import AbstractLinearOperator, AutoLinearSolver, JacobianLinearOperator
 from lineax import linear_solve as _lx_linear_solve
 from lineax._solution import RESULTS, Solution
 from lineax._solve import AbstractLinearSolver, sentinel
@@ -41,33 +41,54 @@ _Sparsity = (
 )
 
 
-def coloring_of(sparsity: _Sparsity) -> JacobianColoring | None:
-    """The Jacobian coloring a `factorize_symbolic` sparsity carries, if it carries one.
+def sparse_jacobian_operator(
+    operator: JacobianLinearOperator, sparsity: _Sparsity
+) -> SparseJacobianLinearOperator:
+    """Rebuilds a dense `lineax.JacobianLinearOperator` as its sparse analogue, against
+    the sparsity a symbolic scope was opened with.
 
-    Every symbolic scope keeps this alongside its analysis, so that a
-    `lineax.JacobianLinearOperator` passed to the scope's `init` can be rebuilt as a
-    `SparseJacobianLinearOperator` and materialised sparsely, instead of having its
-    sparsity detected again on every call. A plain matrix or matrix operator carries no
-    coloring, in which case `None` is returned and detection is left to
-    `SparseJacobianLinearOperator.from_jacobian_operator`.
+    Every scope keeps that sparsity object and calls this when, and only when, a
+    `lineax.JacobianLinearOperator` reaches its `init`. What it costs depends on what
+    the scope was opened with. An object carrying a coloring (a
+    `SparseJacobianLinearOperator`, a `SparseJacobianLinearOperatorColoring`, or a
+    `JacobianColoring`) hands that coloring straight over, so nothing is recomputed. A
+    sparsity-only object (a `BCOO`, a `BCSR`, or an operator wrapping one) is colored
+    here instead, skipping detection but not the coloring itself. Either way the
+    Jacobian is materialised against the pattern the scope analyzed, rather than one
+    detected from scratch.
+
+    Coloring runs host-side, so a scope opened inside `jax.jit` from a traced matrix
+    cannot resolve one. Passing a coloring-carrying object avoids that, as well as
+    avoiding the repeated coloring work when `init` is called many times.
     """
     match sparsity:
-        case SparseJacobianLinearOperator(transposed=True):
-            # The analyzed pattern is the transpose of the one this coloring describes,
-            # so a Jacobian materialised with it would not line up with the analysis.
-            # Detection on the incoming operator gets that right instead.
-            return None
         case SparseJacobianLinearOperator():
-            # The operator stores a bare `asdex.ColoredPattern`, which the scopes and
-            # the operator constructor both take wrapped or unwrapped. Wrapping it
-            # keeps the field type of every scope a single type.
-            return JacobianColoring(sparsity.coloring)
+            # The operator stores a bare `asdex.ColoredPattern`, which the constructor
+            # accepts wrapped or unwrapped, so it can be handed over as-is.
+            coloring = sparsity.coloring
         case SparseJacobianLinearOperatorColoring():
-            return sparsity.coloring
+            coloring = sparsity.coloring
         case JacobianColoring():
-            return sparsity
+            coloring = sparsity
+        case BCSRLinearOperator(matrix):
+            coloring = JacobianColoring.from_sparsity(matrix.to_bcoo())
+        case BCOOLinearOperator(matrix):
+            coloring = JacobianColoring.from_sparsity(matrix)
+        case BCSR():
+            coloring = JacobianColoring.from_sparsity(sparsity.to_bcoo())
+        case BCOO():
+            coloring = JacobianColoring.from_sparsity(sparsity)
         case _:
-            return None
+            raise TypeError(
+                "A symbolic scope's sparsity must be a `BCOO`, `BCSR`, "
+                "`BCOOLinearOperator`, `BCSRLinearOperator`, "
+                "`SparseJacobianLinearOperator`, "
+                "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
+                f"got {type(sparsity).__name__}."
+            )
+    return SparseJacobianLinearOperator.from_jacobian_operator(
+        operator, coloring=coloring
+    )
 
 
 class SparseNumericState(Protocol):
@@ -113,8 +134,8 @@ class SparseSymbolicScope(Protocol):
         """Build a directly-solvable state reusing the scope's symbolic factorization.
 
         A `lineax.JacobianLinearOperator` is accepted here as well: it is rebuilt as a
-        `SparseJacobianLinearOperator` against the coloring the scope was opened with,
-        and materialised sparsely.
+        `SparseJacobianLinearOperator` against the sparsity the scope was opened with,
+        and materialised sparsely. See `sparse_jacobian_operator`.
         """
         ...
 

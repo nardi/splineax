@@ -55,7 +55,11 @@ from lineax._tags import (
 
 from ._bcoo import BCOOLinearOperator
 
-JacobianMode = Literal["fwd", "rev"]
+JacobianMode = Literal["fwd", "bwd"]
+"""The AD mode a Jacobian coloring is built for: `"fwd"` (column coloring, JVPs) or
+`"bwd"` (row coloring, VJPs). Spelled as in lineax and JAX, so a
+`lineax.JacobianLinearOperator`'s `jac` argument carries over unchanged. asdex spells
+reverse mode `"rev"`, which `_asdex_mode` translates to."""
 
 
 class JacobianColoring(eqx.Module):
@@ -116,8 +120,8 @@ class JacobianColoring(eqx.Module):
         - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
             Only its shape and dtype are used.
         - `args`: extra arguments to `fn` that are not differentiated.
-        - `mode`: optional asdex coloring mode, either `"fwd"` (column coloring,
-            materialised with JVPs) or `"rev"` (row coloring, materialised with VJPs).
+        - `mode`: optional coloring mode, either `"fwd"` (column coloring,
+            materialised with JVPs) or `"bwd"` (row coloring, materialised with VJPs).
             If not given, asdex picks based on the pattern.
         """
         example_point = _example_point(x)
@@ -125,7 +129,9 @@ class JacobianColoring(eqx.Module):
         def function_of_point(point: Array) -> Array:
             return fn(point, args)
 
-        detected = asdex.jacobian_coloring(function_of_point, example_point, mode=mode)
+        detected = asdex.jacobian_coloring(
+            function_of_point, example_point, mode=_asdex_mode(mode)
+        )
         return cls(detected)
 
     @classmethod
@@ -145,11 +151,13 @@ class JacobianColoring(eqx.Module):
 
         - `sparsity`: the known sparsity pattern of the Jacobian, as an
             `asdex.SparsityPattern`, a dense boolean mask, or a `BCOO` matrix.
-        - `mode`: optional asdex coloring mode, either `"fwd"` (column coloring,
-            materialised with JVPs) or `"rev"` (row coloring, materialised with VJPs).
+        - `mode`: optional coloring mode, either `"fwd"` (column coloring,
+            materialised with JVPs) or `"bwd"` (row coloring, materialised with VJPs).
             If not given, asdex picks based on the pattern.
         """
-        colored = asdex.jacobian_coloring_from_sparsity(sparsity, mode=mode)
+        colored = asdex.jacobian_coloring_from_sparsity(
+            sparsity, mode=_asdex_mode(mode)
+        )
         return cls(colored)
 
     @property
@@ -159,10 +167,11 @@ class JacobianColoring(eqx.Module):
         return self.coloring.sparsity
 
     @property
-    def mode(self) -> str:
-        """The resolved asdex coloring mode, either `"fwd"` or `"rev"`. This is the
-        mode asdex chose, never the unresolved `None` the caller may have passed."""
-        return self.coloring.mode
+    def mode(self) -> JacobianMode:
+        """The resolved coloring mode, either `"fwd"` or `"bwd"`. This is the mode
+        asdex chose, never the unresolved `None` the caller may have passed, and it is
+        reported in the lineax spelling rather than asdex's `"fwd"`/`"rev"`."""
+        return "bwd" if self.coloring.mode == "rev" else "fwd"
 
     @property
     def num_colors(self) -> int:
@@ -231,8 +240,8 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         - `coloring`: optional precomputed coloring, either an `asdex.ColoredPattern`
             or a [`splineax.JacobianColoring`][]. Skips both sparsity detection and
             coloring. At most one of `sparsity` and `coloring` may be given.
-        - `mode`: optional asdex coloring mode, either `"fwd"` (column coloring,
-            materialised with JVPs) or `"rev"` (row coloring, materialised with
+        - `mode`: optional coloring mode, either `"fwd"` (column coloring,
+            materialised with JVPs) or `"bwd"` (row coloring, materialised with
             VJPs). If not given, asdex picks based on the pattern.
         - `tags`: any lineax tags indicating whether the Jacobian has any particular
             properties, like symmetry or positive-definite-ness. Note that these
@@ -276,12 +285,12 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
                 self.coloring = pattern
             case (None, None):
                 self.coloring = asdex.jacobian_coloring(
-                    function_of_point, self.x, mode=mode
+                    function_of_point, self.x, mode=_asdex_mode(mode)
                 )
             case (None, known_sparsity):
                 assert known_sparsity is not None
                 self.coloring = asdex.jacobian_coloring_from_sparsity(
-                    known_sparsity, mode=mode
+                    known_sparsity, mode=_asdex_mode(mode)
                 )
             case _:
                 raise TypeError(
@@ -304,7 +313,10 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
     def from_jacobian_operator(
         cls,
         operator: JacobianLinearOperator,
+        *,
+        sparsity: SparsityPattern | np.ndarray | BCOO | None = None,
         coloring: ColoredPattern | JacobianColoring | None = None,
+        mode: JacobianMode | None = None,
     ) -> "SparseJacobianLinearOperator":
         """Converts a `lineax.JacobianLinearOperator` into its sparse analogue.
 
@@ -313,11 +325,6 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         difference is how it is materialised: one JVP or VJP per color instead of one
         per column or row.
 
-        Without a `coloring` the sparsity is detected and colored here, which costs one
-        structural trace of the function. Detection runs host-side, so either call this
-        outside `jax.jit` or pass a coloring in. When `operator` was built with
-        `jac="fwd"` or `jac="bwd"`, the matching asdex mode is used for detection.
-
         The wrapped function must map a one-dimensional real array to a
         one-dimensional real array, which is narrower than what
         `lineax.JacobianLinearOperator` itself accepts.
@@ -325,24 +332,21 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         **Arguments:**
 
         - `operator`: the dense Jacobian operator to convert.
-        - `coloring`: optional precomputed coloring of that Jacobian, either an
-            `asdex.ColoredPattern` or a [`splineax.JacobianColoring`][]. If not given,
-            the sparsity is detected with [`splineax.JacobianColoring.detect`][].
+        - `sparsity`, `coloring`, `mode`: the precomputation arguments of the
+            constructor, passed through unchanged. Giving neither `sparsity` nor
+            `coloring` detects the sparsity here, which runs host-side, so either call
+            this outside `jax.jit` or pass one of them in. `mode` defaults to the
+            operator's own `jac`, which is spelled the same way.
         """
-        if coloring is None:
-            coloring = JacobianColoring.detect(
-                operator.fn,
-                operator.x,
-                operator.args,
-                mode=_mode_from_jac(operator.jac),
-            )
         # `lineax.JacobianLinearOperator` closure-converts its function on
         # construction, so converting it again here would only repeat that trace.
         return cls(
             operator.fn,
             operator.x,
             operator.args,
+            sparsity=sparsity,
             coloring=coloring,
+            mode=operator.jac if mode is None else mode,
             tags=operator.tags,
             closure_convert=False,
         )
@@ -491,7 +495,7 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
         - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
             Only its shape and dtype matter, since sparsity detection is structural.
         - `args`: extra arguments to `fn` that are not differentiated.
-        - `mode`: optional asdex coloring mode, `"fwd"` or `"rev"`.
+        - `mode`: optional coloring mode, `"fwd"` or `"bwd"`.
         """
         jacobian_coloring = JacobianColoring.detect(fn, x, args, mode=mode)
         return cls.from_jacobian_coloring(jacobian_coloring, fn, x, args)
@@ -522,7 +526,7 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
         - `sparsity`: the known sparsity pattern of the Jacobian, as an
             `asdex.SparsityPattern`, a dense boolean mask, or a `BCOO` matrix.
         - `args`: extra arguments to `fn` that are not differentiated.
-        - `mode`: optional asdex coloring mode, `"fwd"` or `"rev"`.
+        - `mode`: optional coloring mode, `"fwd"` or `"bwd"`.
         """
         jacobian_coloring = JacobianColoring.from_sparsity(sparsity, mode=mode)
         return cls.from_jacobian_coloring(jacobian_coloring, fn, x, args)
@@ -555,12 +559,11 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
         )
 
 
-def _mode_from_jac(jac: Literal["fwd", "bwd"] | None) -> JacobianMode | None:
-    """Translates the `jac` argument of a `lineax.JacobianLinearOperator` into an asdex
-    coloring mode. Both spell forward mode `"fwd"`, but lineax calls reverse mode
-    `"bwd"` where asdex calls it `"rev"`. `None` is passed through, leaving the choice
-    to asdex."""
-    return "rev" if jac == "bwd" else jac
+def _asdex_mode(mode: JacobianMode | None) -> Literal["fwd", "rev"] | None:
+    """Translates a coloring mode into the asdex spelling. Both call forward mode
+    `"fwd"`, but reverse mode is `"bwd"` here, as in lineax and JAX, where asdex calls
+    it `"rev"`. `None` is passed through, leaving the choice to asdex."""
+    return "rev" if mode == "bwd" else mode
 
 
 def _example_point(

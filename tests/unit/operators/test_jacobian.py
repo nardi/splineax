@@ -136,15 +136,17 @@ def test_construction_paths_agree() -> None:
     assert jnp.allclose(from_coloring.as_matrix(), expected)
 
 
-@pytest.mark.parametrize("mode", ["fwd", "rev"])
+@pytest.mark.parametrize("mode", ["fwd", "bwd"])
 def test_mode_is_forwarded(mode) -> None:
-    """The `mode` argument selects column versus row coloring in asdex. Both
-    modes must be accepted and give the correct Jacobian."""
+    """The `mode` argument selects column versus row coloring. Both modes must be
+    accepted, must reach asdex under its own spelling, and must give the correct
+    Jacobian."""
     operator = SparseJacobianLinearOperator(
         banded_function, EVALUATION_POINT, mode=mode
     )
     expected = dense_jacobian(banded_function, EVALUATION_POINT)
     assert jnp.allclose(operator.as_matrix(), expected)
+    assert JacobianColoring(operator.coloring).mode == mode
 
 
 def test_coloring_object_matches_direct_construction() -> None:
@@ -459,34 +461,48 @@ def test_from_jacobian_operator_matches_the_dense_operator() -> None:
     )
 
 
-def test_from_jacobian_operator_reuses_a_given_coloring() -> None:
-    """A supplied coloring must be stored as-is, skipping detection, and must give
-    the same Jacobian as the detected one."""
-    coloring = JacobianColoring.detect(banded_function, EVALUATION_POINT)
+def test_from_jacobian_operator_passes_the_precomputation_through() -> None:
+    """The `sparsity`, `coloring` and `mode` arguments reach the constructor unchanged,
+    so the conversion offers the same construction paths as building the operator
+    directly, and a supplied coloring is stored as-is rather than recomputed."""
     dense_operator = lx.JacobianLinearOperator(banded_function, EVALUATION_POINT)
-    from_given = SparseJacobianLinearOperator.from_jacobian_operator(
-        dense_operator, coloring
+    coloring = JacobianColoring.detect(banded_function, EVALUATION_POINT)
+    known_sparsity = asdex.jacobian_sparsity(
+        lambda point: banded_function(point, None), EVALUATION_POINT
+    )
+    expected = dense_jacobian(banded_function, EVALUATION_POINT)
+
+    from_coloring = SparseJacobianLinearOperator.from_jacobian_operator(
+        dense_operator, coloring=coloring
+    )
+    from_sparsity = SparseJacobianLinearOperator.from_jacobian_operator(
+        dense_operator, sparsity=known_sparsity, mode="bwd"
     )
     from_detection = SparseJacobianLinearOperator.from_jacobian_operator(dense_operator)
 
-    assert from_given.coloring is coloring.coloring
-    assert jnp.allclose(from_given.as_matrix(), from_detection.as_matrix())
+    assert from_coloring.coloring is coloring.coloring
+    assert JacobianColoring(from_sparsity.coloring).mode == "bwd"
+    for converted in (from_coloring, from_sparsity, from_detection):
+        assert jnp.allclose(converted.as_matrix(), expected)
+
+    with pytest.raises(TypeError, match="at most one"):
+        SparseJacobianLinearOperator.from_jacobian_operator(
+            dense_operator, sparsity=known_sparsity, coloring=coloring
+        )
 
 
-@pytest.mark.parametrize(
-    ("jac", "expected_mode"), [("fwd", "fwd"), ("bwd", "rev"), (None, None)]
-)
-def test_from_jacobian_operator_translates_the_jac_argument(jac, expected_mode) -> None:
-    """lineax's `jac` names reverse mode `"bwd"` where asdex names it `"rev"`, so the
-    conversion must translate it when detecting. An unset `jac` leaves the choice to
-    asdex, whichever mode it then picks."""
+@pytest.mark.parametrize("jac", ["fwd", "bwd", None])
+def test_from_jacobian_operator_defaults_the_mode_to_jac(jac) -> None:
+    """`jac` is spelled exactly as splineax spells `mode`, so the operator's own choice
+    of AD mode carries over into detection. An unset `jac` leaves the choice to asdex,
+    whichever mode it then picks."""
     dense_operator = lx.JacobianLinearOperator(
         banded_function, EVALUATION_POINT, jac=jac
     )
     converted = SparseJacobianLinearOperator.from_jacobian_operator(dense_operator)
 
-    if expected_mode is not None:
-        assert converted.coloring.mode == expected_mode
+    if jac is not None:
+        assert JacobianColoring(converted.coloring).mode == jac
     assert jnp.allclose(
         converted.as_matrix(), dense_jacobian(banded_function, EVALUATION_POINT)
     )

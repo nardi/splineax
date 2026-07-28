@@ -41,8 +41,8 @@ from splineax.solvers._sparse import (
     SymbolicScopedSparseLinearSolver,
     _Sparsity,
     as_scoped_solver,
-    coloring_of,
     factorize_through_init,
+    sparse_jacobian_operator,
 )
 
 # `indptr`, `indices`, `values`: the matrix in CSR form.
@@ -235,9 +235,9 @@ class _PardisoBasicState(NamedTuple):
 class _PardisoSymbolicScope(NamedTuple):
     shape: tuple[int, ...]
     handle: _PardisoHandle
-    coloring: JacobianColoring | None = None
-    """The coloring the analyzed sparsity came with, if any, used to sparsely
-    materialise a `lineax.JacobianLinearOperator` handed to `init`."""
+    sparsity: _Sparsity
+    """The object the pattern was analyzed from, kept to sparsely materialise a
+    `lineax.JacobianLinearOperator` handed to `init`."""
 
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
@@ -249,13 +249,10 @@ class _PardisoSymbolicScope(NamedTuple):
                 return self.init(materialise(operator), options)
             case JacobianLinearOperator():
                 # A dense lineax Jacobian operator: rebuild it as its sparse analogue
-                # against the scope's coloring, so it materialises with one JVP or VJP
+                # against the scope's sparsity, so it materialises with one JVP or VJP
                 # per color rather than one per column or row.
                 return self.init(
-                    SparseJacobianLinearOperator.from_jacobian_operator(
-                        operator, self.coloring
-                    ),
-                    options,
+                    sparse_jacobian_operator(operator, self.sparsity), options
                 )
             case BCSRLinearOperator(matrix):
                 bcoo = matrix.to_bcoo()
@@ -493,9 +490,9 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                       `BCOOLinearOperator`, `BCSRLinearOperator`,
                       `SparseJacobianLinearOperator`,
                       `SparseJacobianLinearOperatorColoring`, or `JacobianColoring`.
-                      For the latter three, the scope also keeps the coloring, and uses
-                      it to sparsely materialise any `lineax.JacobianLinearOperator`
-                      passed to its `.init`.
+                      The scope also keeps this object itself, and colors it (or
+                      reuses the coloring it carries) to sparsely materialise any
+                      `lineax.JacobianLinearOperator` passed to its `.init`.
             as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
                        with this solver, instead of the bare scope, so that the two
                        need not be passed around together.
@@ -588,7 +585,7 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                 matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
             )
             handle = _PardisoHandleAllocationScopeManager.register_handle(value)
-            yield _PardisoSymbolicScope(tuple(shape), handle, coloring_of(sparsity))
+            yield _PardisoSymbolicScope(tuple(shape), handle, sparsity)
 
     def compute(
         self,
