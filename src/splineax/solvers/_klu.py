@@ -10,7 +10,7 @@ import numpy as np
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import KLUHandleManager
-from lineax import AbstractLinearOperator, JacobianLinearOperator, materialise
+from lineax import AbstractLinearOperator, JacobianLinearOperator
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
     PackedStructures,
@@ -203,7 +203,9 @@ class _KLUSymbolicScope(NamedTuple):
         Ai, Aj = self.indices
         match operator:
             case SparseJacobianLinearOperator():
-                return self.init(materialise(operator), options)
+                # Take the matrix, but leave `operator` bound to the Jacobian operator,
+                # so that the structures packed below stay the caller's own.
+                bcoo = operator.as_bcoo()
             case JacobianLinearOperator():
                 # A dense lineax Jacobian operator: rebuild it as its sparse analogue
                 # against the scope's sparsity, so it materialises with one JVP or VJP
@@ -310,9 +312,10 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         # duplicate indices); KLU builds CSC internally, so the index order is irrelevant.
         match operator:
             case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
-                return self.init(materialise(operator), options)
+                # Materialise the Jacobian and reuse the BCOO path below. `operator`
+                # stays bound to it, so `pack_structures` sees the caller's structures
+                # rather than the flat pair a materialised operator would report.
+                matrix = operator.as_bcoo()
             case BCSRLinearOperator(matrix):
                 matrix = matrix.to_bcoo()
             case BCOOLinearOperator(matrix):

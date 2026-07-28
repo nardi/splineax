@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
-from lineax import AbstractLinearOperator, JacobianLinearOperator, materialise
+from lineax import AbstractLinearOperator, JacobianLinearOperator
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
     PackedStructures,
@@ -244,9 +244,9 @@ class _PardisoSymbolicScope(NamedTuple):
     ) -> "_PardisoSymbolicState":
         match operator:
             case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
-                return self.init(materialise(operator), options)
+                # Take the matrix, but leave `operator` bound to the Jacobian operator,
+                # so that the structures packed below stay the caller's own.
+                bcoo = operator.as_bcoo()
             case JacobianLinearOperator():
                 # A dense lineax Jacobian operator: rebuild it as its sparse analogue
                 # against the scope's sparsity, so it materialises with one JVP or VJP
@@ -401,9 +401,10 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
         # matching `KLU`/`Spsolve`.
         match operator:
             case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
-                return self.init(materialise(operator), options)
+                # Materialise the Jacobian and sort it, as the `BCOO` case below does.
+                # `operator` stays bound to it, so `pack_structures` sees the caller's
+                # structures rather than the flat pair a materialised operator reports.
+                matrix_bcsr = BCSR.from_bcoo(operator.as_bcoo())
             case BCSRLinearOperator(matrix):
                 # Round-trip an unsorted `BCSR` through `BCOO`, since
                 # `BCSR.from_bcoo` sorts.

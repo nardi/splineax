@@ -135,6 +135,55 @@ def test_symbolic_scope_init_accepts_a_dense_jacobian_operator(
     assert jnp.allclose(numeric_solution, expected, atol=1e-5)
 
 
+def pytree_residual(y: dict, args: object) -> dict:
+    """A square map between pytrees, whose Jacobian is diagonally dominant so the solve
+    is well posed, and coupled across the two leaves so the structure matters."""
+    del args
+    return {
+        "head": 13.0 * y["head"] + y["head"] ** 2 + 0.5 * y["tail"][0],
+        "tail": 13.0 * y["tail"] + jnp.sum(y["head"]) * y["tail"],
+    }
+
+
+PYTREE_POINT = {"head": jnp.array([0.5, 1.0]), "tail": jnp.array([1.5, 2.0])}
+PYTREE_RIGHT_HAND_SIDE = {"head": jnp.array([1.0, 2.0]), "tail": jnp.array([3.0, 4.0])}
+
+
+def test_pytree_jacobian_operator_solves_and_keeps_its_structure(
+    solver: AbstractSparseLinearSolver,
+) -> None:
+    """A Jacobian operator over pytrees solves like any other, and the solution comes
+    back shaped like `x` rather than raveled. The solvers take the matrix from
+    `as_bcoo` and pack the operator's own structures, so nothing is flattened along the
+    way."""
+    operator = splx.SparseJacobianLinearOperator(pytree_residual, PYTREE_POINT)
+    dense_operator = lx.JacobianLinearOperator(pytree_residual, PYTREE_POINT)
+    expected = lx.linear_solve(
+        dense_operator, PYTREE_RIGHT_HAND_SIDE, solver=lx.LU()
+    ).value
+
+    solution = splx.linear_solve(operator, PYTREE_RIGHT_HAND_SIDE, solver=solver).value
+
+    assert jax.tree.structure(solution) == jax.tree.structure(PYTREE_POINT)
+    for leaf, expected_leaf in zip(
+        jax.tree.leaves(solution), jax.tree.leaves(expected)
+    ):
+        assert jnp.allclose(leaf, expected_leaf, atol=1e-5)
+
+    # The same holds through a symbolic scope, which packs structures of its own.
+    with solver.factorize_symbolic(operator) as scope:
+        scoped_solution = splx.linear_solve(
+            operator,
+            PYTREE_RIGHT_HAND_SIDE,
+            solver=solver,
+            state=scope.init(operator),
+        ).value
+    for leaf, expected_leaf in zip(
+        jax.tree.leaves(scoped_solution), jax.tree.leaves(expected)
+    ):
+        assert jnp.allclose(leaf, expected_leaf, atol=1e-5)
+
+
 def test_scope_sparsity_hands_over_a_carried_coloring() -> None:
     """The conversion behind that `init` takes the coloring straight from an object
     carrying one, rather than recomputing it, and colors a plain matrix instead when

@@ -87,8 +87,8 @@ operator = splx.SparseJacobianLinearOperator(residual, y0)
 jacobian = operator.as_bcoo()
 ```
 
-The operator can be handed straight to any splineax solver, which internally materialises it to a `BCOOLinearOperator`
-through `lineax.materialise`:
+The operator can be handed straight to any splineax solver, which internally reads the
+matrix off it with `as_bcoo`:
 
 ```{.python continuation}
 import jax
@@ -110,11 +110,43 @@ Three construction paths are available, from least to most precomputed:
   [`JacobianColoring`][splineax.JacobianColoring]): both steps are skipped.
 
 The optional `mode=` argument selects `"fwd"` (column coloring, JVPs) or `"bwd"` (row
-coloring, VJPs), spelled as lineax and JAX spell it. The point `x` must be a
-one-dimensional array of real dtype, unlike `lineax.JacobianLinearOperator`, which
-takes any pytree: other shapes and complex dtypes are rejected at construction. The
-output shape is not checked, but only a one-dimensional output materialises to a
-matrix the solvers accept.
+coloring, VJPs), spelled as lineax and JAX spell it. Only real dtypes are supported, and
+a complex one is rejected at construction.
+
+### Pytree inputs and outputs
+
+As in lineax, `fn` may take and return arrays of any shape, or pytrees of them:
+
+```{.python continuation}
+def coupled(state, args):
+    return {
+        "position": state["velocity"] * 0.1 + state["position"] ** 2,
+        "velocity": jnp.sin(state["velocity"]) + state["position"],
+    }
+
+
+state = {"position": jnp.linspace(0.0, 1.0, 4), "velocity": jnp.ones(4)}
+coupled_operator = splx.SparseJacobianLinearOperator(coupled, state)
+
+# Structures are the ones `fn` has, and `mv` maps pytrees to pytrees.
+assert coupled_operator.in_structure() == jax.eval_shape(lambda: state)
+tangent = jax.tree.map(jnp.ones_like, state)
+product = coupled_operator.mv(tangent)
+```
+
+Everything handed to asdex is raveled first, so the sparsity pattern and `as_bcoo` are
+over the flattened input and output, and stay two-dimensional. That is what the solvers
+consume, and a solve returns a solution shaped like `x`:
+
+```{.python continuation}
+rhs = coupled(state, None)
+solution = splx.linear_solve(coupled_operator, rhs, solver=splx.KLU()).value
+assert jax.tree.structure(solution) == jax.tree.structure(state)
+```
+
+`lineax.materialise` is the one operation that cannot carry those structures, since a
+[`BCOOLinearOperator`][splineax.BCOOLinearOperator] holds only a matrix. Rather than
+dropping them silently it raises, and points at `as_bcoo` instead.
 
 ### Converting a dense Jacobian operator
 
