@@ -137,6 +137,47 @@ def test_symbolic_scope_init_accepts_a_dense_jacobian_operator(
     assert jnp.allclose(numeric_solution, expected, atol=1e-5)
 
 
+@pytest.mark.parametrize("sparsity_kind", ["coloring", "sparse_operator", "matrix"])
+def test_symbolic_scope_init_accepts_a_dense_function_operator(
+    solver: AbstractSparseLinearSolver, sparsity_kind: str
+) -> None:
+    """The same as above for the other lineax operator defined by a function: a scope's
+    `init` accepts a dense `lineax.FunctionLinearOperator` and rebuilds it as a
+    `SparseFunctionLinearOperator`. A scope opened from the sparse operator itself is
+    covered too, since that is the object a caller is most likely to have on hand."""
+    dense_jacobian = jax.jacfwd(lambda point: coupled_residual(point, None))(
+        JACOBIAN_POINT
+    )
+    _, linear_map = jax.linearize(
+        lambda point: coupled_residual(point, None), JACOBIAN_POINT
+    )
+    structure = jax.eval_shape(lambda: JACOBIAN_POINT)
+    operator = lx.FunctionLinearOperator(linear_map, structure)
+    sparsity = {
+        "coloring": lambda: splx.JacobianColoring.detect(
+            coupled_residual, JACOBIAN_POINT
+        ),
+        "sparse_operator": lambda: splx.SparseFunctionLinearOperator(
+            linear_map, structure
+        ),
+        "matrix": lambda: BCOO.fromdense(dense_jacobian),
+    }[sparsity_kind]()
+    expected = jnp.linalg.solve(np.asarray(dense_jacobian), np.asarray(RIGHT_HAND_SIDE))
+
+    with solver.factorize_symbolic(sparsity) as scope:
+        symbolic_state = scope.init(operator)
+        symbolic_solution = splx.linear_solve(
+            operator, RIGHT_HAND_SIDE, solver=solver, state=symbolic_state
+        ).value
+        with scope.factorize(operator) as numeric_state:
+            numeric_solution = splx.linear_solve(
+                operator, RIGHT_HAND_SIDE, solver=solver, state=numeric_state
+            ).value
+
+    assert jnp.allclose(symbolic_solution, expected, atol=1e-5)
+    assert jnp.allclose(numeric_solution, expected, atol=1e-5)
+
+
 def pytree_residual(y: dict, args: object) -> dict:
     """A square map between pytrees, whose Jacobian is diagonally dominant so the solve
     is well posed, and coupled across the two leaves so the structure matters."""
