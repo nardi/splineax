@@ -29,6 +29,7 @@ from splineax import (
     AutoSparseLinearSolver,
     BCOOLinearOperator,
     JacobianColoring,
+    SparseFunctionLinearOperator,
     SparseJacobianLinearOperator,
     SparseJacobianLinearOperatorColoring,
     Spsolve,
@@ -228,12 +229,14 @@ def test_materialise_returns_bcoo_operator() -> None:
 
 
 def test_linearise_caches_primal_and_stays_sparse() -> None:
-    """`lineax.linearise` must return another `SparseJacobianLinearOperator` (so
-    it can still be sparsely materialised) with identical products and matrix."""
+    """`lineax.linearise` must return a `SparseFunctionLinearOperator` (so it can still
+    be sparsely materialised) with identical products and matrix. lineax linearises its
+    own Jacobian operator into a `FunctionLinearOperator` in just the same way. See
+    [the function operator tests](test_function.py) for the transposed case."""
     operator = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
     linearised = lx.linearise(operator)
     expected = dense_jacobian(banded_function, EVALUATION_POINT)
-    assert isinstance(linearised, SparseJacobianLinearOperator)
+    assert isinstance(linearised, SparseFunctionLinearOperator)
     vector = jnp.arange(1.0, 7.0)
     assert jnp.allclose(linearised.mv(vector), expected @ vector)
     assert jnp.allclose(linearised.as_matrix(), expected)

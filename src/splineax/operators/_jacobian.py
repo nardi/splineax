@@ -28,7 +28,6 @@ from lineax import (
     AbstractLinearOperator,
     JacobianLinearOperator,
     is_symmetric,
-    linearise,
     materialise,
 )
 from lineax._operator import _frozenset, inexact_asarray, strip_weak_dtype
@@ -439,7 +438,8 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
 
 # Lineax `singledispatch` registrations. The tag-only ones are shared with
 # `SparseFunctionLinearOperator` and installed by `register_ad_operator` at the bottom
-# of this module. The two below are specific to this operator.
+# of this module. `linearise` is registered in `_function.py`, since what it returns is
+# a function operator.
 
 
 @materialise.register(SparseJacobianLinearOperator)
@@ -449,28 +449,6 @@ def _(operator: SparseJacobianLinearOperator) -> BCOOLinearOperator:
     # themselves, precisely because a `BCOOLinearOperator` cannot carry them.
     check_structures_survive_materialisation(operator)
     return BCOOLinearOperator(operator.as_bcoo(), operator.tags)
-
-
-@linearise.register(SparseJacobianLinearOperator)
-def _(operator: SparseJacobianLinearOperator) -> SparseJacobianLinearOperator:
-    # Cache the primal pass with `jax.linearize`, then wrap the resulting linear
-    # map in a new operator so it can still be sparsely materialised (the Jacobian
-    # of the linearised map is the same constant matrix with the same sparsity).
-    # The original coloring wrapper is passed through, so the static key stays
-    # stable even though the linearised function is a fresh object per call.
-    _, jvp_function = jax.linearize(operator._function_of_point(), operator.x)
-
-    def linearised_fn(point: Array, args: PyTree[Any]) -> Array:
-        del args
-        return jvp_function(point)
-
-    return SparseJacobianLinearOperator(
-        linearised_fn,
-        operator.x,
-        coloring=operator.coloring,
-        tags=operator.tags,
-        transposed=operator.transposed,
-    )
 
 
 register_ad_operator(SparseJacobianLinearOperator)

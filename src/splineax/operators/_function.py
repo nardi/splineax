@@ -52,6 +52,7 @@ from ._coloring import (
     register_ad_operator,
     zero_point,
 )
+from ._jacobian import SparseJacobianLinearOperator
 
 
 class SparseFunctionLinearOperator(AbstractLinearOperator):
@@ -314,6 +315,27 @@ def _(operator: SparseFunctionLinearOperator) -> SparseFunctionLinearOperator:
     # The map is already linear, so there is no primal pass to cache. lineax's
     # `linearise` is the identity on a `FunctionLinearOperator` for the same reason.
     return operator
+
+
+@linearise.register(SparseJacobianLinearOperator)
+def _(operator: SparseJacobianLinearOperator) -> SparseFunctionLinearOperator:
+    # Cache the primal pass with `jax.linearize`, then wrap the resulting linear map in
+    # a function operator, mirroring what lineax's `linearise` does with the dense pair.
+    # The linearised map is a map on the forward input whichever way the operator faces,
+    # so the transposition is handed to the new operator rather than baked in. The
+    # coloring is passed through, so the static key stays stable even though the
+    # linearised function is a fresh object per call.
+    forward_in_structure = (
+        operator.out_structure() if operator.transposed else operator.in_structure()
+    )
+    _, jvp_function = jax.linearize(operator._function_of_point(), operator.x)
+    return SparseFunctionLinearOperator(
+        jvp_function,
+        forward_in_structure,
+        coloring=operator.coloring,
+        tags=operator.tags,
+        transposed=operator.transposed,
+    )
 
 
 register_ad_operator(SparseFunctionLinearOperator)
