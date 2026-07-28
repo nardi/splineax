@@ -154,7 +154,11 @@ def test_symbolic_scope_reused_under_jit_analyses_once() -> None:
 
     @eqx.filter_jit
     def run(scope, data, b):
-        operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
+        # `indices` is unchanged from `sparsity.indices`, so it is still sorted.
+        # `BCOO`'s raw constructor otherwise defaults to `indices_sorted=False`.
+        operator = BCOOLinearOperator(
+            BCOO((data, indices), shape=shape, indices_sorted=True)
+        )
         state = scope.init(operator)
         return lx.linear_solve(operator, b, solver=solver, state=state).value
 

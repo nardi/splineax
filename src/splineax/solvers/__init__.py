@@ -5,6 +5,9 @@ from ._sparse import (
     AbstractSparseLinearSolver as AbstractSparseLinearSolver,
 )
 from ._sparse import (
+    PerformanceWarning as PerformanceWarning,
+)
+from ._sparse import (
     SparseBasicState as SparseBasicState,
 )
 from ._sparse import (

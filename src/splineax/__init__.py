@@ -26,6 +26,9 @@ from .solvers import (
     Pardiso as Pardiso,
 )
 from .solvers import (
+    PerformanceWarning as PerformanceWarning,
+)
+from .solvers import (
     SparseLinearSolver as SparseLinearSolver,
 )
 from .solvers import (
