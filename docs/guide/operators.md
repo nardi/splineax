@@ -217,6 +217,69 @@ it across points, hand it to
 `JacobianColoring` directly, reading the indices from the precomputed pattern without
 materialising the Jacobian numerically.
 
+## Function operators
+
+[`SparseFunctionLinearOperator`][splineax.SparseFunctionLinearOperator] is the sparse
+analogue of `lineax.FunctionLinearOperator`. Where the Jacobian operator takes a
+function and a point, this one takes a function that is *already linear*, together with
+the structure of its input:
+
+```{.python continuation}
+_, jvp_of_residual = jax.linearize(lambda y: residual(y, None), y0)
+
+function_operator = splx.SparseFunctionLinearOperator(
+    jvp_of_residual, jax.eval_shape(lambda: y0)
+)
+```
+
+Sparsity detection, coloring and materialisation work exactly as they do for the
+Jacobian operator, and the `sparsity=`, `coloring=` and `mode=` arguments mean the same
+things. The one difference is that there is no evaluation point to speak of: a linear
+map has the same matrix everywhere, so the operator traces at the zeros of the input
+structure.
+
+The two operators are two views of the same thing, and they agree on it. Linearising a
+function and wrapping the result gives the same operator as taking its Jacobian
+directly:
+
+```{.python continuation}
+jacobian_operator = splx.SparseJacobianLinearOperator(residual, y0)
+assert jnp.allclose(function_operator.as_matrix(), jacobian_operator.as_matrix())
+```
+
+That is also what `lineax.linearise` returns when handed a
+[`SparseJacobianLinearOperator`][splineax.SparseJacobianLinearOperator]. It caches the
+primal pass with `jax.linearize` and passes the coloring on, so the result still
+materialises sparsely:
+
+```{.python continuation}
+linearised = lx.linearise(jacobian_operator)
+assert isinstance(linearised, splx.SparseFunctionLinearOperator)
+```
+
+Linearity is unchecked. A function that is not linear will give wrong answers rather
+than an error, since the operator materialises its Jacobian at a single point and takes
+that to be the whole matrix.
+
+### Converting a dense function operator
+
+An existing `lineax.FunctionLinearOperator` can be converted with
+[`from_function_operator`][splineax.SparseFunctionLinearOperator.from_function_operator],
+which carries over its function, input structure and tags:
+
+```{.python continuation}
+dense_function_operator = lx.FunctionLinearOperator(
+    jvp_of_residual, jax.eval_shape(lambda: y0)
+)
+sparse_function_operator = splx.SparseFunctionLinearOperator.from_function_operator(
+    dense_function_operator
+)
+```
+
+As with the Jacobian operator, the `sparsity`, `coloring` and `mode` arguments are
+accepted here too, and a symbolic scope will do this conversion itself when a dense
+`lineax.FunctionLinearOperator` reaches its `init`.
+
 ## BCOO or BCSR?
 
 Either format solves correctly with any of the solvers, so the choice is mostly about which

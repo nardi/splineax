@@ -79,18 +79,18 @@ with solver.factorize_symbolic(sparsity) as scope:
 ```
 
 `factorize_symbolic` accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`,
-`BCSRLinearOperator`, `SparseJacobianLinearOperator`,
+`BCSRLinearOperator`, `SparseJacobianLinearOperator`, `SparseFunctionLinearOperator`,
 `SparseJacobianLinearOperatorColoring`, or `JacobianColoring`. Only its sparsity
-pattern is read. For the Jacobian operator and the two coloring wrappers, the pattern
-comes from the precomputed sparsity, without materialising the Jacobian numerically.
+pattern is read. For the two AD operators and the two coloring wrappers, the pattern
+comes from the precomputed sparsity, without materialising the matrix numerically.
 
 Besides the sparse operators, a scope's `init` accepts a dense
-`lineax.JacobianLinearOperator` too. It is rebuilt as a
-[`SparseJacobianLinearOperator`][splineax.SparseJacobianLinearOperator] against the
-sparsity the scope was opened with, and then materialised, so it costs one JVP or VJP
-per color rather than one per column or row. A scope opened from a coloring hands that
-coloring over directly. One opened from a plain matrix colors that matrix instead, and
-does so lazily, only when such an operator actually arrives.
+`lineax.JacobianLinearOperator` or `lineax.FunctionLinearOperator` too. It is rebuilt as
+its sparse analogue against the sparsity the scope was opened with, and then
+materialised, so it costs one evaluation per color rather than one per column or row. A
+scope opened from a coloring hands that coloring over directly. One opened from a plain
+matrix colors that matrix instead, and does so lazily, only when such an operator
+actually arrives.
 
 The scope itself, not just the state it produces, can be passed into a jitted function
 that builds the operator inside and calls `scope.init` again, so the analysis is reused

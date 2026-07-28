@@ -7,7 +7,8 @@ Sparse linear operators and direct solvers for
 (`jax.experimental.sparse.BCOO` / `BCSR`) and solve it with a sparse *direct* solver that
 plugs straight into `lineax.linear_solve`. It also interfaces with [asdex](https://github.com/adrhill/asdex) for calculating sparse Jacobians and using them as operators.
 
-- **Operators**: `BCOOLinearOperator`, `BCSRLinearOperator`, `SparseJacobianLinearOperator`.
+- **Operators**: `BCOOLinearOperator`, `BCSRLinearOperator`,
+  `SparseJacobianLinearOperator`, `SparseFunctionLinearOperator`.
 - **Solvers**: `Spsolve` (any backend), `KLU` (CPU-only, SuiteSparse, factorization reuse),
   and `AutoSparseLinearSolver` (picks one based on the platform).
 - A `SparseLinearSolver` protocol for separating factorization from solving.

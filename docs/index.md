@@ -16,6 +16,8 @@ It provides:
   [`SparseJacobianLinearOperator`][splineax.SparseJacobianLinearOperator] represents the
   Jacobian of a function sparsely, detecting its sparsity pattern and constructing a coloring automatically (via
   [asdex](https://github.com/adrhill/asdex)), which allows for efficient materialization into a sparse matrix by the solvers.
+  [`SparseFunctionLinearOperator`][splineax.SparseFunctionLinearOperator] does the same
+  for a function that is already linear, such as one obtained from `jax.linearize`.
 - **Solvers**: [`Spsolve`][splineax.Spsolve] (any backend, wraps
   `jax.experimental.sparse.linalg.spsolve`), [`KLU`][splineax.KLU] (CPU-only, wraps the
   SuiteSparse KLU library via `klujax`, with factorization reuse), and
