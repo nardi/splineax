@@ -10,7 +10,11 @@ import numpy as np
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import KLUHandleManager
-from lineax import AbstractLinearOperator, JacobianLinearOperator
+from lineax import (
+    AbstractLinearOperator,
+    FunctionLinearOperator,
+    JacobianLinearOperator,
+)
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
     PackedStructures,
@@ -23,6 +27,7 @@ from lineax._solver.misc import (
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._coloring import JacobianColoring
+from splineax.operators._function import SparseFunctionLinearOperator
 from splineax.operators._jacobian import (
     SparseJacobianLinearOperator,
     SparseJacobianLinearOperatorColoring,
@@ -40,6 +45,7 @@ from splineax.solvers._sparse import (
     _Sparsity,
     as_scoped_solver,
     factorize_through_init,
+    sparse_function_operator,
     sparse_jacobian_operator,
 )
 
@@ -202,9 +208,9 @@ class _KLUSymbolicScope(NamedTuple):
     ) -> _KLUSymbolicState:
         Ai, Aj = self.indices
         match operator:
-            case SparseJacobianLinearOperator():
-                # Take the matrix, but leave `operator` bound to the Jacobian operator,
-                # so that the structures packed below stay the caller's own.
+            case SparseJacobianLinearOperator() | SparseFunctionLinearOperator():
+                # Take the matrix, but leave `operator` bound to the sparse AD
+                # operator, so the structures packed below stay the caller's own.
                 bcoo = operator.as_bcoo()
             case JacobianLinearOperator():
                 # A dense lineax Jacobian operator: rebuild it as its sparse analogue
@@ -213,6 +219,12 @@ class _KLUSymbolicScope(NamedTuple):
                 return self.init(
                     sparse_jacobian_operator(operator, self.sparsity), options
                 )
+            case FunctionLinearOperator():
+                # As above, for the other lineax operator defined by a function: one
+                # evaluation per color rather than one per column.
+                return self.init(
+                    sparse_function_operator(operator, self.sparsity), options
+                )
             case BCSRLinearOperator(matrix):
                 bcoo = matrix.to_bcoo()
             case BCOOLinearOperator(matrix):
@@ -220,8 +232,10 @@ class _KLUSymbolicScope(NamedTuple):
             case _:
                 raise TypeError(
                     "`_KLUSymbolicScope.init` requires a `BCOOLinearOperator`, "
-                    "`BCSRLinearOperator`, `SparseJacobianLinearOperator`, or "
-                    f"`lineax.JacobianLinearOperator`; got {type(operator).__name__}."
+                    "`BCSRLinearOperator`, `SparseJacobianLinearOperator`, "
+                    "`SparseFunctionLinearOperator`, `lineax.JacobianLinearOperator`, "
+                    f"or `lineax.FunctionLinearOperator`; got "
+                    f"{type(operator).__name__}."
                 )
         Ax = bcoo.data
 
@@ -311,7 +325,7 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         # `klujax.solve` consumes a COO triple. We assume the matrix is coalesced (no
         # duplicate indices); KLU builds CSC internally, so the index order is irrelevant.
         match operator:
-            case SparseJacobianLinearOperator():
+            case SparseJacobianLinearOperator() | SparseFunctionLinearOperator():
                 # Materialise the Jacobian and reuse the BCOO path below. `operator`
                 # stays bound to it, so `pack_structures` sees the caller's structures
                 # rather than the flat pair a materialised operator would report.
@@ -325,7 +339,8 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                     "`KLU` requires a sparse operator backed by a `BCOO` or `BCSR` "
                     "matrix (e.g. `splineax.BCOOLinearOperator` or "
                     "`splineax.BCSRLinearOperator`), or a "
-                    f"`splineax.SparseJacobianLinearOperator`; "
+                    "`splineax.SparseJacobianLinearOperator` or "
+                    f"`splineax.SparseFunctionLinearOperator`; "
                     f"got {type(operator).__name__}."
                 )
 
@@ -384,14 +399,16 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
             sparsity: Sparse matrix whose sparsity pattern to pre-analyze. Accepts
                       `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`,
                       `SparseJacobianLinearOperator`,
+                      `SparseFunctionLinearOperator`,
                       `SparseJacobianLinearOperatorColoring`, or `JacobianColoring`.
-                      For the latter three, the indices are taken host-side from the
+                      For the latter four, the indices are taken host-side from the
                       precomputed asdex sparsity pattern, without materialising the
-                      Jacobian numerically. That host-side read means the coloring
+                      matrix numerically. That host-side read means the coloring
                       must be concrete here, not a traced value inside a jitted
                       function. The scope also keeps this object itself, and colors
                       it (or reuses the coloring it carries) to sparsely materialise
-                      any `lineax.JacobianLinearOperator` passed to its `.init`.
+                      any dense `lineax.JacobianLinearOperator` or
+                      `lineax.FunctionLinearOperator` passed to its `.init`.
             as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
                        with this solver, instead of the bare scope, so that the two
                        need not be passed around together.
@@ -405,8 +422,11 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         # public method can be overloaded on `as_solver` (`@contextmanager` and
         # `@overload` do not compose).
         match sparsity:
-            case SparseJacobianLinearOperator(transposed=True):
-                # The stored pattern describes the forward Jacobian. asdex emits
+            case (
+                SparseJacobianLinearOperator(transposed=True)
+                | SparseFunctionLinearOperator(transposed=True)
+            ):
+                # The stored pattern describes the forward matrix. asdex emits
                 # `BCOO` values in the pattern's index order and `BCOO.T` swaps the
                 # index columns without reordering entries, so swapping rows and
                 # columns here keeps the indices aligned with the values that
@@ -416,9 +436,11 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                 Aj = jnp.asarray(pattern.rows, dtype=jnp.int32)
                 shape = pattern.shape[::-1]
             case (
-                SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring()
+                SparseJacobianLinearOperator()
+                | SparseFunctionLinearOperator()
+                | SparseJacobianLinearOperatorColoring()
             ):
-                # Both hold the coloring one level in: the operator stores an
+                # All three hold the coloring one level in: the operators store an
                 # `asdex.ColoredPattern` whose `.sparsity` is the pattern, and the
                 # operator coloring stores a `JacobianColoring` whose `.sparsity`
                 # property returns the same pattern.
@@ -456,7 +478,7 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                 raise TypeError(
                     "`KLU.factorize_symbolic` requires a `BCOO`, `BCSR`, "
                     "`BCOOLinearOperator`, `BCSRLinearOperator`, "
-                    "`SparseJacobianLinearOperator`, "
+                    "`SparseJacobianLinearOperator`, `SparseFunctionLinearOperator`, "
                     "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
                     f"got {type(sparsity).__name__}."
                 )

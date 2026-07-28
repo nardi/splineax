@@ -19,6 +19,7 @@ from lineax._solver.misc import (
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.operators._function import SparseFunctionLinearOperator
 from splineax.operators._jacobian import (
     SparseJacobianLinearOperator,
 )
@@ -130,7 +131,7 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
         # each row. We assume the matrix is coalesced (no duplicate indices) and
         # only ensure the sorting here.
         match operator:
-            case SparseJacobianLinearOperator():
+            case SparseJacobianLinearOperator() | SparseFunctionLinearOperator():
                 # Materialise the Jacobian and sort it, as the `BCOO` case below does.
                 # `operator` stays bound to it, so `pack_structures` sees the caller's
                 # structures rather than the flat pair a materialised operator reports.
@@ -152,7 +153,8 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
                     "`Spsolve` requires a sparse operator backed by a `BCOO` or `BCSR` "
                     "matrix (e.g. `splineax.BCOOLinearOperator` or "
                     "`splineax.BCSRLinearOperator`), or a "
-                    f"`splineax.SparseJacobianLinearOperator`; "
+                    "`splineax.SparseJacobianLinearOperator` or "
+                    f"`splineax.SparseFunctionLinearOperator`; "
                     f"got {type(operator).__name__}."
                 )
 
