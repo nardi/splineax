@@ -7,7 +7,11 @@ from jax import custom_batching
 from jax.experimental.sparse import BCSR
 from jax.experimental.sparse.linalg import _csr_transpose, spsolve
 from jaxtyping import Array, Inexact, PyTree
-from lineax import AbstractLinearOperator, JacobianLinearOperator
+from lineax import (
+    AbstractLinearOperator,
+    FunctionLinearOperator,
+    JacobianLinearOperator,
+)
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
     PackedStructures,
@@ -30,6 +34,7 @@ from splineax.solvers._sparse import (
     _Sparsity,
     as_scoped_solver,
     factorize_through_init,
+    sparse_function_operator,
     sparse_jacobian_operator,
 )
 
@@ -48,18 +53,21 @@ class _SpsolveSymbolicScope(NamedTuple):
     solver: "Spsolve"
     """The originating solver, so built states keep its tol/reorder config."""
     sparsity: _Sparsity
-    """The object the scope was opened from, kept to sparsely materialise a
-    `lineax.JacobianLinearOperator` handed to `init`."""
+    """The object the scope was opened from, kept to sparsely materialise a dense
+    `lineax.JacobianLinearOperator` or `lineax.FunctionLinearOperator` handed to
+    `init`."""
 
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _SpsolveState:
         # No-op symbolic reuse: Spsolve cannot pre-analyze, so this is a normal init.
         # The one thing the scope does add is its sparsity, which turns a dense lineax
-        # Jacobian operator into its sparse analogue, materialised with one JVP or VJP
-        # per color rather than one per column or row.
+        # operator defined by a function into its sparse analogue, materialised with one
+        # evaluation per color rather than one per column or row.
         if isinstance(operator, JacobianLinearOperator):
             operator = sparse_jacobian_operator(operator, self.sparsity)
+        elif isinstance(operator, FunctionLinearOperator):
+            operator = sparse_function_operator(operator, self.sparsity)
         return self.solver.init(operator, options)
 
     @contextmanager
@@ -186,8 +194,9 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
         Args:
             sparsity: accepted for parity with `KLU`, since `Spsolve` cannot
                       pre-analyze a sparsity pattern. It is only kept so that the
-                      scope's `init` can sparsely materialise a
-                      `lineax.JacobianLinearOperator` against it.
+                      scope's `init` can sparsely materialise a dense
+                      `lineax.JacobianLinearOperator` or
+                      `lineax.FunctionLinearOperator` against it.
             as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
                        with this solver, instead of the bare scope, so that the two
                        need not be passed around together.

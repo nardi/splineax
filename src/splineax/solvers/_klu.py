@@ -198,8 +198,9 @@ class _KLUSymbolicScope(NamedTuple):
     shape: tuple[int, ...]
     symbolic: _KLUHandle
     sparsity: _Sparsity
-    """The object the pattern was analyzed from, kept to sparsely materialise a
-    `lineax.JacobianLinearOperator` handed to `init`."""
+    """The object the pattern was analyzed from, kept to sparsely materialise a dense
+    `lineax.JacobianLinearOperator` or `lineax.FunctionLinearOperator` handed to
+    `init`."""
 
     def init(
         self,
