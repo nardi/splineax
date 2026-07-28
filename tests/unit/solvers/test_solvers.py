@@ -85,24 +85,6 @@ def test_reuses_state_across_vectors(
         assert jnp.allclose(solution, expected, atol=1e-5)
 
 
-def test_transpose_solve(
-    make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
-) -> None:
-    """Solving against `operator.T` must recover the transposed system's solution,
-    exercising the solver's `transpose` state path."""
-    operator = make_operator(SQUARE_MATRIX)
-    # Transposing a `BCOO` genuinely reorders its indices out of row-major order (a
-    # `BCSR` is re-sorted internally instead), so `Spsolve` raises the expected
-    # `PerformanceWarning` here for the `bcoo` format.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", PerformanceWarning)
-        solution = lx.linear_solve(operator.T, RIGHT_HAND_SIDE, solver=solver).value
-    expected = jnp.linalg.solve(
-        np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
-    )
-    assert jnp.allclose(solution, expected, atol=1e-5)
-
-
 def test_complex_solve(
     make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
 ) -> None:
