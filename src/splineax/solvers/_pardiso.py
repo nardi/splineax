@@ -178,6 +178,20 @@ def _ensure_cpu(args: T) -> T:
     )
 
 
+def _reject_complex(dtype: jnp.dtype) -> None:
+    """Raises if `dtype` is complex, since `pardiso_mkl_jax` is real-only.
+
+    Called in `Pardiso.init` before any `BCSR`/`BCOO` conversion, so a complex matrix
+    is rejected without first paying for a round-trip that `AutoSparseLinearSolver`'s
+    `KLU` fallback would then discard anyway.
+    """
+    if dtype in COMPLEX_DTYPES:
+        raise TypeError(
+            "`Pardiso` only supports real-valued matrices; `pardiso_mkl_jax` does "
+            f"not support complex matrix types yet. Got dtype {dtype}."
+        )
+
+
 def _csr_from_coo_pattern(
     rows: Integer[Array, " nse"],
     cols: Integer[Array, " nse"],
@@ -395,6 +409,7 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                 # BCOO path below.
                 return self.init(materialise(operator), options)
             case BCSRLinearOperator(matrix):
+                _reject_complex(matrix.dtype)
                 # Round-trip an unsorted `BCSR` through `BCOO`, since
                 # `BCSR.from_bcoo` sorts.
                 if matrix.indices_sorted:
@@ -403,6 +418,7 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                     warn_if_unsorted(matrix, "Pardiso")
                     matrix_bcsr = BCSR.from_bcoo(matrix.to_bcoo())
             case BCOOLinearOperator(matrix):
+                _reject_complex(matrix.dtype)
                 # `BCSR.from_bcoo` sorts the indices itself when they are not
                 # already sorted.
                 warn_if_unsorted(matrix, "Pardiso")
@@ -415,12 +431,6 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                     f"`splineax.SparseJacobianLinearOperator`; "
                     f"got {type(operator).__name__}."
                 )
-
-        if matrix_bcsr.dtype in COMPLEX_DTYPES:
-            raise TypeError(
-                "`Pardiso` only supports real-valued matrices; `pardiso_mkl_jax` does "
-                f"not support complex matrix types yet. Got dtype {matrix_bcsr.dtype}."
-            )
 
         indptr = matrix_bcsr.indptr.astype(jnp.int32)
         indices = matrix_bcsr.indices.astype(jnp.int32)
