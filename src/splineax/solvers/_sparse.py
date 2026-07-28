@@ -22,8 +22,8 @@ from lineax._solve import AbstractLinearSolver, sentinel
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.operators._coloring import JacobianColoring
 from splineax.operators._jacobian import (
-    JacobianColoring,
     SparseJacobianLinearOperator,
     SparseJacobianLinearOperatorColoring,
 )
