@@ -42,6 +42,7 @@ from splineax.solvers._sparse import (
     _Sparsity,
     as_scoped_solver,
     factorize_through_init,
+    warn_if_unsorted,
 )
 
 # `indptr`, `indices`, `values`: the matrix in CSR form.
@@ -396,14 +397,15 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
             case BCSRLinearOperator(matrix):
                 # Round-trip an unsorted `BCSR` through `BCOO`, since
                 # `BCSR.from_bcoo` sorts.
-                matrix_bcsr = (
-                    matrix
-                    if matrix.indices_sorted
-                    else BCSR.from_bcoo(matrix.to_bcoo())
-                )
+                if matrix.indices_sorted:
+                    matrix_bcsr = matrix
+                else:
+                    warn_if_unsorted(matrix, "Pardiso")
+                    matrix_bcsr = BCSR.from_bcoo(matrix.to_bcoo())
             case BCOOLinearOperator(matrix):
                 # `BCSR.from_bcoo` sorts the indices itself when they are not
                 # already sorted.
+                warn_if_unsorted(matrix, "Pardiso")
                 matrix_bcsr = BCSR.from_bcoo(matrix)
             case _:
                 raise TypeError(

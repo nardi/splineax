@@ -159,7 +159,11 @@ def test_symbolic_scope_solve_under_jit(solver: AbstractSparseLinearSolver) -> N
 
     @eqx.filter_jit
     def run(scope, data, b):
-        operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
+        # `indices` is unchanged from `sparsity.indices`, so it is still sorted.
+        # `BCOO`'s raw constructor otherwise defaults to `indices_sorted=False`.
+        operator = BCOOLinearOperator(
+            BCOO((data, indices), shape=shape, indices_sorted=True)
+        )
         state = scope.init(operator)
         return lx.linear_solve(operator, b, solver=solver, state=state).value
 
@@ -203,7 +207,11 @@ def test_factorize_symbolic_opens_entirely_under_jit(
 
     @eqx.filter_jit
     def run(solver, data, b):
-        operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
+        # `indices` is unchanged from `sparsity.indices`, so it is still sorted.
+        # `BCOO`'s raw constructor otherwise defaults to `indices_sorted=False`.
+        operator = BCOOLinearOperator(
+            BCOO((data, indices), shape=shape, indices_sorted=True)
+        )
         with solver.factorize_symbolic(operator) as scope:
             state = scope.init(operator)
             return splx.linear_solve(operator, b, solver, state=state).value
@@ -230,7 +238,11 @@ def test_symbolic_scope_full_jit_raw_linear_solve_raises_helpful_error(
 
     @eqx.filter_jit
     def run(solver, data, b):
-        operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
+        # `indices` is unchanged from `sparsity.indices`, so it is still sorted.
+        # `BCOO`'s raw constructor otherwise defaults to `indices_sorted=False`.
+        operator = BCOOLinearOperator(
+            BCOO((data, indices), shape=shape, indices_sorted=True)
+        )
         with solver.factorize_symbolic(operator) as scope:
             state = scope.init(operator)
             return lx.linear_solve(operator, b, solver=solver, state=state).value
@@ -343,7 +355,11 @@ def test_as_solver_solve_under_jit(solver: AbstractSparseLinearSolver) -> None:
 
     @eqx.filter_jit
     def run(scoped_solver, data, b):
-        operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
+        # `indices` is unchanged from `sparsity.indices`, so it is still sorted.
+        # `BCOO`'s raw constructor otherwise defaults to `indices_sorted=False`.
+        operator = BCOOLinearOperator(
+            BCOO((data, indices), shape=shape, indices_sorted=True)
+        )
         return lx.linear_solve(operator, b, solver=scoped_solver).value
 
     with solver.factorize_symbolic(sparsity, as_solver=True) as scoped_solver:
@@ -374,7 +390,11 @@ def test_as_solver_opens_entirely_under_jit(
 
     @eqx.filter_jit
     def run(solver, data, b):
-        operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
+        # `indices` is unchanged from `sparsity.indices`, so it is still sorted.
+        # `BCOO`'s raw constructor otherwise defaults to `indices_sorted=False`.
+        operator = BCOOLinearOperator(
+            BCOO((data, indices), shape=shape, indices_sorted=True)
+        )
         with solver.factorize_symbolic(operator, as_solver=True) as scoped_solver:
             return splx.linear_solve(operator, b, scoped_solver).value
 
@@ -394,7 +414,11 @@ def test_as_solver_full_jit_raw_linear_solve_raises_helpful_error(
 
     @eqx.filter_jit
     def run(solver, data, b):
-        operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
+        # `indices` is unchanged from `sparsity.indices`, so it is still sorted.
+        # `BCOO`'s raw constructor otherwise defaults to `indices_sorted=False`.
+        operator = BCOOLinearOperator(
+            BCOO((data, indices), shape=shape, indices_sorted=True)
+        )
         with solver.factorize_symbolic(operator, as_solver=True) as scoped_solver:
             return lx.linear_solve(operator, b, solver=scoped_solver).value
 

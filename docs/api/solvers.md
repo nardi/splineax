@@ -53,3 +53,7 @@ All solvers subclass `AbstractSparseLinearSolver` and structurally satisfy the
 ---
 
 ::: splineax.solvers.SparseNumericState
+
+---
+
+::: splineax.PerformanceWarning

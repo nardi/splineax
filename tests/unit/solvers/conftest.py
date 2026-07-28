@@ -99,7 +99,18 @@ def _make_bcoo_operator(
 def _make_bcsr_operator(
     dense_matrix: jax.Array, tags: object = ()
 ) -> BCSRLinearOperator:
-    return BCSRLinearOperator(BCSR.fromdense(dense_matrix), tags)
+    # `BCSR.fromdense` builds its indices by converting from a `BCOO.fromdense`
+    # result, which is already row-then-column sorted, but it never sets
+    # `indices_sorted` on the `BCSR` it returns. Setting it here ourselves reflects
+    # what is actually true of this matrix and keeps the solver tests free of the
+    # `PerformanceWarning` that an (accurately) unsorted `BCSR` would raise.
+    unsorted = BCSR.fromdense(dense_matrix)
+    sorted_bcsr = BCSR(
+        (unsorted.data, unsorted.indices, unsorted.indptr),
+        shape=unsorted.shape,
+        indices_sorted=True,
+    )
+    return BCSRLinearOperator(sorted_bcsr, tags)
 
 
 @pytest.fixture(params=["bcoo", "bcsr"])

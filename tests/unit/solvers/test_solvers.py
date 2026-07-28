@@ -15,6 +15,8 @@ factorization/handle-lifecycle behaviour in [test_klu.py](test_klu.py) and
 [test_auto.py](test_auto.py).
 """
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import lineax as lx
@@ -22,7 +24,7 @@ import numpy as np
 import pytest
 from jax.experimental.sparse import BCOO, BCSR
 
-from splineax import BCOOLinearOperator, BCSRLinearOperator, Pardiso
+from splineax import BCOOLinearOperator, BCSRLinearOperator, Pardiso, PerformanceWarning
 
 from .conftest import (
     COMPLEX_MATRIX,
@@ -89,7 +91,12 @@ def test_transpose_solve(
     """Solving against `operator.T` must recover the transposed system's solution,
     exercising the solver's `transpose` state path."""
     operator = make_operator(SQUARE_MATRIX)
-    solution = lx.linear_solve(operator.T, RIGHT_HAND_SIDE, solver=solver).value
+    # Transposing a `BCOO` genuinely reorders its indices out of row-major order (a
+    # `BCSR` is re-sorted internally instead), so `Spsolve` raises the expected
+    # `PerformanceWarning` here for the `bcoo` format.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PerformanceWarning)
+        solution = lx.linear_solve(operator.T, RIGHT_HAND_SIDE, solver=solver).value
     expected = jnp.linalg.solve(
         np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
     )
@@ -161,7 +168,12 @@ def test_solve_with_unsorted_indices(fmt: str, solver: lx.AbstractLinearSolver) 
         assert not unsorted_bcsr.indices_sorted
         operator = BCSRLinearOperator(unsorted_bcsr)
 
-    solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver).value
+    # `Spsolve` and `Pardiso` raise a `PerformanceWarning` for this deliberately
+    # unsorted operator (`KLU` is order-agnostic and raises none), which is expected
+    # here and so silenced rather than asserted on.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PerformanceWarning)
+        solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver).value
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
     assert jnp.allclose(solution, expected, atol=1e-5)
 

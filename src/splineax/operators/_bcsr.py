@@ -63,6 +63,14 @@ class BCSRLinearOperator(AbstractLinearOperator):
         # `BCSR.transpose` is not implemented in JAX; round-trip through `BCOO`.
         matrix_T_bcoo: BCOO = self.matrix.to_bcoo().T
         matrix_T = BCSR.from_bcoo(matrix_T_bcoo)
+        # `BCSR.from_bcoo` always sorts, but (unlike `BCOO.from_bcoo`) never sets
+        # `indices_sorted` on the result, so it comes back looking unsorted. Correcting
+        # it here is what lets a solver skip re-sorting an already-transposed operator.
+        matrix_T = BCSR(
+            (matrix_T.data, matrix_T.indices, matrix_T.indptr),
+            shape=matrix_T.shape,
+            indices_sorted=True,
+        )
         return BCSRLinearOperator(matrix_T, transpose_tags(self.tags))
 
     def in_structure(self) -> jax.ShapeDtypeStruct:

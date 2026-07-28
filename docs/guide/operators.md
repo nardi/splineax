@@ -172,8 +172,11 @@ materialising the Jacobian numerically.
 Either format solves correctly with any of the solvers, so the choice is mostly about which
 format your data already lives in.
 
-- [`Spsolve`][splineax.Spsolve] internally needs CSR with sorted column indices, and will
-  convert/sort a `BCOO` (or an unsorted `BCSR`) for you.
+- [`Spsolve`][splineax.Spsolve] and [`Pardiso`][splineax.Pardiso] internally need CSR with
+  sorted column indices, and will convert/sort a `BCOO` (or an unsorted `BCSR`) for you.
+  Doing so on every solve is wasted work if the same operator is reused, so an unsorted
+  matrix triggers a [`PerformanceWarning`][splineax.PerformanceWarning]. For a `BCOO`,
+  call `.sort_indices()` once yourself to avoid both the cost and the warning.
 - [`KLU`][splineax.KLU] consumes coordinate triples and is agnostic to index order; it
   converts a `BCSR` to `BCOO` internally.
 

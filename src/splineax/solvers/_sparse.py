@@ -1,4 +1,5 @@
 import abc
+import warnings
 from contextlib import AbstractContextManager, contextmanager
 from typing import (
     Any,
@@ -39,6 +40,35 @@ _Sparsity = (
     | SparseJacobianLinearOperatorColoring
     | JacobianColoring
 )
+
+
+class PerformanceWarning(UserWarning):
+    """Raised when a sparse solver has to do work that a differently prepared input
+    would have avoided.
+
+    Currently only used by `Spsolve` and `Pardiso`, when their `init` sorts an
+    unsorted `BCOO` or `BCSR` operator before solving. Both need row-major sorted
+    indices and will silently sort them for you, but doing so on every `init` is
+    wasted work if the same operator is solved more than once. Passing an
+    already-sorted matrix (for a `BCOO`, call `.sort_indices()` once yourself)
+    avoids the warning and the repeated cost.
+    """
+
+
+def warn_if_unsorted(matrix: BCOO | BCSR, solver_name: str) -> None:
+    """Raises a `PerformanceWarning` if `matrix`'s indices are not sorted.
+
+    Shared by `Spsolve.init` and `Pardiso.init`, both of which sort an unsorted
+    `BCOO` or `BCSR` operator (via a `BCSR.from_bcoo` round-trip) before solving.
+    """
+    if not matrix.indices_sorted:
+        warnings.warn(
+            f"`{solver_name}` received a `{type(matrix).__name__}` matrix with "
+            "unsorted indices, and must sort them before solving. Passing an "
+            "already-sorted matrix avoids this overhead.",
+            PerformanceWarning,
+            stacklevel=2,
+        )
 
 
 class SparseNumericState(Protocol):
