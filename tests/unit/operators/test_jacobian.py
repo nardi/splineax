@@ -256,8 +256,11 @@ def test_tags_drive_property_predicates() -> None:
 
 
 def test_complex_point_is_rejected() -> None:
-    """The operator is scoped to real dtypes (`jax.vjp` is only the true
-    transpose for holomorphic functions), so a complex point must fail loudly."""
+    """A complex point must fail loudly, and at construction rather than at the first
+    materialisation. asdex refuses to differentiate a complex function without a
+    `holomorphic=True` promise that only the caller can make, and the tag predicates
+    below fold positive-semidefiniteness into symmetry, which only holds for real
+    dtypes. Detection and coloring themselves are fine with complex."""
     with pytest.raises(TypeError, match="real dtypes"):
         SparseJacobianLinearOperator(elementwise_function, jnp.array([1.0 + 2.0j, 3.0]))
 
