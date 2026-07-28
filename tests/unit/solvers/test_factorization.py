@@ -16,6 +16,7 @@ lives in [test_solvers.py](test_solvers.py).
 
 from __future__ import annotations
 
+import asdex
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -23,6 +24,7 @@ import lineax as lx
 import numpy as np
 import pytest
 from jax.experimental.sparse import BCOO
+from lineax import _operator as lineax_operator
 
 import splineax as splx
 from splineax import (
@@ -553,3 +555,52 @@ def test_as_solver_full_jit_raw_linear_solve_raises_helpful_error(
     else:
         with pytest.raises(RuntimeError, match="splineax.linear_solve"):
             run(solver, sparsity.data, RIGHT_HAND_SIDE)
+
+
+def test_as_solver_routes_a_dense_jacobian_operator_through_the_sparse_path(
+    solver: AbstractSparseLinearSolver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dense `lineax.JacobianLinearOperator` handed to a scoped solver, with no state
+    of its own, must be solved through the colored sparse materialisation rather than by
+    densifying the Jacobian.
+
+    The value alone does not distinguish the two, so this pins the route: the Jacobian
+    has to reach `asdex.jacobian_from_coloring` under the scope's own coloring, which
+    costs one JVP per color, and neither of lineax's dense paths (`as_matrix` and the
+    `jacobian` helper behind `lineax.materialise`) may run at all.
+    """
+    expected = jnp.linalg.solve(
+        np.asarray(
+            jax.jacfwd(lambda point: coupled_residual(point, None))(JACOBIAN_POINT)
+        ),
+        np.asarray(RIGHT_HAND_SIDE),
+    )
+    operator = lx.JacobianLinearOperator(coupled_residual, JACOBIAN_POINT)
+    coloring = splx.JacobianColoring.detect(coupled_residual, JACOBIAN_POINT)
+    colorings_used = []
+    materialise_sparsely = asdex.jacobian_from_coloring
+
+    def spy_on_sparse_materialisation(fn, used_coloring, *args, **kwargs):
+        colorings_used.append(used_coloring)
+        return materialise_sparsely(fn, used_coloring, *args, **kwargs)
+
+    def densified(*args: object, **kwargs: object):
+        raise AssertionError("the Jacobian was densified instead of colored")
+
+    monkeypatch.setattr(asdex, "jacobian_from_coloring", spy_on_sparse_materialisation)
+    monkeypatch.setattr(lx.JacobianLinearOperator, "as_matrix", densified)
+    monkeypatch.setattr(lineax_operator, "jacobian", densified)
+
+    with solver.factorize_symbolic(coloring, as_solver=True) as scoped_solver:
+        solution = splx.linear_solve(
+            operator, RIGHT_HAND_SIDE, solver=scoped_solver
+        ).value
+
+    assert jnp.allclose(solution, expected, atol=1e-5)
+    assert colorings_used, "the Jacobian never reached the sparse materialisation"
+    assert all(used is coloring.coloring for used in colorings_used), (
+        "the scope's own coloring was not the one used"
+    )
+    # Without this the sparse route would cost the same as the dense one, and the
+    # assertions above would hold vacuously.
+    assert coloring.num_colors < JACOBIAN_POINT.shape[0]
