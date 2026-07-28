@@ -5,7 +5,8 @@ The operator here is its sparse analogue: the Jacobian's sparsity pattern and a
 matching row or column coloring are computed once (by `asdex`) and stored, so
 materialising the Jacobian at a point costs one JVP or VJP per color rather than
 one per column or row. The result is a `jax.experimental.sparse.BCOO` matrix
-that the splineax sparse solvers consume directly.
+that the splineax sparse solvers consume directly. As in lineax, the function may
+take and return pytrees, which are raveled to keep that result a plain matrix.
 
 The sparsity pattern and coloring depend only on the traced computation graph of
 the function, not on the numerical values of its inputs. They are therefore
@@ -20,8 +21,10 @@ from typing import Any, Literal, cast
 
 import asdex
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
 from asdex import ColoredPattern, SparsityPattern
 from jax.experimental.sparse import BCOO
@@ -41,6 +44,7 @@ from lineax import (
     materialise,
 )
 from lineax._operator import _frozenset, inexact_asarray, strip_weak_dtype
+from lineax._solver.misc import PackedStructures, ravel_vector, unravel_solution
 from lineax._tags import (
     diagonal_tag,
     lower_triangular_tag,
@@ -100,7 +104,7 @@ class JacobianColoring(eqx.Module):
     def detect(
         cls,
         fn: Callable,
-        x: Inexact[ArrayLike, " n"] | jax.ShapeDtypeStruct,
+        x: PyTree[Inexact[ArrayLike, "..."] | jax.ShapeDtypeStruct],
         args: PyTree[Any] = None,
         *,
         mode: JacobianMode | None = None,
@@ -115,10 +119,10 @@ class JacobianColoring(eqx.Module):
 
         **Arguments:**
 
-        - `fn`: a function `(x, args) -> y`, where `x` is a one-dimensional array of
-            real dtype. Its Jacobian's sparsity is detected.
-        - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
-            Only its shape and dtype are used.
+        - `fn`: a function `(x, args) -> y`, where `x` and `y` are arrays of real
+            dtype, or pytrees of them. Its Jacobian's sparsity is detected.
+        - `x`: a representative point, or `jax.ShapeDtypeStruct`s describing one. Only
+            the shapes and dtypes are used.
         - `args`: extra arguments to `fn` that are not differentiated.
         - `mode`: optional coloring mode, either `"fwd"` (column coloring,
             materialised with JVPs) or `"bwd"` (row coloring, materialised with VJPs).
@@ -126,11 +130,14 @@ class JacobianColoring(eqx.Module):
         """
         example_point = _example_point(x)
 
-        def function_of_point(point: Array) -> Array:
+        def function_of_point(point: PyTree[Array]) -> PyTree[Array]:
             return fn(point, args)
 
+        # Detect against the raveled map, so that the pattern is over the same flat
+        # index order the operator materialises in, whatever structure `x` has.
+        flat_function_of_point, flat_point = _flatten(function_of_point, example_point)
         detected = asdex.jacobian_coloring(
-            function_of_point, example_point, mode=_asdex_mode(mode)
+            flat_function_of_point, flat_point, mode=_asdex_mode(mode)
         )
         return cls(detected)
 
@@ -188,8 +195,7 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
     at construction (via `asdex`), so materialising the Jacobian at `x` costs
     one JVP or VJP per color rather than one per column or row. Materialise it
     with `as_bcoo` or `lineax.materialise` (sparse) or `as_matrix` (dense), or
-    hand the operator straight to a splineax sparse solver, which materialises
-    it through `lineax.materialise`.
+    hand the operator straight to a splineax sparse solver, which reads `as_bcoo`.
 
     The coloring is stored as an `asdex.ColoredPattern`, which is a registered JAX
     pytree, so the operator carries it as an ordinary (dynamic) field and the whole
@@ -198,11 +204,14 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
     `asdex.ColoredPattern` or a [`splineax.JacobianColoring`][]) to skip detection,
     which is what makes it cheap to build many operators for the same sparsity.
 
-    The point `x` must be a one-dimensional array of real dtype, both of which are
-    checked at construction. The shape of `fn`'s output is not: `as_bcoo` materialises
-    whatever asdex returns, which for a non-one-dimensional output is a `BCOO` of
-    matching rank rather than a matrix, and `lineax.materialise` (and so every splineax
-    solver) then rejects it as not two-dimensional.
+    `x` and the output of `fn` may be arrays of any shape, or pytrees of them, exactly
+    as for `lineax.JacobianLinearOperator`. Only the dtypes are restricted, to real
+    ones, which is checked leafwise at construction. Everything handed to asdex is
+    raveled first, so the sparsity pattern and `as_bcoo` are over the flattened input
+    and output and stay two-dimensional, while `in_structure`, `out_structure` and `mv`
+    keep the structures `fn` actually has. `lineax.materialise` is the one operation
+    that cannot preserve them, since a `BCOOLinearOperator` carries only a matrix, so
+    it refuses anything but flat structures rather than dropping them silently.
 
     To build many operators for the same function at different points without repeating
     sparsity detection, use
@@ -212,18 +221,18 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
     """
 
     fn: Callable
-    x: Inexact[Array, " n"]
+    x: PyTree[Inexact[Array, "..."]]
     args: PyTree[Any]
     coloring: ColoredPattern
     transposed: bool = eqx.field(static=True)
-    _in_structure: jax.ShapeDtypeStruct = eqx.field(static=True)
-    _out_structure: jax.ShapeDtypeStruct = eqx.field(static=True)
+    _in_structure: PyTree[jax.ShapeDtypeStruct] = eqx.field(static=True)
+    _out_structure: PyTree[jax.ShapeDtypeStruct] = eqx.field(static=True)
     tags: frozenset[object] = eqx.field(static=True)
 
     def __init__(
         self,
         fn: Callable,
-        x: Inexact[ArrayLike, " n"],
+        x: PyTree[Inexact[ArrayLike, "..."]],
         args: PyTree[Any] = None,
         *,
         sparsity: SparsityPattern | np.ndarray | BCOO | None = None,
@@ -235,8 +244,8 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
     ):
         """**Arguments:**
 
-        - `fn`: a function `(x, args) -> y`, where `x` is a one-dimensional array of
-            real dtype. Its Jacobian `d(fn)/dx` is the linear operator.
+        - `fn`: a function `(x, args) -> y`, where `x` and `y` are arrays of real
+            dtype, or pytrees of them. Its Jacobian `d(fn)/dx` is the linear operator.
         - `x`: the point at which to evaluate `d(fn)/dx`.
         - `args`: extra arguments to `fn` that are not differentiated.
         - `sparsity`: optional known sparsity pattern of the Jacobian, as an
@@ -256,17 +265,13 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         `transposed` and `closure_convert` are internal arguments, used by
         `transpose()` and [`splineax.SparseJacobianLinearOperatorColoring`][].
         """
-        self.x = inexact_asarray(x)
-        if jnp.issubdtype(self.x.dtype, jnp.complexfloating):
-            raise TypeError(
-                "`SparseJacobianLinearOperator` only supports real dtypes, but `x` "
-                f"has dtype {self.x.dtype}."
-            )
-        if self.x.ndim != 1:
-            raise ValueError(
-                "`SparseJacobianLinearOperator` requires `x` to be one-dimensional, "
-                f"but it has shape {self.x.shape}."
-            )
+        self.x = jtu.tree_map(inexact_asarray, x)
+        for leaf in jtu.tree_leaves(self.x):
+            if jnp.issubdtype(leaf.dtype, jnp.complexfloating):
+                raise TypeError(
+                    "`SparseJacobianLinearOperator` only supports real dtypes, but `x` "
+                    f"has a leaf of dtype {leaf.dtype}."
+                )
         if closure_convert:
             fn = eqx.filter_closure_convert(fn, self.x, args)
         self.fn = fn
@@ -274,8 +279,19 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         self.tags = _frozenset(tags)
         self.transposed = transposed
 
-        def function_of_point(point: Array) -> Array:
+        def function_of_point(point: PyTree[Array]) -> PyTree[Array]:
             return fn(point, args)
+
+        forward_in_structure = strip_weak_dtype(jax.eval_shape(lambda: self.x))
+        forward_out_structure = strip_weak_dtype(
+            jax.eval_shape(function_of_point, self.x)
+        )
+        if transposed:
+            self._in_structure = forward_out_structure
+            self._out_structure = forward_in_structure
+        else:
+            self._in_structure = forward_in_structure
+            self._out_structure = forward_out_structure
 
         # Resolve the coloring down to a bare `asdex.ColoredPattern`, which is what
         # is stored and later handed to `asdex.jacobian_from_coloring`. A
@@ -289,8 +305,9 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
             case (ColoredPattern() as pattern, None):
                 self.coloring = pattern
             case (None, None):
+                flat_function_of_point, flat_point = _flatten(function_of_point, self.x)
                 self.coloring = asdex.jacobian_coloring(
-                    function_of_point, self.x, mode=_asdex_mode(mode)
+                    flat_function_of_point, flat_point, mode=_asdex_mode(mode)
                 )
             case (None, known_sparsity):
                 assert known_sparsity is not None
@@ -302,17 +319,6 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
                     "Pass at most one of `coloring` and `sparsity`, where `coloring` "
                     "must be an `asdex.ColoredPattern` or a `splineax.JacobianColoring`."
                 )
-
-        forward_in_structure = strip_weak_dtype(jax.eval_shape(lambda: self.x))
-        forward_out_structure = strip_weak_dtype(
-            jax.eval_shape(function_of_point, self.x)
-        )
-        if transposed:
-            self._in_structure = forward_out_structure
-            self._out_structure = forward_in_structure
-        else:
-            self._in_structure = forward_in_structure
-            self._out_structure = forward_out_structure
 
     @classmethod
     def from_jacobian_operator(
@@ -330,9 +336,8 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
         difference is how it is materialised: one JVP or VJP per color instead of one
         per column or row.
 
-        The point `x` must be a one-dimensional array of real dtype, which is
-        narrower than the arbitrary pytrees `lineax.JacobianLinearOperator` itself
-        accepts.
+        `x` may be any pytree, as for the operator being converted. Only the real-dtype
+        restriction is narrower than what `lineax.JacobianLinearOperator` accepts.
 
         **Arguments:**
 
@@ -356,15 +361,17 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
             closure_convert=False,
         )
 
-    def _function_of_point(self) -> Callable[[Array], Array]:
+    def _function_of_point(self) -> Callable[[PyTree[Array]], PyTree[Array]]:
         """Returns the forward map `x -> fn(x, args)` with `args` bound."""
 
-        def function_of_point(point: Array) -> Array:
+        def function_of_point(point: PyTree[Array]) -> PyTree[Array]:
             return self.fn(point, self.args)
 
         return function_of_point
 
-    def mv(self, vector: Inexact[Array, " b"]) -> Inexact[Array, " a"]:
+    def mv(
+        self, vector: PyTree[Inexact[Array, "..."]]
+    ) -> PyTree[Inexact[Array, "..."]]:
         if self.transposed:
             _, vjp_function = jax.vjp(self._function_of_point(), self.x)
             (out,) = vjp_function(vector)
@@ -374,14 +381,21 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
 
     def as_bcoo(self) -> Inexact[BCOO, "a b"]:
         """Materialises the Jacobian at `x` as a `BCOO` matrix, using one JVP or VJP
-        per color of the precomputed coloring."""
+        per color of the precomputed coloring.
+
+        The matrix is always two-dimensional, over the raveled input and output, so a
+        `fn` taking or returning a pytree still materialises to a plain matrix. The
+        operator's own structures are the unraveled ones, so a caller that needs both
+        must keep them itself, which is what the splineax solvers do.
+        """
+        flat_function_of_point, flat_point = _flatten(self._function_of_point(), self.x)
         jacobian = cast(
             BCOO,
             asdex.jacobian_from_coloring(
-                self._function_of_point(),
+                flat_function_of_point,
                 self.coloring,
                 "bcoo",
-            )(self.x),
+            )(flat_point),
         )
         if self.transposed:
             # `BCOO.T` is not well-typed, hence the cast.
@@ -453,7 +467,7 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
         cls,
         coloring: JacobianColoring,
         fn: Callable,
-        x: Inexact[ArrayLike, " n"] | jax.ShapeDtypeStruct,
+        x: PyTree[Inexact[ArrayLike, "..."] | jax.ShapeDtypeStruct],
         args: PyTree[Any] = None,
     ) -> "SparseJacobianLinearOperatorColoring":
         """Binds an existing [`splineax.JacobianColoring`][] to a function.
@@ -467,10 +481,11 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
         **Arguments:**
 
         - `coloring`: the coloring to bind, as a [`splineax.JacobianColoring`][].
-        - `fn`: a function `(x, args) -> y`, where `x` is a one-dimensional array of
-            real dtype. Its Jacobian must have the sparsity the coloring describes.
-        - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
-            Only its shape and dtype matter here, used to closure-convert `fn`.
+        - `fn`: a function `(x, args) -> y`, where `x` and `y` are arrays of real
+            dtype, or pytrees of them. Its Jacobian must have the sparsity the coloring
+            describes.
+        - `x`: a representative point, or `jax.ShapeDtypeStruct`s describing one. Only
+            the shapes and dtypes matter here, used to closure-convert `fn`.
         - `args`: extra arguments to `fn` that are not differentiated.
         """
         example_point = _example_point(x)
@@ -481,7 +496,7 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
     def detect(
         cls,
         fn: Callable,
-        x: Inexact[ArrayLike, " n"] | jax.ShapeDtypeStruct,
+        x: PyTree[Inexact[ArrayLike, "..."] | jax.ShapeDtypeStruct],
         args: PyTree[Any] = None,
         *,
         mode: JacobianMode | None = None,
@@ -494,10 +509,10 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
 
         **Arguments:**
 
-        - `fn`: a function `(x, args) -> y`, where `x` is a one-dimensional array of
-            real dtype.
-        - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
-            Only its shape and dtype matter, since sparsity detection is structural.
+        - `fn`: a function `(x, args) -> y`, where `x` and `y` are arrays of real
+            dtype, or pytrees of them.
+        - `x`: a representative point, or `jax.ShapeDtypeStruct`s describing one. Only
+            the shapes and dtypes matter, since sparsity detection is structural.
         - `args`: extra arguments to `fn` that are not differentiated.
         - `mode`: optional coloring mode, `"fwd"` or `"bwd"`.
         """
@@ -508,7 +523,7 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
     def from_sparsity(
         cls,
         fn: Callable,
-        x: Inexact[ArrayLike, " n"] | jax.ShapeDtypeStruct,
+        x: PyTree[Inexact[ArrayLike, "..."] | jax.ShapeDtypeStruct],
         sparsity: SparsityPattern | np.ndarray | BCOO,
         args: PyTree[Any] = None,
         *,
@@ -523,10 +538,10 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
 
         **Arguments:**
 
-        - `fn`: a function `(x, args) -> y`, where `x` is a one-dimensional array of
-            real dtype.
-        - `x`: a representative point, or a `jax.ShapeDtypeStruct` describing one.
-            Not used for detection, but required to closure-convert `fn`.
+        - `fn`: a function `(x, args) -> y`, where `x` and `y` are arrays of real
+            dtype, or pytrees of them.
+        - `x`: a representative point, or `jax.ShapeDtypeStruct`s describing one. Not
+            used for detection, but required to closure-convert `fn`.
         - `sparsity`: the known sparsity pattern of the Jacobian, as an
             `asdex.SparsityPattern`, a dense boolean mask, or a `BCOO` matrix.
         - `args`: extra arguments to `fn` that are not differentiated.
@@ -537,7 +552,7 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
 
     def operator_at(
         self,
-        x: Inexact[ArrayLike, " n"],
+        x: PyTree[Inexact[ArrayLike, "..."]],
         args: PyTree[Any] = None,
         tags: object | frozenset[object] = (),
     ) -> SparseJacobianLinearOperator:
@@ -547,7 +562,7 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
         **Arguments:**
 
         - `x`: the point at which to evaluate the Jacobian. Must have the same
-            shape and dtype as the point the coloring was computed for.
+            structure, shapes and dtypes as the point the coloring was computed for.
         - `args`: extra arguments to `fn` that are not differentiated. Must have
             the same abstract structure as the `args` the coloring was computed
             for.
@@ -571,13 +586,66 @@ def _asdex_mode(mode: JacobianMode | None) -> Literal["fwd", "rev"] | None:
 
 
 def _example_point(
-    x: Inexact[ArrayLike, " n"] | jax.ShapeDtypeStruct,
-) -> Inexact[Array, " n"]:
+    x: PyTree[Inexact[ArrayLike, "..."] | jax.ShapeDtypeStruct],
+) -> PyTree[Inexact[Array, "..."]]:
     """Turns a concrete point or a `jax.ShapeDtypeStruct` into a concrete array
-    usable for tracing. Only the shape and dtype are meaningful to the callers."""
-    if isinstance(x, jax.ShapeDtypeStruct):
-        return jnp.empty(x.shape, x.dtype)
-    return inexact_asarray(x)
+    usable for tracing, leafwise. Only the shape and dtype are meaningful to the
+    callers."""
+
+    def concrete_leaf(leaf: ArrayLike | jax.ShapeDtypeStruct) -> Array:
+        if isinstance(leaf, jax.ShapeDtypeStruct):
+            return jnp.empty(leaf.shape, leaf.dtype)
+        return inexact_asarray(leaf)
+
+    return jtu.tree_map(
+        concrete_leaf, x, is_leaf=lambda leaf: isinstance(leaf, jax.ShapeDtypeStruct)
+    )
+
+
+def _packed_structures(
+    out_structure: PyTree[jax.ShapeDtypeStruct],
+    in_structure: PyTree[jax.ShapeDtypeStruct],
+) -> PackedStructures:
+    """The ravel bookkeeping `lineax.ravel_vector` and `lineax.unravel_solution` read,
+    built from a pair of structures.
+
+    `lineax._solver.misc.pack_structures` builds the same thing from an operator, which
+    is not what is wanted here: the flattening below describes `fn` itself, whose input
+    and output do not swap places when the operator is transposed.
+    """
+    leaves, treedef = jtu.tree_flatten(
+        (strip_weak_dtype(out_structure), strip_weak_dtype(in_structure))
+    )
+    return PackedStructures(eqxi.Static((leaves, treedef)))
+
+
+def _flatten(
+    function_of_point: Callable[[PyTree[Array]], PyTree[Array]],
+    x: PyTree[Inexact[Array, "..."]],
+) -> tuple[Callable[[Array], Array], Inexact[Array, " n"]]:
+    """Rewrites a forward map as a map between raveled arrays, and ravels `x` to match.
+
+    asdex detects, colors and materialises flat Jacobians, so everything that talks to
+    it goes through here. That is what lets `x` and the output of `fn` be arrays of any
+    shape, or pytrees of them, while the stored sparsity pattern and the materialised
+    matrix stay two-dimensional.
+
+    Ravelling goes through lineax's own `ravel_vector` and `unravel_solution`, the same
+    helpers the sparse solvers use on a right-hand side and its solution. Both sides
+    therefore agree on the ordering by construction, which `jax.flatten_util.ravel_pytree`
+    would not guarantee.
+    """
+    in_structure = strip_weak_dtype(jax.eval_shape(lambda: x))
+    out_structure = strip_weak_dtype(jax.eval_shape(function_of_point, x))
+    packed = _packed_structures(out_structure, in_structure)
+    # Ravelling `x` reads the pair's output side, so it needs one of its own.
+    point_packed = _packed_structures(in_structure, in_structure)
+
+    def flat_function_of_point(flat_point: Inexact[Array, " n"]) -> Array:
+        point = unravel_solution(flat_point, packed)
+        return ravel_vector(function_of_point(point), packed)
+
+    return flat_function_of_point, ravel_vector(x, point_packed)
 
 
 # Lineax `singledispatch` registrations. `register_sparse_operator` cannot be reused
@@ -589,8 +657,37 @@ def _example_point(
 
 @materialise.register(SparseJacobianLinearOperator)
 def _(operator: SparseJacobianLinearOperator) -> BCOOLinearOperator:
-    # Convert to a concrete sparse operator. This is how the solvers consume it.
+    # Convert to a concrete sparse operator, for callers that want one. The solvers do
+    # not come through here: they read `as_bcoo()` and keep the operator's structures
+    # themselves, precisely because a `BCOOLinearOperator` cannot carry them.
+    _check_structures_survive_materialisation(operator)
     return BCOOLinearOperator(operator.as_bcoo(), operator.tags)
+
+
+def _check_structures_survive_materialisation(
+    operator: SparseJacobianLinearOperator,
+) -> None:
+    """Raises unless both of the operator's structures are a single one-dimensional
+    array, which is all a `BCOOLinearOperator` can represent.
+
+    `as_bcoo` ravels, so a richer structure materialises to a perfectly good matrix
+    whose operator would then report the flat structures the matrix shape implies. That
+    would drop the structure the caller passed in without a word, so it is refused here
+    instead.
+    """
+    structures = (
+        ("in", operator.in_structure()),
+        ("out", operator.out_structure()),
+    )
+    for name, structure in structures:
+        if not isinstance(structure, jax.ShapeDtypeStruct) or len(structure.shape) != 1:
+            raise ValueError(
+                "`lineax.materialise` on a `SparseJacobianLinearOperator` requires "
+                "one-dimensional array in- and out-structures, since the resulting "
+                "`BCOOLinearOperator` carries only a matrix and would drop anything "
+                f"richer. The {name}-structure is {structure}. Use `as_bcoo()` "
+                "instead, keeping the structures yourself, as the splineax solvers do."
+            )
 
 
 @linearise.register(SparseJacobianLinearOperator)

@@ -8,8 +8,9 @@ The reference for correctness is always the dense Jacobian computed with
 is diagonal, the simplest sparsity) and a banded coupling (whose Jacobian needs a
 non-trivial coloring). Beyond numerical agreement, the suite checks the properties
 that make the operator practical: jit cache stability across evaluation points and
-across freshly regenerated colorings, sparse materialisation through
-`lineax.materialise` and `lineax.linearise`, and end-to-end solves through every
+across freshly regenerated colorings, raveling of pytree and multi-dimensional points,
+sparse materialisation through `lineax.materialise` and `lineax.linearise`, and
+end-to-end solves through every
 splineax sparse solver, including the KLU symbolic factorization reuse path and a
 coloring passed as an argument into a jitted solve.
 """
@@ -17,6 +18,7 @@ coloring passed as an argument into a jitted solve.
 import asdex
 import equinox as eqx
 import jax
+import jax.flatten_util as jfu
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
@@ -215,8 +217,8 @@ def test_jit_cache_is_stable_across_points_and_transposes() -> None:
 
 
 def test_materialise_returns_bcoo_operator() -> None:
-    """`lineax.materialise` is how the sparse solvers consume the operator, so it
-    must produce a `BCOOLinearOperator` holding the correct Jacobian."""
+    """`lineax.materialise` must produce a `BCOOLinearOperator` holding the correct
+    Jacobian, for callers that want a concrete sparse operator."""
     operator = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
     materialised = lx.materialise(operator)
     assert isinstance(materialised, BCOOLinearOperator)
@@ -260,11 +262,12 @@ def test_complex_point_is_rejected() -> None:
         SparseJacobianLinearOperator(elementwise_function, jnp.array([1.0 + 2.0j, 3.0]))
 
 
-def test_non_1d_point_is_rejected() -> None:
-    """The operator models a two-dimensional Jacobian of a one-dimensional map,
-    so a matrix-valued point must be rejected."""
-    with pytest.raises(ValueError, match="one-dimensional"):
-        SparseJacobianLinearOperator(elementwise_function, jnp.ones((2, 3)))
+def test_complex_leaf_of_a_pytree_point_is_rejected() -> None:
+    """The real-dtype restriction is per leaf, so one complex leaf among real ones
+    must fail just as loudly."""
+    point = {"real": jnp.arange(3.0), "complex": jnp.array([1.0 + 2.0j])}
+    with pytest.raises(TypeError, match="real dtypes"):
+        SparseJacobianLinearOperator(lambda p, args: p, point)
 
 
 def test_conflicting_precomputation_arguments_are_rejected() -> None:
@@ -296,8 +299,8 @@ def test_conflicting_precomputation_arguments_are_rejected() -> None:
 )
 def test_linear_solve_matches_numpy(solver, enable_x64: None) -> None:
     """End-to-end integration proof: handing the Jacobian operator straight to
-    each splineax solver must reproduce the dense solve. This exercises the
-    `materialise` recursion inside every solver's `init`."""
+    each splineax solver must reproduce the dense solve. This exercises the `as_bcoo`
+    branch inside every solver's `init`."""
     operator = SparseJacobianLinearOperator(square_function, SQUARE_POINT)
     expected = np.linalg.solve(
         np.asarray(dense_jacobian(square_function, SQUARE_POINT), dtype=np.float64),
@@ -506,3 +509,100 @@ def test_from_jacobian_operator_defaults_the_mode_to_jac(jac) -> None:
     assert jnp.allclose(
         converted.as_matrix(), dense_jacobian(banded_function, EVALUATION_POINT)
     )
+
+
+def pytree_function(x: dict, args: object) -> dict:
+    """A map between pytrees, whose Jacobian couples the two input leaves into both
+    output leaves and so needs more than one color."""
+    del args
+    return {
+        "head": jnp.sin(x["u"]) + x["v"][0],
+        "tail": jnp.sum(x["v"]) * x["u"][:2],
+    }
+
+
+def matrix_function(x: jax.Array, args: object) -> jax.Array:
+    """A map between two-dimensional arrays, the other shape the raveling has to
+    handle."""
+    del args
+    return jnp.sin(x) @ jnp.ones((3, 2))
+
+
+PYTREE_POINT = {"u": jnp.arange(3.0), "v": jnp.array([1.0, 2.0])}
+MATRIX_POINT = jnp.ones((4, 3))
+
+
+def raveled_jacobian(fn, x) -> jax.Array:
+    """The dense Jacobian of `fn` as a matrix over the raveled input and output, which
+    is what the operator materialises."""
+    flat_x, unravel = jfu.ravel_pytree(x)
+
+    def flat_fn(flat_point):
+        return jfu.ravel_pytree(fn(unravel(flat_point), None))[0]
+
+    return jax.jacfwd(flat_fn)(flat_x)
+
+
+@pytest.mark.parametrize(
+    ("fn", "point"), [(pytree_function, PYTREE_POINT), (matrix_function, MATRIX_POINT)]
+)
+def test_materialisation_ravels_pytree_and_multidimensional_points(fn, point) -> None:
+    """`x` and the output may be arrays of any shape, or pytrees of them. Everything
+    handed to asdex is raveled first, so the coloring and the materialised matrix stay
+    two-dimensional and match the dense Jacobian of the raveled map."""
+    operator = SparseJacobianLinearOperator(fn, point)
+    expected = raveled_jacobian(fn, point)
+
+    assert operator.as_bcoo().shape == expected.shape
+    assert jnp.allclose(operator.as_matrix(), expected)
+    assert jnp.allclose(operator.as_bcoo().todense(), expected)
+
+
+@pytest.mark.parametrize(
+    ("fn", "point"), [(pytree_function, PYTREE_POINT), (matrix_function, MATRIX_POINT)]
+)
+def test_structures_and_products_keep_the_original_shapes(fn, point) -> None:
+    """Only the materialisation is raveled. The operator reports the structures `fn`
+    actually has, and `mv` stays a pytree-to-pytree product, so the operator remains
+    interchangeable with `lineax.JacobianLinearOperator`."""
+    operator = SparseJacobianLinearOperator(fn, point)
+    dense_operator = lx.JacobianLinearOperator(fn, point)
+    tangent = jax.tree.map(jnp.ones_like, point)
+    sparse_product = operator.mv(tangent)
+    dense_product = dense_operator.mv(tangent)
+
+    assert eqx.tree_equal(operator.in_structure(), dense_operator.in_structure())
+    assert eqx.tree_equal(operator.out_structure(), dense_operator.out_structure())
+    assert jax.tree.structure(sparse_product) == jax.tree.structure(dense_product)
+    assert all(
+        bool(jnp.allclose(sparse_leaf, dense_leaf))
+        for sparse_leaf, dense_leaf in zip(
+            jax.tree.leaves(sparse_product), jax.tree.leaves(dense_product)
+        )
+    )
+
+
+def test_from_jacobian_operator_converts_a_pytree_operator() -> None:
+    """Converting a pytree-valued `lineax.JacobianLinearOperator` must give the same
+    Jacobian lineax itself materialises, which is the whole point of the conversion."""
+    dense_operator = lx.JacobianLinearOperator(pytree_function, PYTREE_POINT)
+    converted = SparseJacobianLinearOperator.from_jacobian_operator(dense_operator)
+
+    assert jnp.allclose(converted.as_matrix(), dense_operator.as_matrix())
+
+
+@pytest.mark.parametrize(
+    ("fn", "point"), [(pytree_function, PYTREE_POINT), (matrix_function, MATRIX_POINT)]
+)
+def test_materialise_refuses_to_drop_the_structure(fn, point) -> None:
+    """A `BCOOLinearOperator` reports the flat structures its matrix shape implies, so
+    materialising an operator with richer structures would silently lose them. That is
+    refused, pointing at `as_bcoo` instead."""
+    operator = SparseJacobianLinearOperator(fn, point)
+    with pytest.raises(
+        ValueError, match="one-dimensional array in- and out-structures"
+    ):
+        lx.materialise(operator)
+
+    # The matrix itself is still available, which is how the solvers consume it.
+    assert operator.as_bcoo().ndim == 2
