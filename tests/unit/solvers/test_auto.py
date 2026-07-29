@@ -274,17 +274,24 @@ def test_solvers_satisfy_sparse_linear_solver_protocol() -> None:
         assert isinstance(CuDSS(), SparseLinearSolver)
 
 
-@requires_cpu_backend
 def test_states_and_scopes_satisfy_protocols(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
-    """Init states, symbolic scopes, and symbolic states satisfy their Protocols, for
-    KLU, Spsolve, and (if installed) Pardiso."""
+    """Init states, symbolic scopes, and symbolic states satisfy their Protocols.
+
+    Covers whichever solvers this machine can actually run, rather than skipping
+    wholesale off CPU: `Spsolve` works anywhere, `KLU`/`Pardiso` need a CPU backend,
+    and `CuDSS` needs a CUDA one.
+    """
     operator = make_operator(SQUARE_MATRIX)
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
-    solvers = [KLU(), Spsolve()]
-    if _pardiso_available():
-        solvers.append(Pardiso())
+    solvers: list[SparseLinearSolver] = [Spsolve()]
+    if jax.default_backend() == "cpu":
+        solvers.append(KLU())
+        if _pardiso_available():
+            solvers.append(Pardiso())
+    if _cudss_available() and _cuda_backend_available():
+        solvers.append(CuDSS())
 
     for solver in solvers:
         assert isinstance(solver.init(operator, {}), SparseBasicState)

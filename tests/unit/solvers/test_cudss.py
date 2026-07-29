@@ -217,22 +217,38 @@ def test_cudss_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         CuDSS()
 
 
-def test_cudss_available_survives_missing_parent_package() -> None:
+def test_cudss_available_survives_missing_parent_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`_cudss_available` must return `False`, not raise, when `spineax` isn't
     installed at all, not just its `cudss` submodule. `importlib.util.find_spec`
     raises `ModuleNotFoundError` for a dotted name whose parent package is missing,
-    which is the common case here since the binding is an optional dependency."""
-    # No monkeypatching: this environment (CPU CI) never has `spineax` installed, so
-    # this exercises the real code path, not a simulated one.
+    which is the common case since the binding is an optional dependency.
+
+    Forces that error rather than relying on the package being absent, so the check
+    is the same on a machine that really does have the binding installed.
+    """
+
+    def raise_module_not_found(name: str) -> None:
+        raise ModuleNotFoundError(f"No module named {name!r}")
+
+    monkeypatch.setattr(
+        _cudss_module.importlib.util, "find_spec", raise_module_not_found
+    )
     assert _cudss_available() is False
 
 
-def test_ensure_gpu_rejects_cpu() -> None:
-    """`_ensure_gpu` must reject the current (CPU) platform. `fake_cudss` disables
-    this guard for the dispatch/reuse tests below, so it needs its own check here,
-    unpatched, to make sure it really does fire on a non-CUDA backend."""
-    with pytest.raises(Exception, match="CUDA GPU"):
-        jax.block_until_ready(_cudss_module._ensure_gpu(jnp.ones(3)))
+def test_ensure_gpu_matches_the_platform() -> None:
+    """`_ensure_gpu` rejects every platform but CUDA, and passes values through on
+    CUDA. `fake_cudss` disables this guard for the dispatch/reuse tests below, so it
+    needs its own unpatched check here, asserting whichever way this machine goes."""
+    if _cuda_backend_available() and jax.default_backend() == "gpu":
+        assert jnp.allclose(
+            jax.block_until_ready(_cudss_module._ensure_gpu(jnp.ones(3))), 1.0
+        )
+    else:
+        with pytest.raises(Exception, match="CUDA GPU"):
+            jax.block_until_ready(_cudss_module._ensure_gpu(jnp.ones(3)))
 
 
 # ---------------------------------------------------------------------------
@@ -497,36 +513,75 @@ pytestmark_gpu = pytest.mark.skipif(
 
 
 @pytestmark_gpu
-def test_gpu_symbolic_scope_reuses_analysis_across_many_solves(
+def test_gpu_numeric_state_reuses_factorization_without_rebuilds(
     make_operator: OperatorFactory,
 ) -> None:
-    """On real hardware: `registry_size()`/`rebuild_count()` are native ground truth
-    that a `factorize_symbolic` scope's analysis ran exactly once across many solves
-    with varying values, the whole point of the feature."""
+    """The reuse claim that does hold, checked against cuDSS's own counter: one
+    `factorize`, many right-hand sides, zero rebuilds. `solve` does not consume its
+    token's id (only the numeric phases do), so the factorization stays resident for
+    every solve made against it."""
+    from spineax import cudss as spineax_cudss
+
+    solver = CuDSS()
+    operator = make_operator(SQUARE_MATRIX)
+    rebuilds_before = spineax_cudss.rebuild_count()
+
+    with solver.factorize(operator) as state:
+        for scale in [1.0, 2.0, 0.5, 3.0]:
+            b = scale * RIGHT_HAND_SIDE
+            solution = solver.compute(state, b, {})[0]
+            expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(b))
+            assert jnp.allclose(solution, expected, atol=1e-5)
+
+    assert spineax_cudss.rebuild_count() == rebuilds_before, (
+        "solving repeatedly against one factorized token must not rebuild it"
+    )
+
+
+@pytestmark_gpu
+def test_gpu_symbolic_scope_solves_correctly_across_values(
+    make_operator: OperatorFactory,
+) -> None:
+    """A `factorize_symbolic` scope gives correct answers for many matrices sharing its
+    pattern, and costs one rebuild per solve after the first.
+
+    It does not currently save the analysis. cuDSS's numeric phases *consume* their
+    input token's id and hand back a fresh one, so the second and later `compute` calls
+    find the scope's analyzed id superseded, and cuDSS transparently rebuilds it from
+    the token's own arrays. That is correct but no cheaper than re-analyzing, so this
+    pins the rebuild count at its known value rather than asserting a zero it does not
+    achieve. See the `CuDSS` class docstring.
+    """
     from spineax import cudss as spineax_cudss
 
     solver = CuDSS()
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
-    operator = make_operator(SQUARE_MATRIX)
+    scales = [1.0, 2.0, 0.5, 3.0]
     rebuilds_before = spineax_cudss.rebuild_count()
 
     with solver.factorize_symbolic(sparsity) as scope:
-        for scale in [1.0, 2.0, 0.5, 3.0]:
+        for scale in scales:
             state = scope.init(make_operator(scale * SQUARE_MATRIX))
             solution = solver.compute(state, RIGHT_HAND_SIDE, {})[0]
-            expected = _expected(scale * SQUARE_MATRIX)
-            assert jnp.allclose(solution, expected, atol=1e-5)
-        assert spineax_cudss.rebuild_count() == rebuilds_before
+            assert jnp.allclose(solution, _expected(scale * SQUARE_MATRIX), atol=1e-5)
 
-    del operator
+    rebuilds = spineax_cudss.rebuild_count() - rebuilds_before
+    assert rebuilds == len(scales) - 1, (
+        "expected one rebuild per solve after the first, the known cost of driving "
+        f"several numeric phases from one analyzed token; got {rebuilds}"
+    )
 
 
 @pytestmark_gpu
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64, jnp.complex128])
 def test_gpu_solves_in_every_supported_dtype(
-    make_operator: OperatorFactory, dtype
+    make_operator: OperatorFactory, dtype, enable_x64: None
 ) -> None:
-    """cuDSS supports f32/f64/complex directly, with no upcasting, unlike `Pardiso`."""
+    """cuDSS supports f32/f64/complex directly, with no upcasting, unlike `Pardiso`.
+
+    Needs `enable_x64`, without which JAX silently truncates the 64-bit cases back to
+    32-bit and the test would pass while proving nothing.
+    """
     matrix = SQUARE_MATRIX.astype(dtype)
     b = RIGHT_HAND_SIDE.astype(dtype)
     operator = make_operator(matrix)

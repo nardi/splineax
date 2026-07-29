@@ -32,6 +32,12 @@ from splineax import (
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
+# Solvers that own no native handle, so nothing has to order a release after a
+# solve and a bare `lineax.linear_solve` is safe. `Spsolve` has no factorization
+# to free at all; `CuDSS` keeps its factorizations in a cache rather than behind a
+# handle, and its release is eager-only, so there is no traced release to order.
+HANDLE_FREE_SOLVERS = (splx.Spsolve, splx.CuDSS)
+
 
 def test_factorize_solves_correctly(
     make_operator: OperatorFactory, solver: AbstractSparseLinearSolver
@@ -222,8 +228,9 @@ def test_symbolic_scope_full_jit_raw_linear_solve_raises_helpful_error(
     `test_factorize_symbolic_opens_entirely_under_jit` above for why. `HandleDependencies`
     now catches this at trace time, in `compute`, and raises a clear error pointing at
     `splineax.linear_solve` instead of letting it surface later as an opaque tracer error
-    or a native use-after-free. `Spsolve` owns no handle, so nothing needs to order its
-    (no-op) release, and it solves normally either way.
+    or a native use-after-free. `Spsolve` and `CuDSS` own no handle (see
+    `HANDLE_FREE_SOLVERS`), so nothing needs to order a release and they solve
+    normally either way.
     """
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     indices, shape = sparsity.indices, sparsity.shape
@@ -241,7 +248,7 @@ def test_symbolic_scope_full_jit_raw_linear_solve_raises_helpful_error(
     if isinstance(solver, splx.AutoSparseLinearSolver):
         resolved = solver.select_solver(BCOOLinearOperator(sparsity))
 
-    if isinstance(resolved, splx.Spsolve):
+    if isinstance(resolved, HANDLE_FREE_SOLVERS):
         expected = jnp.linalg.solve(
             np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE)
         )
@@ -388,7 +395,8 @@ def test_as_solver_full_jit_raw_linear_solve_raises_helpful_error(
 ) -> None:
     """Bare `lineax.linear_solve` on a scoped solver opened and closed inside one jitted
     function is unsafe for the same reason as its state-passing equivalent above, and
-    raises the same error pointing at `splineax.linear_solve`."""
+    raises the same error pointing at `splineax.linear_solve`. The handle-free solvers
+    solve normally, as there."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     indices, shape = sparsity.indices, sparsity.shape
 
@@ -402,7 +410,7 @@ def test_as_solver_full_jit_raw_linear_solve_raises_helpful_error(
     if isinstance(solver, splx.AutoSparseLinearSolver):
         resolved = solver.select_solver(BCOOLinearOperator(sparsity))
 
-    if isinstance(resolved, splx.Spsolve):
+    if isinstance(resolved, HANDLE_FREE_SOLVERS):
         expected = jnp.linalg.solve(
             np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE)
         )

@@ -271,9 +271,11 @@ class _CuDSSSymbolicScope(NamedTuple):
 class _CuDSSSymbolicState(eqx.Module):
     """A solvable state that reuses a `factorize_symbolic` scope's symbolic analysis.
 
-    The analysis ran once, when the scope was opened. Each `compute` reuses `token`
-    and refactors numerically for `values` (this state's own operator's values), the
-    symbolic reuse the scope exists for, see `CuDSS.compute`. `.factorize()` promotes
+    The analysis ran once, when the scope was opened. Each `compute` refactors
+    numerically from `token` for `values` (this state's own operator's values), see
+    `CuDSS.compute`. Note that only the first such call finds `token` resident:
+    a numeric phase consumes its input id, so later calls rebuild it, analysis and
+    all (see the `CuDSS` class docstring's warning). `.factorize()` promotes
     this to a `_CuDSSNumericState` by running that numeric factorization once, so it
     can be reused across many solves. It does not release anything itself, since the
     resulting token is (or shares the id of) the one the outer `factorize_symbolic`
@@ -367,8 +369,21 @@ class CuDSS(AbstractSparseLinearSolver[_CuDSSState]):
 
     A plain, un-stated solve (`lx.linear_solve(op, b, solver=CuDSS())` with no
     `state=`) re-runs the analysis on every call, minting a fresh cache entry each
-    time. That's correct but wasteful: prefer `factorize`/`factorize_symbolic` for
-    anything solved more than once, exactly as recommended for `KLU`.
+    time. That's correct but wasteful: prefer `factorize` for anything solved more
+    than once, exactly as recommended for `KLU`.
+
+    !!! warning "`factorize_symbolic` does not currently save the analysis here"
+
+        `factorize` is the tier that pays off: one numeric factorization, then any
+        number of solves against it, with no repeated work.
+
+        `factorize_symbolic` is correct but not yet faster. cuDSS's numeric phases
+        consume their input token and return a fresh one, so driving several of
+        them from one analyzed token leaves that token superseded after the first,
+        and cuDSS silently rebuilds it (analysis included) for each later solve.
+        Reuse across differing values therefore costs about what re-analyzing
+        would. Use it for API parity with `KLU`/`Pardiso`, not for speed, until
+        the token can be threaded forward between solves.
     """
 
     reordering: CuDSSReordering = eqx.field(static=True)

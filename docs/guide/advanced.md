@@ -181,6 +181,15 @@ there is a state to register the solve against at all.
 
 ## CuDSS: a cache instead of a handle
 
+!!! warning
+
+    On [`CuDSS`][splineax.CuDSS], `factorize` reuses work as you would expect, but
+    `factorize_symbolic` currently does not: cuDSS's numeric phases consume the
+    token they are given, so each solve after the first rebuilds the analysis
+    rather than reusing it. Results stay correct, but reuse across differing
+    values costs roughly what re-analyzing would. Prefer `factorize` there.
+
+
 Every other solver here frees its factorization through a native handle: a value that
 must be released, and released in the right order relative to the solves that used it.
 [`CuDSS`][splineax.CuDSS] works differently. Every factorization lives in a global,
