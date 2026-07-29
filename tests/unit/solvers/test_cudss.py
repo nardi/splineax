@@ -6,8 +6,8 @@
 Two tiers of coverage follow from that:
 
 - **CPU-runnable, always on:** availability/`ImportError`, tag-to-mtype selection,
-  operator-to-CSR conversion, and the square/type checks — none of which touch
-  `spineax.cudss` at all — plus the dispatch/reuse/transpose/conj *logic* in `_cudss.py`,
+  operator-to-CSR conversion, and the square/type checks, none of which touch
+  `spineax.cudss` at all, plus the dispatch/reuse/transpose/conj *logic* in `_cudss.py`,
   exercised against a small fake `spineax.cudss` module (`_FakeCuDSS` below) that
   reproduces its documented phase contract (analyze -> factorize/refactorize -> solve,
   phase checks, dtype/nnz checks) with a real dense `jnp.linalg.solve` underneath. This
@@ -80,7 +80,7 @@ class _FakeCuDSS:
     dense solve. Mirrors the real module's documented contract closely enough to
     prove `_cudss.py` calls it the right way, not to test cuDSS itself:
 
-    - `factorize` accepts any phase; `refactorize`/`solve` require a factorized token.
+    - `factorize` accepts any phase, while `refactorize`/`solve` need a factorized one.
     - `factorize`/`refactorize` check the incoming values' dtype and size against the
       token they were analyzed for.
     - `solve` checks the right-hand side dtype against the token.
@@ -219,7 +219,7 @@ def test_cudss_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cudss_available_survives_missing_parent_package() -> None:
     """`_cudss_available` must return `False`, not raise, when `spineax` isn't
-    installed at all (not just its `cudss` submodule) — `importlib.util.find_spec`
+    installed at all, not just its `cudss` submodule. `importlib.util.find_spec`
     raises `ModuleNotFoundError` for a dotted name whose parent package is missing,
     which is the common case here since the binding is an optional dependency."""
     # No monkeypatching: this environment (CPU CI) never has `spineax` installed, so
@@ -353,7 +353,7 @@ def test_basic_state_analyzes_factorizes_and_releases(
 def test_factorize_reuses_across_solves(
     make_operator: OperatorFactory, fake_cudss: _FakeCuDSS
 ) -> None:
-    """`solver.factorize(operator)` analyzes and factorizes once; every solve inside
+    """`solver.factorize(operator)` analyzes and factorizes once. Every solve inside
     the block reuses that same numeric token, and it is released on exit."""
     operator = make_operator(SQUARE_MATRIX)
     solver = CuDSS()
@@ -376,7 +376,7 @@ def test_factorize_reuses_across_solves(
 def test_factorize_symbolic_reuses_analysis_across_operators(
     make_operator: OperatorFactory, fake_cudss: _FakeCuDSS
 ) -> None:
-    """A `factorize_symbolic` scope analyzes once; `.init(operator)` for different
+    """A `factorize_symbolic` scope analyzes once. `.init(operator)` for different
     operators sharing the pattern each refactor numerically on `compute`, reusing the
     one analysis. The token is released when the scope exits."""
     solver = CuDSS()

@@ -82,8 +82,8 @@ solver = splx.Pardiso()
 Wraps NVIDIA's cuDSS library, a direct sparse solver with an explicit analysis /
 factorization / refactorization / solve phase split. It is the only solver in this
 package that both runs on GPU **and** keeps real factorization reuse (see
-[Advanced usage](advanced.md)) — `Spsolve` runs on GPU too, but its factorization methods
-are no-ops.
+[Advanced usage](advanced.md)). `Spsolve` runs on GPU too, but its factorization
+methods are no-ops.
 
 `CuDSS` is an **optional dependency**: install it with
 
@@ -108,14 +108,14 @@ solver = splx.CuDSS()
 
 Picks a solver based on the JAX platform and what's installed: on CPU with x64 enabled,
 [`Pardiso`][splineax.Pardiso] if the optional `pardiso-mkl-jax` dependency is installed,
-otherwise [`KLU`][splineax.KLU] (both fast direct solves with factorization reuse); on a
-CUDA GPU, [`CuDSS`][splineax.CuDSS] if its optional dependency is installed (no x64
-requirement); and [`Spsolve`][splineax.Spsolve] otherwise. It exposes the same
-factorization API as `Pardiso`/`KLU`/`CuDSS`, so you can substitute it for any of them
-verbatim. When it dispatches to `Spsolve`, the factorization methods degrade to no-ops.
-Since `pardiso_mkl_jax` doesn't support complex matrices, `Auto` falls back to `KLU` for
-a complex operator even when `Pardiso` was otherwise selected; `CuDSS` needs no
-equivalent fallback, since it supports complex directly.
+otherwise [`KLU`][splineax.KLU] (both fast direct solves with factorization reuse). On a
+CUDA GPU it picks [`CuDSS`][splineax.CuDSS] if its optional dependency is installed,
+with no x64 requirement. Everything else gets [`Spsolve`][splineax.Spsolve]. It exposes
+the same factorization API as `Pardiso`/`KLU`/`CuDSS`, so you can substitute it for any
+of them verbatim. When it dispatches to `Spsolve`, the factorization methods degrade to
+no-ops. Since `pardiso_mkl_jax` doesn't support complex matrices, `Auto` falls back to
+`KLU` for a complex operator even when `Pardiso` was otherwise selected. `CuDSS` needs
+no equivalent fallback, since it supports complex directly.
 
 ```python
 import jax.numpy as jnp

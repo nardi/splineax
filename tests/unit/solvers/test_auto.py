@@ -116,7 +116,7 @@ def test_select_solver_prefers_cudss_on_gpu(
     Patches the availability check in both `_auto.py` (which gates the dispatch
     branch) and `_cudss.py` (which `CuDSS.__init__` itself checks), since `Pardiso`'s
     equivalent tests get away with patching only the former by relying on
-    `pardiso-mkl-jax` actually being installed in the test environment; cuDSS's real
+    `pardiso-mkl-jax` actually being installed in the test environment. cuDSS's real
     dependency is never installed here (it needs a CUDA GPU), so both must be patched
     for construction to succeed.
     """

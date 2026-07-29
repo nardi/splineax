@@ -185,7 +185,7 @@ Every other solver here frees its factorization through a native handle: a value
 must be released, and released in the right order relative to the solves that used it.
 [`CuDSS`][splineax.CuDSS] works differently. Every factorization lives in a global,
 size-bounded cache instead, so there is nothing to free by hand. Calling `release()` on
-a factorization only matters as an early memory-pressure hint; skip it and the cache
+a factorization only matters as an early memory-pressure hint. Skip it and the cache
 evicts old entries on its own once it is full.
 
 The one place this shows up in `splineax` itself: `factorize`/`factorize_symbolic`

@@ -144,7 +144,7 @@ def solver(request: pytest.FixtureRequest, enable_x64: None) -> lx.AbstractLinea
     skipped when its optional dependency isn't installed, and `CuDSS` when it isn't
     installed or no CUDA GPU is visible. Depends on `enable_x64` (from the top-level
     conftest) so every test using this fixture runs with x64 enabled for its whole
-    body, since `KLU`/`Pardiso` require it but no longer enable it themselves (`CuDSS`
-    has no such requirement, but running under x64 doesn't hurt it either).
+    body, since `KLU`/`Pardiso` require it but no longer enable it themselves. `CuDSS`
+    has no such requirement, but running under x64 does not hurt it either.
     """
     return request.param()

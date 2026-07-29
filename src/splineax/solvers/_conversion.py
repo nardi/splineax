@@ -157,7 +157,7 @@ def csr_from_coo_pattern(
     solve refactors with the real values from the operator being solved.
 
     `dtype` is the numeric dtype to cast (or fill) `values` to. `Pardiso` passes
-    `jnp.float64` (its solver is double-precision only); `CuDSS` passes the
+    `jnp.float64`, since its solver is double-precision only. `CuDSS` passes the
     pattern's own dtype, since it supports f32/f64/complex directly.
     """
     if values is None:

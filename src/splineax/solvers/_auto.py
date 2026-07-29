@@ -75,15 +75,16 @@ class AutoSparseLinearSolver(
     otherwise selected, keeping `Auto` able to solve anything `KLU` can. `factorize_symbolic`
     cannot make the same check, since a bare sparsity pattern carries no values to
     inspect, so it stays on `Pardiso`. Construct `KLU()` directly for
-    symbolic-factorization reuse on a complex operator. `CuDSS` has no such gap (it
-    supports complex directly), so it needs no equivalent fallback.
+    symbolic-factorization reuse on a complex operator. `CuDSS` has no such gap,
+    since it supports complex directly, so it needs no equivalent fallback.
     """
 
     platform: str | None = None
     """Platform to select for. If None, `jax.default_backend()` is used. Set to e.g.
     "cpu", "gpu", or "tpu" to override the choice explicitly. `Pardiso`/`KLU` are chosen
-    only when this resolves to "cpu" and x64 is enabled; `CuDSS` only when this resolves
-    to "gpu" and a CUDA (not ROCm) device is visible; otherwise `Spsolve` is chosen."""
+    only when this resolves to "cpu" and x64 is enabled. `CuDSS` is chosen only when it
+    resolves to "gpu" and a CUDA (not ROCm) device is visible. Otherwise `Spsolve` is
+    chosen."""
 
     @cached_property
     def _chosen_solver(self) -> Pardiso | KLU | CuDSS | Spsolve:

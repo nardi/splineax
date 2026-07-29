@@ -45,8 +45,8 @@ if TYPE_CHECKING:
 # Row and column indices plus values, unsorted: the matrix as read off the operator,
 # before it has been turned into a real (sorted) CSR triple. Kept in this loose COO
 # shape rather than eagerly sorted, so `_CuDSSBasicState.transpose` can swap rows and
-# columns directly (mirrors `_klu.py`'s `_COO`); `csr_from_coo_pattern` does the actual
-# CSR conversion right before a solve needs it.
+# columns directly (mirrors `_klu.py`'s `_COO`). `csr_from_coo_pattern` does the
+# actual CSR conversion right before a solve needs it.
 _COO = tuple[Integer[Array, " nse"], Integer[Array, " nse"], Inexact[Array, " nse"]]
 
 # cuDSS always sees the full stored matrix (both triangles), never just one, because
@@ -63,7 +63,7 @@ def _cudss_available() -> bool:
     must stay deferred until a solve actually runs (mirrors `_pardiso.py`'s
     `_pardiso_available`).
 
-    `find_spec` on a dotted name only returns `None` for a missing *submodule*; if
+    `find_spec` on a dotted name only returns `None` for a missing *submodule*. If
     the top-level package itself isn't installed at all (the common case here, since
     the binding is an optional dependency), it raises `ModuleNotFoundError` instead,
     which is caught here alongside the "not installed" case it otherwise signals.
@@ -110,7 +110,7 @@ def _mtype_id(operator: AbstractLinearOperator) -> int:
     `0` general (LU), `1` symmetric (LDL^T), `3` symmetric positive semidefinite
     (Cholesky). cuDSS also has Hermitian ids (`2`, `4`), but lineax has no
     `is_hermitian` check to drive them from here, so they never come out of this
-    function; `CuDSS.transpose`'s Hermitian handling is written to support them
+    function. `CuDSS.transpose`'s Hermitian handling is written to support them
     anyway, for when that tag exists to select one.
     """
     if lx.is_symmetric(operator):
@@ -122,7 +122,7 @@ def _mtype_id_for_sparsity(sparsity: _Sparsity) -> int:
     """The cuDSS matrix-type id for a bare `factorize_symbolic` sparsity pattern.
 
     Only three of the seven `_Sparsity` types carry lineax tags at all
-    (`BCOOLinearOperator`, `BCSRLinearOperator`, `SparseJacobianLinearOperator`); a
+    (`BCOOLinearOperator`, `BCSRLinearOperator`, `SparseJacobianLinearOperator`). A
     bare `BCOO`/`BCSR` or coloring carries no tags, so there is nothing to read and
     this falls back to `0` (general), the always-correct choice.
     """
@@ -183,7 +183,7 @@ def _cudss_solve(
 ) -> Inexact[Array, " n"]:
     """Run `spineax.cudss.solve`, conjugating in and out for the Hermitian case.
 
-    cuDSS has no native transpose solve; a Hermitian-family state instead reuses A's
+    cuDSS has no native transpose solve. A Hermitian-family state instead reuses A's
     own factors and solves `conj(A) conj(x) = conj(b)` in place of `A^T x = b` (see
     `CuDSS.transpose`), which only needs the right-hand side conjugated going in and
     the solution conjugated coming out. `conjugate_solve` is `False` everywhere else,
@@ -251,9 +251,9 @@ class _CuDSSSymbolicScope(NamedTuple):
             if isinstance(matrix, BCSR) and matrix.indices_sorted
             else BCSR.from_bcoo(bcoo)
         )
-        # The token's own dtype was fixed when the scope was opened; every operator
-        # solved through it must match, so cast here rather than let a confusing
-        # dtype error surface from inside the binding at `compute` time.
+        # The token's own dtype was fixed when the scope was opened, and every
+        # operator solved through it must match. Cast here rather than let a
+        # confusing dtype error surface from inside the binding at `compute` time.
         values = matrix_bcsr.data.astype(self.token.dtype)
 
         return _CuDSSSymbolicState(
@@ -273,9 +273,9 @@ class _CuDSSSymbolicState(eqx.Module):
 
     The analysis ran once, when the scope was opened. Each `compute` reuses `token`
     and refactors numerically for `values` (this state's own operator's values), the
-    symbolic reuse the scope exists for; see `CuDSS.compute`. `.factorize()` promotes
-    this to a `_CuDSSNumericState` by running that numeric factorization once, to
-    reuse it across many solves; it does not release anything itself, since the
+    symbolic reuse the scope exists for, see `CuDSS.compute`. `.factorize()` promotes
+    this to a `_CuDSSNumericState` by running that numeric factorization once, so it
+    can be reused across many solves. It does not release anything itself, since the
     resulting token is (or shares the id of) the one the outer `factorize_symbolic`
     scope already owns and will release when it closes.
     """
@@ -360,10 +360,10 @@ class CuDSS(AbstractSparseLinearSolver[_CuDSSState]):
     rebuilding one that is still referenced but was evicted. See the "Advanced
     usage" guide for details.
 
-    Requires the optional cuDSS dependency (`pip install splineax[cudss]`; CUDA 13,
-    Python >=3.12, x86_64 Linux only). Constructing `CuDSS()` raises `ImportError`
-    if it isn't installed. `AutoSparseLinearSolver` prefers `CuDSS` on a CUDA GPU
-    when it is.
+    Requires the optional cuDSS dependency, `pip install splineax[cudss]`, which
+    needs CUDA 13, Python >=3.12, and x86_64 Linux. Constructing `CuDSS()` raises
+    `ImportError` if it isn't installed. `AutoSparseLinearSolver` prefers `CuDSS`
+    on a CUDA GPU when it is.
 
     A plain, un-stated solve (`lx.linear_solve(op, b, solver=CuDSS())` with no
     `state=`) re-runs the analysis on every call, minting a fresh cache entry each
@@ -523,8 +523,8 @@ class CuDSS(AbstractSparseLinearSolver[_CuDSSState]):
         other solver's `compute` always re-selects pivots): skips pivot re-selection,
         so it is cheaper than solving through `factorize`, but can lose accuracy if
         the values changed by enough that the old pivots are no longer good ones.
-        `numeric_state` must share `operator`'s sparsity pattern; nothing here checks
-        that, so a mismatched pattern is undefined behaviour.
+        `numeric_state` must share `operator`'s sparsity pattern. Nothing here
+        checks that, so a mismatched pattern is undefined behaviour.
         """
         cudss = _spineax_cudss()
         matrix = operator_to_sparse_matrix(operator, error_prefix="`CuDSS.refactorize`")
@@ -556,14 +556,14 @@ class CuDSS(AbstractSparseLinearSolver[_CuDSSState]):
 
         match state:
             case _CuDSSNumericState(token=token, conjugate_solve=conjugate_solve):
-                # Numeric factorization already done eagerly; just solve against it.
+                # Numeric factorization already done eagerly, so just solve.
                 b = b.astype(token.dtype)
                 x = _cudss_solve(cudss, token, b, ir_nsteps, conjugate_solve)
             case _CuDSSSymbolicState(
                 token=token, values=values, conjugate_solve=conjugate_solve
             ):
                 # Reuse the symbolic analysis and refactor numerically for these
-                # values; this is the symbolic reuse the scope exists for.
+                # values. This is the symbolic reuse the scope exists for.
                 token = cudss.factorize(token, values)
                 b = b.astype(token.dtype)
                 x = _cudss_solve(cudss, token, b, ir_nsteps, conjugate_solve)
@@ -628,9 +628,9 @@ class CuDSS(AbstractSparseLinearSolver[_CuDSSState]):
                         new_token, packed_structures, shape[::-1], False
                     ), {}
                 # Symmetric/Hermitian/SPD/HPD: A^T shares the same factors, no new
-                # factorization needed (mtype 2/4, Hermitian, need `conj` around the
-                # solve; see `_cudss_solve`, and the `_mtype_id` docstring for why
-                # they are currently unreachable here).
+                # factorization needed. Mtype 2/4 (Hermitian) need `conj` around the
+                # solve, see `_cudss_solve`, and the `_mtype_id` docstring for why
+                # they are currently unreachable here.
                 conjugate_solve = token.mtype_id in (2, 4)
                 return _CuDSSNumericState(
                     token, packed_structures, shape[::-1], conjugate_solve
@@ -717,7 +717,7 @@ class CuDSS(AbstractSparseLinearSolver[_CuDSSState]):
                 packed_structures=packed_structures,
                 shape=shape,
             ):
-                # The analyzed pattern is unchanged; only the values `compute`
+                # The analyzed pattern is unchanged. Only the values `compute`
                 # refactors with each call need conjugating.
                 return _CuDSSSymbolicState(
                     token, jnp.conj(values), packed_structures, shape, False
