@@ -30,11 +30,13 @@ from .conftest import (
     RIGHT_HAND_SIDE,
     SQUARE_MATRIX,
     OperatorFactory,
+    requires_cpu_backend,
 )
 
 # KLU requires 64-bit mode but no longer enables it as an import side effect, so every
 # test in this module gets it from the shared `enable_x64` fixture (tests/conftest.py).
-pytestmark = pytest.mark.usefixtures("enable_x64")
+# It is also CPU-only, so the whole module skips on a GPU machine.
+pytestmark = [pytest.mark.usefixtures("enable_x64"), requires_cpu_backend]
 
 # ---------------------------------------------------------------------------
 # Spy helpers

@@ -28,6 +28,15 @@ from splineax.solvers._auto import _cuda_backend_available
 from splineax.solvers._cudss import _cudss_available
 from splineax.solvers._pardiso import _pardiso_available
 
+# `KLU`/`Pardiso` wrap CPU-only libraries and raise at trace time on any other
+# platform, so on a GPU machine their tests have to skip for the same reason
+# `CuDSS`'s skip on a CPU one. Gate on the default backend, since nothing in the
+# suite pins arrays to a specific device.
+requires_cpu_backend = pytest.mark.skipif(
+    jax.default_backend() != "cpu",
+    reason="`KLU`/`Pardiso` are CPU-only and JAX's default backend is not CPU",
+)
+
 
 class OperatorFactory(Protocol):
     """Builds the operator under test from a dense reference matrix."""
@@ -117,12 +126,16 @@ def make_operator(request: pytest.FixtureRequest) -> OperatorFactory:
 @pytest.fixture(
     params=[
         Spsolve,
-        KLU,
+        pytest.param(KLU, marks=requires_cpu_backend),
         pytest.param(
             Pardiso,
-            marks=pytest.mark.skipif(
-                not _pardiso_available(), reason="pardiso-mkl-jax is not installed"
-            ),
+            marks=[
+                pytest.mark.skipif(
+                    not _pardiso_available(),
+                    reason="pardiso-mkl-jax is not installed",
+                ),
+                requires_cpu_backend,
+            ],
         ),
         pytest.param(
             CuDSS,
@@ -141,8 +154,9 @@ def solver(request: pytest.FixtureRequest, enable_x64: None) -> lx.AbstractLinea
 
     `AutoSparseLinearSolver` dispatches to `Pardiso` (if installed) or `KLU` on the
     (CPU) test platform when x64 is enabled, otherwise to `Spsolve`. `Pardiso` itself is
-    skipped when its optional dependency isn't installed, and `CuDSS` when it isn't
-    installed or no CUDA GPU is visible. Depends on `enable_x64` (from the top-level
+    skipped when its optional dependency isn't installed, `CuDSS` when it isn't
+    installed or no CUDA GPU is visible, and both `KLU` and `Pardiso` when the default
+    backend is not CPU. Depends on `enable_x64` (from the top-level
     conftest) so every test using this fixture runs with x64 enabled for its whole
     body, since `KLU`/`Pardiso` require it but no longer enable it themselves. `CuDSS`
     has no such requirement, but running under x64 does not hurt it either.

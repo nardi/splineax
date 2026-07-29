@@ -32,12 +32,14 @@ from .conftest import (
     ZERO_DIAGONAL_MATRIX,
     ZERO_DIAGONAL_RIGHT_HAND_SIDE,
     OperatorFactory,
+    requires_cpu_backend,
 )
 
 # Pardiso requires 64-bit mode but does not enable it as an import side effect, so
 # every test in this module gets it from the shared `enable_x64` fixture
-# (tests/conftest.py).
-pytestmark = pytest.mark.usefixtures("enable_x64")
+# (tests/conftest.py). It is also CPU-only, so the whole module skips on a GPU
+# machine.
+pytestmark = [pytest.mark.usefixtures("enable_x64"), requires_cpu_backend]
 
 
 def test_pardiso_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:

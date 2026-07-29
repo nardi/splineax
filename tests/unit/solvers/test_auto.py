@@ -25,6 +25,7 @@ from jax.experimental.sparse import BCOO
 
 import splineax.solvers._auto as _auto_module
 import splineax.solvers._cudss as _cudss_module
+import splineax.solvers._pardiso as _pardiso_module
 from splineax import (
     KLU,
     AutoSparseLinearSolver,
@@ -42,26 +43,46 @@ from splineax.solvers._cudss import _cudss_available
 from splineax.solvers._klu import _KLUBasicState, _KLUNumericState, _KLUSymbolicState
 from splineax.solvers._pardiso import _pardiso_available
 
-from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
+from .conftest import (
+    RIGHT_HAND_SIDE,
+    SQUARE_MATRIX,
+    OperatorFactory,
+    requires_cpu_backend,
+)
 
 KLU_STATE_TYPES = (_KLUBasicState, _KLUSymbolicState, _KLUNumericState)
+
+
+@pytest.fixture
+def pardiso_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `Pardiso` look installed to both the places that ask.
+
+    `_auto.py`'s copy gates the dispatch branch, and `_pardiso.py`'s gates
+    `Pardiso.__init__`. Patching only the first leaves `_chosen_solver` picking
+    `Pardiso` and then failing to construct it, so these dispatch tests are only
+    environment-independent (the point of monkeypatching at all) with both.
+    """
+    monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
+    monkeypatch.setattr(_pardiso_module, "_pardiso_available", lambda: True)
+
 
 # ---------------------------------------------------------------------------
 # Solver selection
 # ---------------------------------------------------------------------------
 
 
+@requires_cpu_backend
 def test_select_solver_prefers_pardiso_on_cpu_with_x64(
-    make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
+    make_operator: OperatorFactory, pardiso_installed: None
 ) -> None:
     """With no override, `AutoSparseLinearSolver` selects `Pardiso` on the CPU test
     platform when x64 is enabled and `pardiso-mkl-jax` is installed."""
-    monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
     operator = make_operator(SQUARE_MATRIX)
     with jax.enable_x64(True):
         assert isinstance(AutoSparseLinearSolver().select_solver(operator), Pardiso)
 
 
+@requires_cpu_backend
 def test_select_solver_falls_back_to_klu_when_pardiso_unavailable(
     make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -73,6 +94,7 @@ def test_select_solver_falls_back_to_klu_when_pardiso_unavailable(
         assert isinstance(AutoSparseLinearSolver().select_solver(operator), KLU)
 
 
+@requires_cpu_backend
 def test_select_solver_falls_back_to_spsolve_on_cpu_without_x64(
     make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -85,11 +107,17 @@ def test_select_solver_falls_back_to_spsolve_on_cpu_without_x64(
 
 
 def test_select_solver_platform_override(
-    make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
+    make_operator: OperatorFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    pardiso_installed: None,
 ) -> None:
     """An explicit `platform` override forces the corresponding solver, without running
-    a solve (so no real GPU is required to check the non-CPU branch)."""
-    monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
+    a solve (so neither a real GPU nor a real CPU backend is required here).
+
+    cuDSS is forced unavailable so the "gpu" branch means `Spsolve` even when this
+    really is a cuDSS-capable GPU machine. The cuDSS branch has its own tests below.
+    """
+    monkeypatch.setattr(_auto_module, "_cudss_available", lambda: False)
     operator = make_operator(SQUARE_MATRIX)
     with jax.enable_x64(True):
         assert isinstance(
@@ -157,12 +185,14 @@ def test_select_solver_falls_back_to_spsolve_on_rocm(
     )
 
 
+@requires_cpu_backend
 def test_select_solver_cpu_unaffected_by_cudss_availability(
-    make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
+    make_operator: OperatorFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    pardiso_installed: None,
 ) -> None:
     """`CuDSS` availability must not change CPU dispatch: `Pardiso`/`KLU` are still
     chosen on CPU with x64 enabled, regardless of what cuDSS reports."""
-    monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
     monkeypatch.setattr(_auto_module, "_cudss_available", lambda: True)
     monkeypatch.setattr(_auto_module, "_cuda_backend_available", lambda: True)
     operator = make_operator(SQUARE_MATRIX)
@@ -187,13 +217,13 @@ def test_auto_solve_matches_numpy(
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 
+@requires_cpu_backend
 def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
-    make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
+    make_operator: OperatorFactory, pardiso_installed: None
 ) -> None:
     """`pardiso_mkl_jax` doesn't support complex matrices, so `init`/`factorize` must
     fall back to `KLU` for a complex operator even when `Pardiso` was otherwise
     selected, keeping `Auto` able to solve anything `KLU` can."""
-    monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
 
     with jax.enable_x64(True):
         # Built inside the block: `.astype(jnp.complex128)` outside it would silently
@@ -239,6 +269,7 @@ def test_solvers_satisfy_sparse_linear_solver_protocol() -> None:
         assert isinstance(CuDSS(), SparseLinearSolver)
 
 
+@requires_cpu_backend
 def test_states_and_scopes_satisfy_protocols(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
