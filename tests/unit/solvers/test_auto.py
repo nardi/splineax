@@ -39,6 +39,7 @@ from splineax.solvers import (
     SparseSymbolicScope,
     SparseSymbolicState,
 )
+from splineax.solvers._auto import _cuda_backend_available
 from splineax.solvers._cudss import _cudss_available
 from splineax.solvers._klu import _KLUBasicState, _KLUNumericState, _KLUSymbolicState
 from splineax.solvers._pardiso import _pardiso_available
@@ -107,31 +108,35 @@ def test_select_solver_falls_back_to_spsolve_on_cpu_without_x64(
 
 
 def test_select_solver_platform_override(
-    make_operator: OperatorFactory,
-    monkeypatch: pytest.MonkeyPatch,
-    pardiso_installed: None,
+    make_operator: OperatorFactory, pardiso_installed: None
 ) -> None:
     """An explicit `platform` override forces the corresponding solver, without running
     a solve (so neither a real GPU nor a real CPU backend is required here).
 
-    cuDSS is forced unavailable so the "gpu" branch means `Spsolve` even when this
-    really is a cuDSS-capable GPU machine. The cuDSS branch has its own tests below.
+    The "gpu" branch is `CuDSS` on a machine that can actually run it and `Spsolve`
+    everywhere else, so the expectation comes from the same two predicates
+    `_chosen_solver` consults rather than being hard-coded either way. Note it does
+    not depend on x64, unlike the "cpu" branch.
     """
-    monkeypatch.setattr(_auto_module, "_cudss_available", lambda: False)
     operator = make_operator(SQUARE_MATRIX)
+    gpu_expected = (
+        CuDSS if _cudss_available() and _cuda_backend_available() else Spsolve
+    )
     with jax.enable_x64(True):
         assert isinstance(
             AutoSparseLinearSolver(platform="cpu").select_solver(operator), Pardiso
         )
         assert isinstance(
-            AutoSparseLinearSolver(platform="gpu").select_solver(operator), Spsolve
+            AutoSparseLinearSolver(platform="gpu").select_solver(operator),
+            gpu_expected,
         )
     with jax.enable_x64(False):
         assert isinstance(
             AutoSparseLinearSolver(platform="cpu").select_solver(operator), Spsolve
         )
         assert isinstance(
-            AutoSparseLinearSolver(platform="gpu").select_solver(operator), Spsolve
+            AutoSparseLinearSolver(platform="gpu").select_solver(operator),
+            gpu_expected,
         )
 
 
