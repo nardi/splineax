@@ -539,6 +539,42 @@ def test_gpu_numeric_state_reuses_factorization_without_rebuilds(
 
 
 @pytestmark_gpu
+def test_gpu_threading_the_token_avoids_rebuilds(
+    make_operator: OperatorFactory,
+) -> None:
+    """Chaining each numeric phase from the token the previous one returned costs no
+    rebuilds at all, for several different matrices sharing one sparsity pattern.
+
+    This is the premise the whole `factorize_symbolic` redesign rests on, so it is
+    worth pinning down on real hardware. A numeric phase *renames* its registry entry
+    (`BatchTokenRegistry::rekey` in spineax's solver.cpp) rather than destroying it, so
+    the analysis survives and only the old id stops resolving. Contrast
+    `test_gpu_symbolic_scope_solves_correctly_across_values`, which restarts from the
+    scope's analyzed token every time and pays one rebuild per solve.
+    """
+    from spineax import cudss as spineax_cudss
+
+    solver = CuDSS()
+    scales = [2.0, 0.5, 3.0, 1.5]
+    rebuilds_before = spineax_cudss.rebuild_count()
+
+    with solver.factorize(make_operator(SQUARE_MATRIX)) as state:
+        solution = solver.compute(state, RIGHT_HAND_SIDE, {})[0]
+        assert jnp.allclose(solution, _expected(SQUARE_MATRIX), atol=1e-5)
+        for scale in scales:
+            # Each refactorize starts from the token the previous call handed back,
+            # which is still resident, rather than from the original analysis.
+            state = solver.refactorize(state, make_operator(scale * SQUARE_MATRIX))
+            solution = solver.compute(state, RIGHT_HAND_SIDE, {})[0]
+            assert jnp.allclose(solution, _expected(scale * SQUARE_MATRIX), atol=1e-5)
+
+    rebuilds = spineax_cudss.rebuild_count() - rebuilds_before
+    assert rebuilds == 0, (
+        f"threading the token should never rebuild the analysis, got {rebuilds}"
+    )
+
+
+@pytestmark_gpu
 def test_gpu_symbolic_scope_solves_correctly_across_values(
     make_operator: OperatorFactory,
 ) -> None:
