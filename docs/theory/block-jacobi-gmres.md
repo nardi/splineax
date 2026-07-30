@@ -358,7 +358,7 @@ robustness is wanted:
 | LU | 1 | general, no information about rank |
 | QR | 2 | better numerical stability, no information about rank |
 | Pivoted QR | 2 to 4 | reveals rank |
-| SVD | 10 to 20 | reveals rank, gives the pseudo-inverse |
+| SVD | 10 to 20 | reveals rank |
 
 Because the total is $(n/s) \cdot O(b^3)$, or equivalently $O(n b^2 / (1-f))$, the choice of
 method and the cap on $b$ are the two levers on the cost of this stage. That cost is paid on
@@ -369,13 +369,27 @@ The reason to pay for a rank-revealing method is that a diagonal block can be si
 when $A$ is not. A block containing a structurally zero diagonal, as arises in saddle-point
 systems, is the standard example. An ordinary inverse of such a block does not exist, and a
 computed one contains arbitrarily large entries that propagate into the iteration and destroy
-it. The **pseudo-inverse** is the correct object instead. It inverts the matrix on the subspace
-where it is invertible and maps the rest to zero, and its norm is bounded by the reciprocal of
-the smallest non-negligible singular value. A block carrying no usable information becomes a
-block contributing nothing, rather than a block contributing noise, and this holds without
-introducing any regularisation parameter that would need tuning. Both the SVD and pivoted QR
-supply what is needed, the former giving the true pseudo-inverse and the latter a bounded
-approximation to it at a fraction of the cost.
+it. Both the SVD and pivoted QR expose which directions of a block are numerically absent, the
+former through small singular values and the latter through small entries on the diagonal of
+its triangular factor.
+
+Those directions are then left **unpreconditioned**: the inverse acts as the identity on them
+rather than inverting them, and rather than sending them to zero as a pseudo-inverse would.
+That choice looks minor and is not. Preconditioning is applied on the left, so the iteration
+works with $M A x = M b$, and the solutions of that system coincide with those of $A x = b$
+only when $M$ has no null space. Sending a direction to zero would put one there, and the
+iteration could then converge, in good faith, to a vector that does not solve the original
+system. Acting as the identity keeps $M$ invertible and costs nothing beyond leaving those
+unknowns to the Krylov method to sort out.
+
+The same reasoning bounds how small a direction may be before it is discarded. The threshold is
+deliberately loose, around the square root of the working precision rather than the working
+precision itself, which bounds the condition number of $M$ by its reciprocal. Inverting a
+direction near the limit of the precision would gain nothing numerically and would make $M$ so
+ill-conditioned that $M(b - Ax)$ ceases to track $b - Ax$, which matters because it is the
+former that the iteration measures. A solve is therefore certified at the end against the
+unpreconditioned residual, at the cost of one further product with $A$, so that a reported
+convergence means convergence of the system that was asked about.
 
 ## Algorithm
 
@@ -389,7 +403,7 @@ Collecting the stages:
   3. Determine, for each stored entry, which blocks contain it and where.
   4. Given values, assemble the diagonal blocks and invert each of them.
   5. Solve the reordered system with restarted GMRES, preconditioned by
-     [algorithm 3](#algo3).
+     [algorithm 3](#algo3), and check the residual of the result against the tolerance.
   6. Undo the relabelling on the solution.
 
 Steps 1 to 3 depend only on the pattern of $A$. Step 4 depends on its values, and step 5 on
