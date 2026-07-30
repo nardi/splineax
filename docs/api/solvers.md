@@ -20,6 +20,18 @@
 
 ---
 
+::: splineax.BlockJacobiGMRES
+
+---
+
+::: splineax.Ordering
+
+---
+
+::: splineax.BlockInverse
+
+---
+
 ::: splineax.solvers.ReorderingScheme
 
 ---

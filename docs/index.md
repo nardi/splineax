@@ -1,11 +1,11 @@
 # splineax
 
-Sparse linear operators and direct solvers for
+Sparse linear operators and solvers for
 [Lineax](https://github.com/patrick-kidger/lineax).
 
 `splineax` lets you keep a linear system in its native sparse storage
-(`jax.experimental.sparse.BCOO` / `BCSR`) instead of densifying it, and solve it with a
-sparse *direct* solver that plugs straight into `lineax.linear_solve`.
+(`jax.experimental.sparse.BCOO` / `BCSR`) instead of densifying it, and solve it with a sparse
+solver that plugs straight into `lineax.linear_solve`.
 
 It provides:
 
@@ -16,11 +16,15 @@ It provides:
   [`SparseJacobianLinearOperator`][splineax.SparseJacobianLinearOperator] represents the
   Jacobian of a function sparsely, detecting its sparsity pattern and constructing a coloring automatically (via
   [asdex](https://github.com/adrhill/asdex)), which allows for efficient materialization into a sparse matrix by the solvers.
-- **Solvers**: [`Spsolve`][splineax.Spsolve] (any backend, wraps
+- **Direct solvers**: [`Spsolve`][splineax.Spsolve] (any backend, wraps
   `jax.experimental.sparse.linalg.spsolve`), [`KLU`][splineax.KLU] (CPU-only, wraps the
   SuiteSparse KLU library via `klujax`, with factorization reuse), and
   [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] which picks one based on the
   platform.
+- An **iterative solver**: [`BlockJacobiGMRES`][splineax.BlockJacobiGMRES], written only from
+  array operations, so the reordering, the preconditioner and the iteration all compile into a
+  single computation that runs on any backend. See
+  [the theory page](theory/block-jacobi-gmres.md) for how it works.
 - A [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol for separating
   factorization from solving.
 
