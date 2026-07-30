@@ -32,6 +32,12 @@ from splineax import (
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
+# Solvers whose factorization lives inside a native library, so that freeing it has to be
+# ordered after any solve that reads it. The two tests at the end of this module turn on that
+# distinction. `Spsolve` owns nothing because it has no separate factorization at all, and
+# `BlockJacobiGMRES` owns nothing because its factorization is ordinary JAX arrays.
+HANDLE_OWNING_SOLVERS = (splx.KLU, splx.Pardiso)
+
 
 def test_factorize_solves_correctly(
     make_operator: OperatorFactory, solver: AbstractSparseLinearSolver
@@ -222,8 +228,8 @@ def test_symbolic_scope_full_jit_raw_linear_solve_raises_helpful_error(
     `test_factorize_symbolic_opens_entirely_under_jit` above for why. `HandleDependencies`
     now catches this at trace time, in `compute`, and raises a clear error pointing at
     `splineax.linear_solve` instead of letting it surface later as an opaque tracer error
-    or a native use-after-free. `Spsolve` owns no handle, so nothing needs to order its
-    (no-op) release, and it solves normally either way.
+    or a native use-after-free. A solver owning no handle has nothing to order, so it solves
+    normally either way.
     """
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     indices, shape = sparsity.indices, sparsity.shape
@@ -241,7 +247,7 @@ def test_symbolic_scope_full_jit_raw_linear_solve_raises_helpful_error(
     if isinstance(solver, splx.AutoSparseLinearSolver):
         resolved = solver.select_solver(BCOOLinearOperator(sparsity))
 
-    if isinstance(resolved, splx.Spsolve):
+    if not isinstance(resolved, HANDLE_OWNING_SOLVERS):
         expected = jnp.linalg.solve(
             np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE)
         )
@@ -402,7 +408,7 @@ def test_as_solver_full_jit_raw_linear_solve_raises_helpful_error(
     if isinstance(solver, splx.AutoSparseLinearSolver):
         resolved = solver.select_solver(BCOOLinearOperator(sparsity))
 
-    if isinstance(resolved, splx.Spsolve):
+    if not isinstance(resolved, HANDLE_OWNING_SOLVERS):
         expected = jnp.linalg.solve(
             np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE)
         )

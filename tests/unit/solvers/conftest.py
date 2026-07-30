@@ -20,6 +20,7 @@ from splineax import (
     AutoSparseLinearSolver,
     BCOOLinearOperator,
     BCSRLinearOperator,
+    BlockJacobiGMRES,
     Pardiso,
     Spsolve,
 )
@@ -122,16 +123,25 @@ def make_operator(request: pytest.FixtureRequest) -> OperatorFactory:
             ),
         ),
         AutoSparseLinearSolver,
+        BlockJacobiGMRES,
     ],
-    ids=["spsolve", "klu", "pardiso", "auto"],
+    ids=["spsolve", "klu", "pardiso", "auto", "block_jacobi"],
 )
 def solver(request: pytest.FixtureRequest, enable_x64: None) -> lx.AbstractLinearSolver:
-    """Yields an instance of each sparse direct solver under test.
+    """Yields an instance of each sparse solver under test.
 
     `AutoSparseLinearSolver` dispatches to `Pardiso` (if installed) or `KLU` on the
     (CPU) test platform when x64 is enabled, otherwise to `Spsolve`. `Pardiso` itself is
     skipped when its optional dependency isn't installed. Depends on `enable_x64` (from
     the top-level conftest) so every test using this fixture runs with x64 enabled for
     its whole body, since `KLU`/`Pardiso` require it but no longer enable it themselves.
+
+    `BlockJacobiGMRES` is iterative rather than direct, so it is the one entry here whose
+    accuracy comes from a tolerance rather than from a factorization. It still satisfies every
+    test in this directory, because the reference matrices are small enough to fit a single
+    block, which makes its preconditioner an exact inverse and converges it immediately. Its
+    default tolerances are left alone deliberately: the reference matrices are `float32`, so
+    asking for more than about `1e-7` would put the target below what the precision can reach,
+    and GMRES would exhaust its Krylov space and report breakdown rather than converge.
     """
     return request.param()
