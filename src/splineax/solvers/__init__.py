@@ -27,3 +27,6 @@ from ._sparse import (
 )
 from ._spsolve import ReorderingScheme as ReorderingScheme
 from ._spsolve import Spsolve as Spsolve
+from .native import BlockInverse as BlockInverse
+from .native import BlockJacobiGMRES as BlockJacobiGMRES
+from .native import Ordering as Ordering

@@ -23,6 +23,15 @@ from .solvers import (
     AutoSparseLinearSolver as AutoSparseLinearSolver,
 )
 from .solvers import (
+    BlockInverse as BlockInverse,
+)
+from .solvers import (
+    BlockJacobiGMRES as BlockJacobiGMRES,
+)
+from .solvers import (
+    Ordering as Ordering,
+)
+from .solvers import (
     Pardiso as Pardiso,
 )
 from .solvers import (

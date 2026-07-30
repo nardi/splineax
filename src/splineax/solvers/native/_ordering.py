@@ -163,7 +163,8 @@ def _reverse_cuthill_mckee(
                     jnp.where(newly_reached, parent_rank, _UNRANKED),
                 )
             )
-            count = jnp.sum(newly_reached)
+            # Cast because `sum` widens to int64 under x64, while the counter stays int32.
+            count = jnp.sum(newly_reached).astype(jnp.int32)
             assigned = jnp.where(positions < count, numbered + positions, rank[ranking])
             return rank.at[ranking].set(assigned), newly_reached, numbered + count
 
