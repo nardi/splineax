@@ -40,11 +40,12 @@ separate analysis stage searching for a good order before touching any values.
 
 An iterative method avoids factoring altogether. A **Krylov subspace method** builds the
 space spanned by $b, Ab, A^2 b, \ldots$ and takes the best approximation to $x$ available in
-it, so the only thing it ever asks of $A$ is the ability to multiply a vector. The method
-used here is the **generalized minimal residual** method (GMRES), which chooses the
-approximation minimising the residual norm $\lVert b - A x \rVert$ over that space, and which
-places no symmetry or definiteness requirement on $A$. In its restarted form the space is
-capped at a fixed dimension and rebuilt from the current approximation, which bounds memory.
+it, so the only thing it ever asks of $A$ is the ability to multiply a vector. The method used
+here is the **generalized minimal residual** method (GMRES), due to
+[Saad and Schultz](#ref-saad-schultz), which chooses the approximation minimising the residual
+norm $\lVert b - A x \rVert$ over that space, and which places no symmetry or definiteness
+requirement on $A$. In its restarted form the space is capped at a fixed dimension and rebuilt
+from the current approximation, which bounds memory.
 
 How fast a Krylov method converges depends on the spectrum of $A$, and for most matrices
 arising from discretised problems it converges too slowly to be useful on its own. The remedy
@@ -52,6 +53,7 @@ is to supply an operator $M \approx A^{-1}$, so that the iteration effectively w
 $M A$, whose spectrum is clustered near one. Choosing $M$ is a trade-off with no general
 solution: a more accurate $M$ costs more to build and more to apply on every iteration, and
 the exact inverse would be an admission that the whole exercise was unnecessary.
+[Saad](#ref-saad) surveys the Krylov methods and the preconditioners they are paired with.
 
 Two ways of storing a sparse matrix appear throughout what follows. The **coordinate** form
 (COO) stores three vectors of length $\mathrm{nse}$, giving the row index, the column index
@@ -143,8 +145,9 @@ express as array operations.
 
 ### Level-set ordering
 
-The classical heuristic is **reverse Cuthill-McKee** (RCM), which numbers vertices in
-breadth-first order and then reverses the result.
+The classical heuristic is **reverse Cuthill-McKee** (RCM): number the vertices in
+breadth-first order, following [Cuthill and McKee](#ref-cuthill-mckee), then reverse the
+result, which is [George and Liu](#ref-george-liu)'s addition.
 
 > <span id="algo1"></span>**Algorithm 1** (level-set ordering)
   1. Choose an unvisited vertex of minimum degree as the seed, and assign it level $0$.
@@ -162,8 +165,8 @@ is therefore bounded by the largest number of vertices in any two consecutive le
 the levels thin makes the band narrow, and this bound holds no matter how vertices are ordered
 within a level. Ordering within a level, by parent and then by degree, is a refinement that
 improves the envelope in practice rather than the source of the guarantee. Reversal at the end
-leaves the bandwidth unchanged but reduces the envelope, which is why the reversed form is
-preferred.
+leaves the bandwidth unchanged but never increases the envelope, which is
+[George and Liu](#ref-george-liu)'s observation and the reason the reversed form is preferred.
 
 Expressing this as array operations is straightforward, with one caveat. Each round of step 2
 is a pair of reductions over the edge list, cheap and independent of $n$ beyond the edge count,
@@ -176,8 +179,9 @@ heuristic.
 
 ### Spectral ordering
 
-The second heuristic avoids the level-count problem by replacing the search with an
-eigenvector computation. Let $L = D - W$ be the **graph Laplacian**, where $W$ is the
+The second heuristic, due to [Barnard, Pothen and Simon](#ref-barnard), avoids the level-count
+problem by replacing the search with an eigenvector computation. Let $L = D - W$ be the
+**graph Laplacian**, where $W$ is the
 adjacency matrix of the symmetrised pattern and $D$ the diagonal matrix of vertex degrees. $L$
 is symmetric and positive semidefinite, and its smallest eigenvalue is zero with the constant
 vector as eigenvector. The eigenvector of the second smallest eigenvalue is the **Fiedler
@@ -199,8 +203,11 @@ problem of minimising $\sum_{(i,j)} (\pi_i - \pi_j)^2$ over permutations $\pi$, 
 closely related to the envelope.[^minsum]
 
 [^minsum]: The discrete problem is the minimum 2-sum problem. The relaxation and the envelope
-bound it gives are due to Barnard, Pothen and Simon, who also report envelope reductions of up
-to a factor of two over level-set orderings on some matrices.
+bound it gives are due to [Barnard, Pothen and Simon](#ref-barnard), who report envelope
+reductions of more than a factor of two over level-set orderings on some matrices. That result
+is for their full multilevel algorithm with a refinement pass, not for sorting by a single
+eigenvector as in [algorithm 2](#algo2), which measures worse than the level-set ordering on
+the patterns tested here.
 
 Steps 1 to 4 exist rather than simply taking the Fiedler vector because the second eigenvalue
 is not always simple. On a square grid, symmetry between the two coordinate directions makes it
@@ -213,11 +220,12 @@ failure into a choice, at a cost of one bandwidth evaluation per candidate. Comp
 vectors, incidentally, turn out to be perfectly good orderings, because they keep each
 component contiguous.
 
-The Laplacian is the clearest implicit operator in the method. An eigensolver asks only for
-repeated products with a vector, never for an individual entry, so $L$ is never assembled. Its
-product is evaluated directly from the edge list and the degree vector. Note also that only
-the pattern of $A$ enters this stage, never its values, which is why the reordering can be
-computed once for a pattern and reused for every matrix sharing it.
+The Laplacian is the clearest implicit operator in the method. A block eigensolver such as
+[Knyazev](#ref-knyazev)'s asks only for repeated products with a set of vectors, never for an
+individual entry, so $L$ is never assembled. Its product is evaluated directly from the edge
+list and the degree vector. Note also that only the pattern of $A$ enters this stage, never its
+values, which is why the reordering can be computed once for a pattern and reused for every
+matrix sharing it.
 
 ## Block preconditioning
 
@@ -250,9 +258,10 @@ group so that it overlaps its neighbours recovers them. Overlap turns a group in
 
 Overlap creates a difficulty of its own: a row belonging to several subdomains would have
 several subdomains writing to it, and summing those contributions overcounts. The **restricted
-additive Schwarz** (RAS) method resolves this by assigning every row a single owning subdomain
-and discarding each subdomain's output outside the rows it owns. Applying the preconditioner to
-a vector $y$ is then
+additive Schwarz** (RAS) method of [Cai and Sarkis](#ref-cai-sarkis) resolves this by assigning
+every row a single owning subdomain and discarding each subdomain's output outside the rows it
+owns, which they found converges faster than the overcounting variant while sending less data.
+Applying the preconditioner to a vector $y$ is then
 
 > <span id="algo3"></span>**Algorithm 3** (restricted additive Schwarz apply)
   1. For each subdomain $k$, read the entries of $y$ indexed by $k$ to form $y_k$.
@@ -341,24 +350,37 @@ far from the diagonal is served worse than the capture fraction suggests.
 The blocks are inverted explicitly rather than factored and kept as factors. This is a
 deliberate reversal of the usual advice, which is that forming an inverse is both slower and
 less accurate than solving against a factorization, and it is justified by what the two choices
-do to the shape of the computation. Stored factors would make each application a triangular
+do to the shape of the computation. The same argument is made by
+[Anzt and co-authors](#ref-anzt-batched), who build block-Jacobi preconditioners on graphics
+processors this way for exactly this reason. Stored factors would make each application a
+triangular
 solve, which is sequential along the block: each unknown depends on those before it. An
 explicit inverse makes each application a dense matrix-vector product, in which every output
 depends on every input and nothing waits. Since the sole purpose of the block partition is to
 produce work that can be done independently, reintroducing a sequential dependency inside each
 block would defeat it.
 
-Inverting one $b \times b$ block costs a small multiple of the $\tfrac{2}{3} b^3$ operations of
-an LU factorization, and which multiple depends on how much structure is exploited and how much
-robustness is wanted:
+Inverting one $b \times b$ block costs a small multiple of the $\tfrac{2}{3} b^3$ operations an
+LU factorization takes, and which multiple depends on how much structure is exploited and how
+much is asked of the result. Counting only leading terms, and taking LU as the
+unit,[^flopcounts]
 
-| Method | Relative cost | Notes |
+| Method | Flops relative to LU | Reveals rank |
 | --- | --- | --- |
-| Cholesky | 0.5 | symmetric positive definite blocks only |
-| LU | 1 | general, no information about rank |
-| QR | 2 | better numerical stability, no information about rank |
-| Pivoted QR | 2 to 4 | reveals rank |
-| SVD | 10 to 20 | reveals rank |
+| Cholesky | $\tfrac{1}{2}$ | no, and needs a symmetric positive definite block |
+| LU | $1$ | no |
+| Householder QR | $2$ | no |
+| Column-pivoted QR | $2$ | yes |
+| SVD | more, and with a considerably larger constant | yes |
+
+[^flopcounts]: Flop counts from Golub and Van Loan, [reference below](#ref-golub-van-loan).
+Column pivoting shares the leading term of an unpivoted QR, since maintaining the column norms
+it selects on is of lower order. Measured cost tells a rather different story than flop counts
+do, because the two rank-revealing routines are the ones that block least well: timing batched
+inversion here in double precision, with the batch sized to hold total work constant, pivoted
+QR came out at 1.4, 2.0 and 7.0 times a batched LU inverse for block sizes 32, 64 and 128, and
+the SVD at 4.2, 13.8 and 17.5. Those are wall-clock figures from one machine, so read them as
+an indication of the ordering rather than as constants.
 
 Because the total is $(n/s) \cdot O(b^3)$, or equivalently $O(n b^2 / (1-f))$, the choice of
 method and the cap on $b$ are the two levers on the cost of this stage. That cost is paid on
@@ -430,61 +452,72 @@ blocks alongside the diagonal ones discards nothing at all. A block LU sweep ove
 is exact, which would make the preconditioner an exact inverse and GMRES converge in a single
 iteration, turning the method into a direct banded solver. The cost is that the sweep is
 sequential in the block index, where the present method is fully independent. This is the
-territory of the SPIKE algorithm, whose reduced system is designed precisely to recover
-parallelism in that sweep, and whose truncated form is the block-diagonal approximation used
-here. A divide-and-conquer solution of the reduced system would reduce the sequential depth to
+territory of the [SPIKE algorithm](#ref-spike) of Polizzi and Sameh, whose reduced system is
+designed precisely to recover parallelism in that sweep, and whose
+[truncated form](#ref-truncated-spike) is the block-diagonal approximation used here. A
+divide-and-conquer solution of the reduced system would reduce the sequential depth to
 logarithmic in the number of blocks.
 
 **Stronger preconditioners with parallel application.** An incomplete LU factorization of the
 reordered matrix is a considerably better approximate inverse than a block-diagonal one, but
 applying it requires triangular solves, which is the sequential structure this method avoids.
 Two established remedies fit the same constraints as the present design: solving the triangular
-systems approximately by a few Jacobi sweeps, and incomplete sparse approximate inverses, which
-generalise block-Jacobi by solving small local problems for the sparsity pattern of the inverse
-itself.
+systems approximately by a few Jacobi sweeps, and
+[incomplete sparse approximate inverses](#ref-anzt-isai), which generalise block-Jacobi by
+solving small local problems for the sparsity pattern of the inverse itself.
 
 **Mixed and adaptive precision.** The preconditioner need not be as accurate as the matrix,
 since its errors cost iterations rather than accuracy. Storing each block's inverse in a
 precision chosen from that block's conditioning reduces both memory traffic and the cost of
-applying it, and has been shown to leave convergence essentially unaffected.
+applying it, which [Anzt and co-authors](#ref-anzt-precision) report leaves convergence
+essentially unaffected.
 
-**Better seeding for the level-set ordering.** [Algorithm 1](#algo1) seeds from a
-minimum-degree vertex, a cheap substitute for a vertex of maximum eccentricity. The George-Liu
-algorithm finds a better seed with one additional search per component, and typically yields
-thinner levels and hence a narrower band.
+**Better seeding for the level-set ordering.** [Algorithm 1](#algo1) seeds from a minimum-degree
+vertex, a cheap substitute for a vertex of maximum eccentricity.
+[George and Liu](#ref-george-liu)'s algorithm finds a better seed with one additional search per
+component, and typically yields thinner levels and hence a narrower band.
 
-**Multilevel spectral refinement.** [Algorithm 2](#algo2) sorts by the Fiedler vector directly.
-Coarsening the graph, ordering the coarse version and refining the result back down is both
-faster and more accurate for large graphs, and is how spectral orderings are used in practice.
+**Multilevel spectral refinement.** [Algorithm 2](#algo2) sorts by an eigenvector directly,
+which is the weakest form of the spectral approach. Coarsening the graph, ordering the coarse
+version and refining the result back down is both faster and more accurate for large graphs, and
+is how [Barnard, Pothen and Simon](#ref-barnard) actually use it.
 
 ## References
 
-- E. Cuthill and J. McKee, *Reducing the bandwidth of sparse symmetric matrices*, Proc. 24th
-  National Conference of the ACM, 1969.
-- A. George and J. W. H. Liu, *Computer Solution of Large Sparse Positive Definite Systems*,
-  Prentice-Hall, 1981.
-- S. T. Barnard, A. Pothen and H. D. Simon,
+- <span id="ref-cuthill-mckee"></span>E. Cuthill and J. McKee, *Reducing the bandwidth of
+  sparse symmetric matrices*, Proc. 24th National Conference of the ACM, 1969.
+- <span id="ref-george-liu"></span>A. George and J. W. H. Liu, *Computer Solution of Large
+  Sparse Positive Definite Systems*, Prentice-Hall, 1981.
+- <span id="ref-barnard"></span>S. T. Barnard, A. Pothen and H. D. Simon,
   [*A spectral algorithm for envelope reduction of sparse matrices*](https://ntrs.nasa.gov/api/citations/19970009822/downloads/19970009822.pdf),
   Numerical Linear Algebra with Applications 2(4), 1995.
-- Y. Saad and M. H. Schultz, *GMRES: a generalized minimal residual algorithm for solving
-  nonsymmetric linear systems*, SIAM Journal on Scientific and Statistical Computing 7(3), 1986.
-- Y. Saad, *Iterative Methods for Sparse Linear Systems*, 2nd ed., SIAM, 2003.
-- X.-C. Cai and M. Sarkis, *A restricted additive Schwarz preconditioner for general sparse
-  linear systems*, SIAM Journal on Scientific Computing 21(2), 1999.
-- H. Anzt, J. Dongarra, G. Flegar and E. S. Quintana-Ortí,
+- <span id="ref-golub-van-loan"></span>G. H. Golub and C. F. Van Loan, *Matrix Computations*,
+  4th ed., Johns Hopkins University Press, 2013.
+- <span id="ref-saad-schultz"></span>Y. Saad and M. H. Schultz, *GMRES: a generalized minimal
+  residual algorithm for solving nonsymmetric linear systems*, SIAM Journal on Scientific and
+  Statistical Computing 7(3), 1986.
+- <span id="ref-saad"></span>Y. Saad, *Iterative Methods for Sparse Linear Systems*, 2nd ed.,
+  SIAM, 2003.
+- <span id="ref-cai-sarkis"></span>X.-C. Cai and M. Sarkis, *A restricted additive Schwarz
+  preconditioner for general sparse linear systems*, SIAM Journal on Scientific Computing
+  21(2), 1999.
+- <span id="ref-anzt-batched"></span>H. Anzt, J. Dongarra, G. Flegar and
+  E. S. Quintana-Ortí,
   [*Variable-size batched Gauss-Jordan elimination for block-Jacobi preconditioning on graphics processors*](https://www.sciencedirect.com/science/article/abs/pii/S0167819117302107),
   Parallel Computing 81, 2019.
-- H. Anzt, J. Dongarra, G. Flegar, N. J. Higham and E. S. Quintana-Ortí,
+- <span id="ref-anzt-precision"></span>H. Anzt, J. Dongarra, G. Flegar, N. J. Higham and
+  E. S. Quintana-Ortí,
   [*Adaptive precision in block-Jacobi preconditioning for iterative sparse linear system solvers*](https://www.netlib.org/utk/people/JackDongarra/PAPERS/Anzt_et_al-2018-Concurrency.pdf),
   Concurrency and Computation: Practice and Experience 31(6), 2019.
-- H. Anzt, T. K. Huckle, J. Bräckle and J. Dongarra,
+- <span id="ref-anzt-isai"></span>H. Anzt, T. K. Huckle, J. Bräckle and J. Dongarra,
   [*Incomplete sparse approximate inverses for parallel preconditioning*](https://www.sciencedirect.com/science/article/abs/pii/S016781911730176X),
   Parallel Computing 71, 2018.
-- E. Polizzi and A. H. Sameh,
+- <span id="ref-spike"></span>E. Polizzi and A. H. Sameh,
   [*A parallel hybrid banded system solver: the SPIKE algorithm*](https://www.sciencedirect.com/science/article/abs/pii/S0167819105001353),
   Parallel Computing 32(2), 2006.
-- M. Manguoglu, A. H. Sameh and O. Schenk,
+- <span id="ref-truncated-spike"></span>M. Manguoglu, A. H. Sameh and O. Schenk,
   [*Analysis of the truncated SPIKE algorithm*](https://epubs.siam.org/doi/10.1137/080719571),
   SIAM Journal on Matrix Analysis and Applications 30(4), 2009.
-- A. V. Knyazev, *Toward the optimal preconditioned eigensolver: locally optimal block
-  preconditioned conjugate gradient method*, SIAM Journal on Scientific Computing 23(2), 2001.
+- <span id="ref-knyazev"></span>A. V. Knyazev, *Toward the optimal preconditioned eigensolver:
+  locally optimal block preconditioned conjugate gradient method*, SIAM Journal on Scientific
+  Computing 23(2), 2001.

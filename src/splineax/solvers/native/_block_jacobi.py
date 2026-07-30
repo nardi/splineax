@@ -75,8 +75,9 @@ class BlockInverse(IntEnum):
     SVD = 0
     """Invert via a singular value decomposition. Available on every backend."""
     QR = 1
-    """Invert via a column-pivoted QR factorization. Around five times cheaper than the
-    singular value decomposition, but column pivoting is not implemented on TPU."""
+    """Invert via a column-pivoted QR factorization. Measurably cheaper than the singular value
+    decomposition, by a factor between about two and seven depending on the block size, but
+    column pivoting is not implemented on TPU."""
 
 
 class _BlockJacobiAnalysis(eqx.Module):
@@ -657,10 +658,12 @@ BlockJacobiGMRES.__init__.__doc__ = """**Arguments:**
     Defaults to `0.25`.
 - `capture_target`: fraction of the entries the blocks should cover, which is what the block
     size is chosen to reach. Defaults to `0.8`.
-- `block_inverse`: how to invert each block. Defaults to `splineax.BlockInverse.SVD`, which works on
-    every backend. `splineax.BlockInverse.QR` is roughly five times cheaper but relies on
-    column-pivoted QR, which is unavailable on TPU.
-- `rcond`: relative threshold below which a block's singular values, or the diagonal of its
-    QR factor, are treated as zero. Defaults to `None`, meaning a small multiple of the
-    working precision.
+- `block_inverse`: how to invert each block. Defaults to `splineax.BlockInverse.SVD`, which
+    works on every backend. `splineax.BlockInverse.QR` is cheaper, by a factor between about
+    two and seven depending on the block size, but relies on column-pivoted QR, which is
+    unavailable on TPU.
+- `rcond`: relative threshold below which a direction of a block is treated as absent, either
+    as a singular value or as a diagonal entry of its QR factor. Defaults to `None`, meaning
+    the square root of the working precision. Deliberately looser than the usual choice for a
+    pseudo-inverse, since it bounds how ill-conditioned the preconditioner may become.
 """
