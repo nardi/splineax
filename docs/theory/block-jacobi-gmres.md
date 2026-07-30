@@ -61,12 +61,32 @@ requires the entries to be sorted by row and makes the entries of a given row co
 Introducing both here lets the sections below describe each stage as an operation on index
 vectors.
 
-One question recurs at every stage below, and it is worth naming in advance. For each linear
-operator the method involves, is that operator stored as an explicit matrix, or does it exist
-only as a rule for multiplying a vector? The answer differs from operator to operator, and it
-is settled by two things: how many times the operator is applied, and whether anything beyond
-its action on a vector is ever needed. This is a choice about the algorithm rather than about
-any particular realisation of it, so it is argued in the open each time it arises.
+## Overview
+
+The method has three stages, separated by what each one depends on.
+
+The **reordering** stage sees only the sparsity pattern. It computes a symmetric permutation
+that gathers the nonzeros of $A$ into a narrow band around the diagonal, and it does so by
+treating the pattern as a graph and numbering its vertices so that adjacent ones end up
+close together. Nothing about the values enters, and the permutation is valid for every
+matrix sharing the pattern.
+
+The **blocking** stage also sees only the pattern. It cuts the reordered index range into
+equal, slightly overlapping intervals, choosing their size by measuring what proportion of
+the nonzeros fall inside the resulting diagonal blocks. The output is a description of where
+each stored entry belongs, which fixes the shape of everything computed later.
+
+The **solve** stage is the only one that sees values. It fills the diagonal blocks, inverts
+each of them, and hands the collection to a Krylov method as a preconditioner for the
+reordered system. Since the blocks are independent, both the inversion and each application
+of the preconditioner are sets of small dense operations with no ordering between them.
+
+The reason for drawing the boundary after the second stage rather than the third is that a
+great many problems present a sequence of matrices sharing one pattern, a Newton iteration
+being the obvious example. For those, the first two stages run once.
+
+The sections below take the stages in turn, then [algorithm 5](#algo5) states the whole
+method in one place.
 
 ## Bandwidth reduction
 
@@ -97,10 +117,10 @@ linear in $\mathrm{nse}$ and consists entirely of integer reads. Recovering CSR 
 requires sorting the relabelled index pairs, and because that sort is determined by the
 pattern alone it is computed once and afterwards replayed as a reordered read of the values.
 
-Here the explicit-or-implicit question arises for the first time, with opposite answers for
-two closely related operators. The permutation $P$ is never built as a matrix. It is an index
-vector, its action on a vector is a reordered read, and $P A P^{\mathsf{T}}$ is the
-relabelling just described, so materialising it would buy nothing. The reordered matrix $A'$,
+Two closely related operators are stored quite differently here. The permutation $P$ is never
+built as a matrix. It is an index vector, its action on a vector is a reordered read, and
+$P A P^{\mathsf{T}}$ is the relabelling just described, so materialising it would buy
+nothing. The reordered matrix $A'$,
 in contrast, is built and kept, even though the same effect could be had by permuting on
 either side of every product with the original $A$. It is built because the iteration applies
 it many times, and because holding it in the reordered layout is what turns a reduced
@@ -250,8 +270,8 @@ entries. Entries that no subdomain covers are given a destination outside the bl
 discarded there, which turns neglecting what falls outside the blocks into an addressing choice
 rather than a test applied per entry.
 
-The explicit-or-implicit question divides here, and the division is the design. As an
-$n \times n$ operator the preconditioner is never assembled, not even sparsely: it exists only
+How the preconditioner is stored divides at this point, and the division is the design. As an
+$n \times n$ operator it is never assembled, not even sparsely: it exists only
 as [algorithm 3](#algo3). Its individual blocks are made fully explicit, as small dense
 inverses. An implicit outer operator costs no storage and no sparse arithmetic, while explicit
 inner blocks reduce each application to independent dense products. The block-diagonal
