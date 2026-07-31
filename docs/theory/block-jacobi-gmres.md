@@ -87,7 +87,7 @@ The reason for drawing the boundary after the second stage rather than the third
 great many problems present a sequence of matrices sharing one pattern, a Newton iteration
 being the obvious example. For those, the first two stages run once.
 
-The sections below take the stages in turn, then [algorithm 5](#algo5) states the whole
+The sections below take the stages in turn, then [algorithm 7](#algo7) states the whole
 method in one place.
 
 ## Bandwidth reduction
@@ -413,11 +413,232 @@ former that the iteration measures. A solve is therefore certified at the end ag
 unpreconditioned residual, at the cost of one further product with $A$, so that a reported
 convergence means convergence of the system that was asked about.
 
+## Saddle-point systems
+
+Block inversion left one case unresolved. A block whose diagonal is structurally zero has its
+uninvertible directions left alone, which is safe but means the unknowns concerned are never
+preconditioned at all. Those unknowns are not an oddity. They are the defining feature of a whole
+class of problems, and this section chooses the blocks differently so that the case does not arise.
+
+A **saddle-point system** is one in which some unknowns carry no coefficient on their own diagonal,
+because their equations are constraints rather than balances. Discretised incompressible flow is the
+standard example. A velocity unknown appears in a Laplacian and so has a large diagonal entry, while
+a pressure unknown appears only as the multiplier enforcing that the velocity field is
+divergence-free, and no pressure-pressure term exists at all. Grouping the unknowns by kind gives
+
+$$ A = \begin{bmatrix} F & B^{\mathsf{T}} \\ B & 0 \end{bmatrix} $$
+
+Call a row **ordinary** when it has a stored diagonal entry, and a **constraint** row when it does
+not. Renumbering alone cannot help here. A symmetric permutation sends the entry $(i,i)$ to
+$(\pi_i, \pi_i)$, so it preserves exactly which rows carry a diagonal entry no matter how the
+unknowns are ordered. What can be changed is which unknowns share a block.
+
+### The pattern as a bipartite graph
+
+The reordering stage read the pattern as a graph on a single set of vertices, symmetrised so that an
+entry and its transpose became one edge. This section needs the other reading. Take two disjoint
+sets of vertices, one for the rows and one for the columns, and join row $i$ to column $j$ whenever
+$A_{ij}$ is stored. That is a **bipartite graph**, and the stored index pair is already its edge
+list, this time with no symmetrisation.
+
+A **matching** is a set of edges no two of which share a vertex, which read as a table is a partial
+one-to-one assignment of rows to columns in which every assigned pair is a stored entry. A matching
+is **perfect** when it assigns every row, and **maximum** when no matching has more edges. A vertex
+left unassigned is **free**.
+
+Matchings grow along paths. An **alternating path** is one whose edges lie alternately outside and
+inside the matching, and an **augmenting path** is an alternating path that is free at both ends.
+Such a path holds one more edge outside the matching than inside it, so exchanging the two kinds
+along it leaves a matching with one edge more. Berge's theorem supplies the converse: a matching is
+maximum exactly when it admits no augmenting path.
+
+### Finding a maximum matching
+
+Augmenting one path at a time costs a search for every edge gained.
+[Hopcroft and Karp](#ref-hopcroft-karp) observed that all *shortest* augmenting paths can be found
+in a single search and exchanged together, and that the shortest length strictly increases after
+each such round, which bounds the number of rounds by $O(\sqrt{n})$.
+
+> <span id="algo5"></span>**Algorithm 5** (maximum bipartite matching)
+  1. Start from a matching built greedily, each free row taking a free column among its stored
+     entries, with competing claims settled by a fixed rule.
+  2. Search breadth-first from all free rows at once, stepping out along edges outside the matching
+     and back along edges inside it, recording the level at which each vertex is reached. Stop at
+     the first level holding a free column.
+  3. Walk back from those free columns through the levels, claiming vertices so as to form a maximal
+     set of augmenting paths sharing no vertex, again settling competing claims by a fixed rule.
+  4. Exchange matched and unmatched edges along every path found.
+  5. Repeat from step 2 until step 2 reaches no free column.
+
+Steps 2 and 3 are the frontier expansion of [algorithm 1](#algo1) run in each direction, so they are
+reductions grouped by endpoint over the edge list and need no adjacency structure. Step 3 stands in
+for the depth-first search of the original formulation, whose control flow depends on what it
+encounters and so cannot be written as array operations. The substitution costs nothing, because the
+bound above asks only for a *maximal* set of disjoint shortest paths per round rather than a maximum
+one. In practice step 1 leaves very little to do. On the patterns measured here the greedy start
+comes within a few edges of maximum and a single round of steps 2 to 4 finishes, so the matching
+costs a handful of frontier sweeps, fewer than the reordering it accompanies.
+
+### Blocks holding a constraint and its partner
+
+Suppose the matching is perfect, and let constraint row $i$ be assigned column $k$. That column is
+an ordinary one, because a constraint row has no entries in constraint columns at all. Take any
+block holding both unknowns. Restricted to the two of them the matrix reads
+
+$$ \begin{bmatrix} A_{kk} & A_{ki} \\ A_{ik} & 0 \end{bmatrix},
+   \qquad \det = -A_{ik} A_{ki} $$
+
+and $A_{ik}$ is nonzero because the matching chose it. In a saddle-point system the off-diagonal
+blocks are transposes of one another, so $A_{ki}$ is nonzero as well and this submatrix is
+invertible. The constraint row is no longer structurally empty inside its block, which is what made
+such a block singular. This is the algebraic form of a construction due to [Vanka](#ref-vanka), who
+built blocks from a single pressure cell together with the velocities on its faces. Here the same
+pairing is read off the matrix instead of off the mesh.
+
+Blocks are contiguous intervals of the reordered range, so it is enough to place each constraint
+beside its partner.
+
+> <span id="algo6"></span>**Algorithm 6** (constraint-aware ordering)
+  1. Compute a bandwidth-reducing rank $r$ by [algorithm 1](#algo1) or [algorithm 2](#algo2).
+  2. Compute a maximum matching by [algorithm 5](#algo5), assigning each constraint row $i$ a
+     partner column $p(i)$.
+  3. Give ordinary unknown $j$ the key $2 r_j$, and constraint unknown $i$ the key
+     $2 r_{p(i)} + 1$.
+  4. Sort by key.
+
+Doubling leaves a gap between consecutive ordinary unknowns, and the added one drops each constraint
+into the gap immediately following its partner, leaving the order of the ordinary unknowns among
+themselves untouched. The result is again a symmetric permutation, so everything said under
+[bandwidth reduction](#bandwidth-reduction) continues to hold.
+
+The ordering only departs from [algorithm 1](#algo1) when the matrix really has the shape above. The
+test is that constraint rows have no entries in constraint columns, which is precisely the statement
+that the lower right block is zero. A pattern failing it is ordered as before.
+
+### Structural rank
+
+A maximum matching settles a second question at no further cost. The determinant of $A$ is a sum
+over permutations $\sigma$ of the products $\prod_i A_{i \sigma(i)}$, and a term can be nonzero only
+if every factor in it is a stored entry, which is to say only if $\sigma$ is a perfect matching of
+the pattern. Should no perfect matching exist, every term vanishes identically and $A$ is singular
+for *every* assignment of values rather than merely for unlucky ones. This is the Frobenius-König
+theorem, and the size of a maximum matching is accordingly called the **structural rank**.
+
+A pattern of deficient structural rank therefore poses a problem with no solution to find. The
+solver reports it as an error during analysis instead of iterating, which it would otherwise do at
+length before returning a residual that never falls.
+
+### What this does not repair
+
+Choosing the blocks well does not widen what a block method can see. Eliminating the ordinary
+unknowns leaves the constraint unknowns coupled to one another through $B F^{-1} B^{\mathsf{T}}$,
+and $F^{-1}$ is dense, so that coupling can reach clear across the problem. Where it does, no
+partition into small blocks captures it and the iteration converges slowly however the blocks are
+chosen. The method leans on the constraints being local, which holds for a discretised problem and
+fails for a pattern whose entries are scattered at random.
+
+Adjacency in the reordered range is not quite the same guarantee as adjacency inside the block
+that ends up answering for a row. [Restricted additive Schwarz](#block-preconditioning) assigns
+each row a single *owning* block, and that block's window can end at the row itself, leaving its
+partner one position outside it even though the two sit next to each other in the ordering. A
+block wide enough to keep its owned rows well clear of both edges, which is what a generous
+`overlap_fraction` already buys, makes this rare. A block chosen too small for the pattern, which
+can happen when [algorithm 4](#algo4) is asked to measure a traced pattern and falls back to an
+estimate sized for an average row rather than the pattern actually given, can make it common
+instead. Nothing breaks when it happens: the rank-revealing block inverse is exactly the fallback
+this leans on, so the affected rows are only as preconditioned as they would have been without the
+grouping. It is a reason to prefer measuring the block size eagerly, or setting one explicitly,
+over trusting the estimate on a pattern with pronounced local structure.
+
+### Provenance
+
+Computing a matching and using it to decide which unknowns are held together is established practice
+in sparse direct solvers for symmetric indefinite systems, where a nonsymmetric row permutation
+would destroy the symmetry the factorization depends on. [Duff and Pralet](#ref-duff-pralet) use a
+symmetric weighted matching to predefine $1 \times 1$ and $2 \times 2$ pivots ahead of ordering, and
+[Schenk and Gärtner](#ref-schenk-gaertner) apply the same idea to highly indefinite systems.
+[Hagemann and Schenk](#ref-hagemann-schenk) carry it over to preconditioning, ordering so that
+matched entries form small diagonal blocks. Matching-driven grouping is also how several aggregation
+multigrid methods coarsen, as in [D'Ambra, Filippone and Vassilevski](#ref-bootcmatch). What appears
+not to be written down, although each ingredient is, is this particular assembly, a structural
+matching used to group the blocks of an overlapping Schwarz block-Jacobi preconditioner.
+
+## Repairing an accidental diagonal
+
+The guard in the previous section exists because a missing diagonal does not always mean a
+saddle point. Take a diagonally dominant matrix and permute its rows alone, without permuting
+its columns to match: the result has almost no diagonal entries left, yet nothing about the
+underlying problem has changed. Grouping would be the wrong response, and the guard declines it
+for exactly this pattern, since the constraint-looking rows are not free of entries in each
+other's columns. What this case needs is not a different preconditioner but a different
+renumbering, one a symmetric permutation cannot supply: $P A P^{\mathsf{T}}$ sends diagonal entry
+$(i,i)$ to $(\pi_i, \pi_i)$, so it can never turn an empty diagonal into a full one.
+
+A **maximum matching** repairs it, using the same routine [algorithm 5](#algo5) already computes.
+When the matching is perfect, it assigns every row a distinct column, so reading it as a
+permutation of the rows alone is exactly a **maximum transversal**, the classical device for
+moving large entries onto the diagonal before a direct factorization, due to
+[Duff and Koster](#ref-duff-koster-1999)[^duff-koster-2001]. Row $i$ matched to column
+$\mathrm{partner}(i)$ becomes, after the transversal, row $\mathrm{partner}(i)$ of the permuted
+matrix, and its diagonal entry there is exactly the matched one, nonzero by construction.
+Bandwidth reduction is applied afterward, to the pattern the transversal leaves, in the same way
+a direct solver orders after finding its transversal rather than before.
+
+[^duff-koster-2001]: The matching here is unweighted, choosing among several rows that could fill
+a column by a fixed rule rather than by the size of the entry. [Duff and Koster](#ref-duff-koster-2001)'s
+fuller treatment (and the MC64 codes built on it) weight the matching to maximise the product of
+the chosen entries, which needs the values rather than the pattern alone. That is a real
+difference in a way the next section returns to, not just a refinement left for later.
+
+### What changes in the solve
+
+A symmetric reordering moves a vector and restores a solution with the same permutation used
+both ways, which is why [compute](#algo7) reads `perm` for one and `inv_perm` for the other and
+they happen to agree. A row permutation breaks that. Reordering *equations* changes which
+equation sits where, so it belongs on the right-hand side. It says nothing about what the
+*unknowns* mean, so the solution is unaffected by it, and only the bandwidth-reducing part of the
+reordering needs undoing. `perm` and `inv_perm` are computed accordingly, no longer as each
+other's inverse: the first folds in the transversal, the second does not.
+
+Transposing inherits this asymmetry rather than escaping it. For a symmetric reordering, transposing
+the reordered matrix and transposing the original commute, so the same permutation serves both, which
+is why [transpose](#algo7) has always been able to reuse an analysis unchanged. With a transversal
+present that no longer holds, but the fix is one line rather than a fresh analysis: reordering a
+right-hand side and restoring a solution swap roles under a transpose, exactly as they would for any
+linear system, so building the transposed pair is `perm ↦ inverse_permutation(inv_perm)` and
+`inv_perm ↦ inverse_permutation(perm)`. Applied when the two already are each other's inverse, which
+covers every pattern without a transversal, this reproduces them unchanged, so it is a strict
+generalisation of what the solver already did rather than a special case bolted on beside it.
+
+### What this repair does and does not guarantee
+
+The bandwidth reduction that follows the transversal was chosen for the matrix it is given, which is
+the row-permuted one, not its transpose. Solving the transposed system reuses that same choice rather
+than computing a fresh one, which keeps a transpose cheap but does not promise it an equally good
+ordering: the transposed solve is exact, only some of the time it needs substantially more of the
+iteration budget than the forward solve on the same matrix does. A pattern where both directions need
+attention would be better served by a genuinely fresh analysis of the transposed pattern, which this
+solver does not attempt.
+
+A more basic limitation sits upstream of any of that. An unweighted transversal has no way to prefer
+a large, well-conditioned entry over a small, coincidental one when a row could fill a column several
+ways, so on a matrix where the diagonal is one candidate among many similarly-sized off-diagonal
+ones, it can just as easily choose badly as well. And a row permutation is not a similarity transform,
+unlike the symmetric reordering everywhere else in this method: it can leave a matrix's eigenvalues,
+and with them how readily GMRES converges, far worse than the original despite touching nothing about
+its condition number. Both effects are mild when only a few rows are actually out of place, which
+is what an accidental relabelling ordinarily looks like, and both grow with how much of the matrix a
+single transversal has to move. Neither turns into a wrong answer, only into a slower one: the
+transversal only permutes equations, so whatever the iteration converges to still solves the system
+it was asked to solve. A matrix so thoroughly shuffled that its own locality is gone is, in that
+sense, no different from any other pattern this method is a poor fit for, addressed the same way
+[block size selection](#block-size-selection) already is, by measuring rather than assuming.
+
 ## Algorithm
 
 Collecting the stages:
 
-> <span id="algo5"></span>**Algorithm 5** (block-Jacobi GMRES)
+> <span id="algo7"></span>**Algorithm 7** (block-Jacobi GMRES)
   1. Form the symmetrised pattern of $A$ as an edge list, and compute a permutation by
      [algorithm 1](#algo1) or [algorithm 2](#algo2).
   2. Relabel the stored indices by the permutation, and choose a block size by
@@ -521,3 +742,27 @@ is how [Barnard, Pothen and Simon](#ref-barnard) actually use it.
 - <span id="ref-knyazev"></span>A. V. Knyazev, *Toward the optimal preconditioned eigensolver:
   locally optimal block preconditioned conjugate gradient method*, SIAM Journal on Scientific
   Computing 23(2), 2001.
+- <span id="ref-duff-koster-1999"></span>I. S. Duff and J. Koster,
+  [*The design and use of algorithms for permuting large entries to the diagonal of sparse matrices*](https://www.semanticscholar.org/paper/The-Design-and-Use-of-Algorithms-for-Permuting-to-Duff-Koster/284605c1ffc8aa65b8bb3bdbc3a53e69c069cde8),
+  SIAM Journal on Matrix Analysis and Applications 20(4), 1999.
+- <span id="ref-duff-koster-2001"></span>I. S. Duff and J. Koster,
+  [*On algorithms for permuting large entries to the diagonal of a sparse matrix*](https://epubs.siam.org/doi/10.1137/S0895479899358443),
+  SIAM Journal on Matrix Analysis and Applications 22(4), 2001.
+- <span id="ref-hopcroft-karp"></span>J. E. Hopcroft and R. M. Karp,
+  [*An $n^{5/2}$ algorithm for maximum matching in bipartite graphs*](https://epubs.siam.org/doi/10.1137/0202019),
+  SIAM Journal on Computing 2(4), 1973.
+- <span id="ref-vanka"></span>S. P. Vanka,
+  [*Block-implicit multigrid solution of Navier-Stokes equations in primitive variables*](https://www.sciencedirect.com/science/article/abs/pii/0021999186900082),
+  Journal of Computational Physics 65(1), 1986.
+- <span id="ref-duff-pralet"></span>I. S. Duff and S. Pralet,
+  [*Strategies for scaling and pivoting for sparse symmetric indefinite problems*](https://www.numerical.rl.ac.uk/media/reports/duprRAL2004020.pdf),
+  SIAM Journal on Matrix Analysis and Applications 27(2), 2005.
+- <span id="ref-schenk-gaertner"></span>O. Schenk and K. Gärtner,
+  [*On fast factorization pivoting methods for sparse symmetric indefinite systems*](https://etna.math.kent.edu/volumes/2001-2010/vol23/abstract.php?vol=23&pages=158-179),
+  Electronic Transactions on Numerical Analysis 23, 2006.
+- <span id="ref-hagemann-schenk"></span>M. Hagemann and O. Schenk,
+  [*Weighted matchings for preconditioning symmetric indefinite linear systems*](https://epubs.siam.org/doi/10.1137/040615614),
+  SIAM Journal on Scientific Computing 28(2), 2006.
+- <span id="ref-bootcmatch"></span>P. D'Ambra, S. Filippone and P. S. Vassilevski,
+  [*BootCMatch: a software package for bootstrap AMG based on graph weighted matching*](https://dl.acm.org/doi/10.1145/3190647),
+  ACM Transactions on Mathematical Software 44(4), 2018.
