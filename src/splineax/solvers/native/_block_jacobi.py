@@ -53,6 +53,7 @@ from splineax.solvers.native._blocks import (
     geometry,
     partition,
 )
+from splineax.solvers.native._matching import matching
 from splineax.solvers.native._ordering import (
     Ordering,
     inverse_permutation,
@@ -91,6 +92,11 @@ class _BlockJacobiAnalysis(eqx.Module):
     """Original index at each new position, for reordering a vector."""
     inv_perm: Integer[Array, " n"]
     """New position of each original index, for restoring a solution."""
+    constraint: Bool[Array, " n"]
+    """Which reordered rows are constraint rows of a detected saddle point, meaning they have
+    no diagonal entry and the pattern passed the guard in `_analyse`. All `False` otherwise.
+    Diagnostic: nothing downstream reads it, but it is what a caller checks to see whether the
+    matching-informed grouping engaged."""
     gather_index: Integer[Array, "num_blocks b"]
     """Rows covered by each block."""
     core_mask: Bool[Array, "num_blocks b"]
@@ -111,6 +117,11 @@ class _BlockJacobiAnalysis(eqx.Module):
     captured: float = eqx.field(static=True)
     """Fraction of the entries the blocks cover, as a diagnostic. `nan` when the pattern was
     traced and so could not be measured."""
+    structural_rank: int = eqx.field(static=True)
+    """The size of a maximum matching between the pattern's rows and columns, as a diagnostic.
+    Equal to `size` unless the pattern is structurally singular, in which case `_analyse` has
+    already raised rather than returning. `-1` when the pattern was traced and so could not be
+    measured, mirroring `captured`."""
 
 
 class _BlockJacobiState(eqx.Module):
@@ -375,10 +386,74 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
         with jax.ensure_compile_time_eval():
             rows = matrix.indices[:, 0]
             cols = matrix.indices[:, 1]
-            perm = order(rows, cols, size, self.ordering)
-            inv_perm = inverse_permutation(perm)
-            reordered_rows = inv_perm[rows]
+            measurable = not isinstance(rows, jax.core.Tracer)
+
+            partner, matched = matching(rows, cols, size)
+            if measurable:
+                structural_rank = int(matched)
+                if structural_rank < size:
+                    raise ValueError(
+                        "`BlockJacobiGMRES` was given an operator whose sparsity pattern is "
+                        "structurally singular: a maximum matching between its rows and "
+                        f"columns covers only {structural_rank} of its {size} rows, so by "
+                        "the Frobenius-König theorem its determinant is identically zero and "
+                        "no assignment of values can make it invertible."
+                    )
+            else:
+                structural_rank = -1
+
+            # A constraint row has no stored diagonal entry. Not every such row means a
+            # saddle point, so the guard requires both kinds of row to be present and no
+            # stored entry inside the constraint-by-constraint block, which in a genuine
+            # saddle point is exactly the zero block that makes it one.
+            has_diagonal = (
+                jax.ops.segment_max(
+                    (rows == cols).astype(jnp.int32), rows, num_segments=size
+                )
+                > 0
+            )
+            candidate = ~has_diagonal
+            is_saddle_point = (
+                jnp.any(candidate)
+                & jnp.any(~candidate)
+                & ~jnp.any(candidate[rows] & candidate[cols])
+            )
+            constraint = candidate & is_saddle_point
+
+            base_perm = order(rows, cols, size, self.ordering)
+            rank = inverse_permutation(base_perm)
+            positions = jnp.arange(size, dtype=jnp.int32)
+            safe_partner = jnp.where(partner >= 0, partner, positions)
+            # Ordinary unknowns keep their bandwidth-reduced order. Each constraint unknown
+            # moves to sit immediately after the unknown its matching pairs it with. See the
+            # theory page's "Saddle-point systems" section for why that makes every block
+            # holding a constraint and its partner invertible.
+            group_key = jnp.where(constraint, 2 * rank[safe_partner] + 1, 2 * rank)
+            group_perm = jnp.argsort(group_key).astype(jnp.int32)
+
+            # A pattern with a hidden but otherwise ordinary diagonal, rather than a genuine
+            # saddle point, wants a different repair: permute rows by the matching so the
+            # diagonal becomes populated, then reorder as usual. Doing that needs the matching
+            # to be known complete, which is only checked above when the pattern is not
+            # traced, so it is only attempted then. A traced pattern with a hidden diagonal is
+            # ordered as if it had none, which is safe, only less well preconditioned. See the
+            # theory page's "Repairing an accidental diagonal" for why this and the grouping
+            # above are alternatives rather than something to combine, and why `perm` and
+            # `inv_perm` deliberately stop being mutual inverses here. Reordering equations
+            # permutes the right-hand side but never the solution.
+            if measurable and bool(jnp.any(candidate)) and not bool(is_saddle_point):
+                mcol = inverse_permutation(partner)
+                perm = mcol[base_perm]
+                inv_perm = rank
+                effective_rows = partner[rows]
+            else:
+                perm = jnp.where(is_saddle_point, group_perm, base_perm)
+                inv_perm = inverse_permutation(perm)
+                effective_rows = rows
+
+            reordered_rows = inv_perm[effective_rows]
             reordered_cols = inv_perm[cols]
+            reordered_constraint = constraint[perm]
 
             block_size, captured = self._resolve_block_size(
                 reordered_rows, reordered_cols, size, matrix.nse
@@ -401,6 +476,7 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
         return _BlockJacobiAnalysis(
             perm=perm,
             inv_perm=inv_perm,
+            constraint=reordered_constraint,
             gather_index=gather_index,
             core_mask=core_mask,
             destinations=destinations,
@@ -412,6 +488,7 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
             num_blocks=num_blocks,
             size=size,
             captured=captured,
+            structural_rank=structural_rank,
         )
 
     def _resolve_block_size(
@@ -568,19 +645,46 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
     ) -> tuple[_BlockJacobiState, dict[str, Any]]:
         del options
         analysis = state.analysis
-        # The block partition is symmetric, so each block of the transpose is the transpose
-        # of the matching block, and the inverse of that is the transposed inverse. The
-        # transposed state is therefore exact rather than an approximation.
+        # The block partition sits at fixed index ranges, so a diagonal block of the
+        # transpose occupies the same range as the matching block of the original and equals
+        # its transpose, whatever produced that block. The transposed state is therefore
+        # exact rather than an approximation, and every field but `perm` and `inv_perm`
+        # carries over unchanged.
         values = _reordered_values(state)
         indices = jnp.stack([analysis.col_indices, analysis.sorted_rows], axis=-1)
         transposed = BCOOLinearOperator(
             BCOO((values, indices), shape=(analysis.size, analysis.size))
         )
+        # `perm` and `inv_perm` are mutual inverses except when the second stage's row
+        # permutation is active, and swapping the roles of a right-hand side and a solution
+        # is exactly what transposing the system does: what reordered the input now restores
+        # the output, and what restored the output now reorders the input. Inverting each
+        # after the swap is what turns "new position of an original index" back into
+        # "original index at a new position" and back, which is the only other difference
+        # transposing makes. This reduces to reusing `analysis` unchanged whenever `perm` and
+        # `inv_perm` were already mutual inverses, which is every case but that one.
+        transposed_analysis = _BlockJacobiAnalysis(
+            perm=inverse_permutation(analysis.inv_perm),
+            inv_perm=inverse_permutation(analysis.perm),
+            constraint=analysis.constraint,
+            gather_index=analysis.gather_index,
+            core_mask=analysis.core_mask,
+            destinations=analysis.destinations,
+            sort_order=analysis.sort_order,
+            sorted_rows=analysis.sorted_rows,
+            col_indices=analysis.col_indices,
+            indptr=analysis.indptr,
+            block_size=analysis.block_size,
+            num_blocks=analysis.num_blocks,
+            size=analysis.size,
+            captured=analysis.captured,
+            structural_rank=analysis.structural_rank,
+        )
         return (
             _BlockJacobiState(
                 operator=transposed,
                 inv_blocks=jnp.matrix_transpose(state.inv_blocks),
-                analysis=analysis,
+                analysis=transposed_analysis,
                 packed_structures=transpose_packed_structures(state.packed_structures),
                 solver=state.solver,
             ),
