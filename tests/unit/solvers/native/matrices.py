@@ -7,7 +7,7 @@ sparse operators.
 The families are chosen to span the ways a block preconditioner can be defeated. Each breaks a
 different assumption: that the matrix is banded, that it is symmetric, that it is real, that its
 diagonal blocks are invertible, that its entries are comparably scaled, or that its nonzeros can
-be brought near the diagonal at all. Only two of the eight actually defeat it.
+be brought near the diagonal at all. Only two of the nine actually defeat it.
 
 `DIFFICULTY` records which is which, because the two groups deserve different assertions. For
 the tractable ones a small residual is required. For the hard ones it is not, since a
@@ -101,6 +101,12 @@ def saddle_point(size: int, seed: int = 0) -> np.ndarray:
     Indefinite, and the reason the block inverses have to be rank-revealing: a block sitting
     over the zero half has no inverse at all. Mirrors `_zero_diagonal_saddle_point` in the
     parent conftest, generated here so it can be produced at any size.
+
+    `B` here is random and roughly as dense as the pattern allows, which makes the Schur
+    complement `B F^{-1} B^T` a globally coupled matrix with no locality for any block method,
+    matching-informed grouping included, to capture. That is a property of this matrix, not a
+    limitation the grouping happens to have: see `divergence_saddle_point` below for a saddle
+    point with the local structure real ones have, which the grouping is measured against.
     """
     half = max(2, size // 2)
     generator = np.random.default_rng(seed)
@@ -111,6 +117,33 @@ def saddle_point(size: int, seed: int = 0) -> np.ndarray:
     block = block + np.eye(half) * 2.0
     lower_right = np.diag(generator.uniform(0.5, 1.5, size=half))
     return np.block([[np.zeros((half, half)), block], [block.T, -lower_right]])
+
+
+def divergence_saddle_point(size: int) -> np.ndarray:
+    """An `[[F, B^T], [B, 0]]` block system shaped like a real saddle point rather than an
+    adversarial one: `F` a tridiagonal Laplacian, `B` a rectangular discrete divergence
+    coupling each constraint to three neighbouring ordinary unknowns.
+
+    Unlike `saddle_point` above, whose random `B` has no locality, a constraint here couples
+    only to unknowns near it, which is what lets a block method capture it at all. This is the
+    family the matching-informed grouping in `_block_jacobi.py` is for: pairing each constraint
+    with a matched ordinary unknown makes the block holding both of them invertible, in place
+    of the zero block a plain reordering would otherwise leave there.
+    """
+    ordinary = max(3, (2 * size) // 3)
+    constraints = max(1, ordinary // 3)
+    stiffness = np.eye(ordinary) * 2.0 - np.eye(ordinary, k=1) - np.eye(ordinary, k=-1)
+    divergence = np.zeros((constraints, ordinary))
+    for row in range(constraints):
+        divergence[row, 3 * row] = -1.0
+        divergence[row, 3 * row + 1] = 1.0
+        divergence[row, min(3 * row + 2, ordinary - 1)] += 0.5
+    return np.block(
+        [
+            [stiffness, divergence.T],
+            [divergence, np.zeros((constraints, constraints))],
+        ]
+    )
 
 
 def badly_scaled(size: int, decades: float = 4.0, seed: int = 1) -> np.ndarray:
@@ -150,6 +183,7 @@ FAMILIES: dict[str, Family] = {
     "convection_diffusion": convection_diffusion,
     "shifted_laplacian": shifted_laplacian,
     "saddle_point": saddle_point,
+    "divergence_saddle_point": divergence_saddle_point,
     "badly_scaled": badly_scaled,
     "arrow": arrow,
 }
@@ -161,6 +195,7 @@ DIFFICULTY: dict[str, Difficulty] = {
     "convection_diffusion": "tractable",
     "shifted_laplacian": "tractable",
     "saddle_point": "hard",
+    "divergence_saddle_point": "tractable",
     "badly_scaled": "hard",
     "arrow": "tractable",
 }
