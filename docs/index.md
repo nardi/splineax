@@ -23,8 +23,9 @@ It provides:
   platform.
 - An **iterative solver**: [`BlockJacobiGMRES`][splineax.BlockJacobiGMRES], written only from
   array operations, so the reordering, the preconditioner and the iteration all compile into a
-  single computation that runs on any backend. See
-  [the theory page](theory/block-jacobi-gmres.md) for how it works.
+  single computation that runs on any backend. It detects saddle points and rows with an
+  accidentally hidden diagonal from the pattern alone and reorders around either automatically.
+  See [the theory page](theory/block-jacobi-gmres.md) for how it works.
 - A [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol for separating
   factorization from solving.
 

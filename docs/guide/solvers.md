@@ -117,6 +117,31 @@ The settings worth knowing about, in the order you would usually try them:
 - `block_inverse` selects how blocks are inverted. `BlockInverse.QR` is cheaper than the
   default `BlockInverse.SVD` but relies on column-pivoted QR, which is unavailable on TPU.
 
+A matrix with rows that have no diagonal entry, a saddle point being the standard example, is
+handled automatically rather than needing a different setting. The symbolic stage detects the
+pattern and reorders around it: a genuine saddle point gets each such row paired with a matched
+ordinary unknown before the blocks are cut, and a matrix whose rows merely happen to be numbered
+so their diagonal is hidden gets those rows permuted back onto a populated diagonal instead. Both
+are pattern-only, so they cost nothing extra once a symbolic factorization is reused. [The theory
+page](../theory/block-jacobi-gmres.md#repairing-an-accidental-diagonal) covers both cases and what
+each one does and does not guarantee.
+
+```{.python continuation}
+import jax.numpy as jnp
+import lineax as lx
+from jax.experimental.sparse import BCOO
+
+# [[F, B^T], [B, 0]]: F a Laplacian, B a discrete divergence, so half the diagonal is
+# structurally zero, the shape a saddle point has.
+f = jnp.array([[2.0, -1.0], [-1.0, 2.0]])
+b = jnp.array([[-1.0, 1.0]])
+matrix = jnp.block([[f, b.T], [b, jnp.zeros((1, 1))]])
+operator = splx.BCOOLinearOperator(BCOO.fromdense(matrix))
+
+solution = lx.linear_solve(operator, jnp.array([1.0, 0.0, 0.0]), solver=splx.BlockJacobiGMRES())
+assert jnp.allclose(matrix @ solution.value, jnp.array([1.0, 0.0, 0.0]), atol=1e-4)
+```
+
 !!! note "It is an approximation, and it tells you so"
 
     The preconditioner keeps only the entries that fall inside some block. Those left out are
