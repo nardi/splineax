@@ -562,9 +562,15 @@ symmetric weighted matching to predefine $1 \times 1$ and $2 \times 2$ pivots ah
 [Schenk and Gärtner](#ref-schenk-gaertner) apply the same idea to highly indefinite systems.
 [Hagemann and Schenk](#ref-hagemann-schenk) carry it over to preconditioning, ordering so that
 matched entries form small diagonal blocks. Matching-driven grouping is also how several aggregation
-multigrid methods coarsen, as in [D'Ambra, Filippone and Vassilevski](#ref-bootcmatch). What appears
-not to be written down, although each ingredient is, is this particular assembly, a structural
-matching used to group the blocks of an overlapping Schwarz block-Jacobi preconditioner.
+multigrid methods coarsen, as in [D'Ambra, Filippone and Vassilevski](#ref-bootcmatch).
+[Prokopenko and Tuminaro](#ref-prokopenko-tuminaro) build the same kind of block for a saddle-point
+multigrid smoother, one per constraint unknown together with everything it touches on the mesh, the
+overlapping-block idea [Vanka](#ref-vanka) started. Carrying that correlation up their multigrid
+hierarchy, though, they choose coarse unknowns by location on the Q2-Q1 mesh rather than by a
+matching, which is faithful to that discretization but comes with no rank guarantee the way a
+matching does, a gap the paper itself acknowledges. What appears not to be written down, although
+each ingredient is, is this particular assembly, a structural matching used to group the blocks of an
+overlapping Schwarz block-Jacobi preconditioner.
 
 ## Repairing an accidental diagonal
 
@@ -769,3 +775,6 @@ is how [Barnard, Pothen and Simon](#ref-barnard) actually use it.
 - <span id="ref-bootcmatch"></span>P. D'Ambra, S. Filippone and P. S. Vassilevski,
   [*BootCMatch: a software package for bootstrap AMG based on graph weighted matching*](https://dl.acm.org/doi/10.1145/3190647),
   ACM Transactions on Mathematical Software 44(4), 2018.
+- <span id="ref-prokopenko-tuminaro"></span>A. Prokopenko and R. S. Tuminaro,
+  [*An algebraic multigrid method for Q2-Q1 mixed discretizations of the Navier-Stokes equations*](https://doi.org/10.1002/nla.2109),
+  Numerical Linear Algebra with Applications 24(6), 2017.
