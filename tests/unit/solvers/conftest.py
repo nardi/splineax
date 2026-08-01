@@ -1,6 +1,6 @@
 """Shared fixtures and reference data for the sparse-solver test suites.
 
-[test_solvers.py](test_solvers.py) runs the solver/format-agnostic suite (parametrised over both
+[test_solvers.py](test_solvers.py) runs the solver/format-agnostic suite (parametrized over both
 solvers and both operator formats); [test_klu.py](test_klu.py) holds the KLU-specific
 factorization tests. Both draw their operators and reference matrices from here.
 """

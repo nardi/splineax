@@ -1,7 +1,7 @@
-"""Shared, format-agnostic behaviour for the sparse linear operators.
+"""Shared, format-agnostic behavior for the sparse linear operators.
 
 `BCOOLinearOperator` and `BCSRLinearOperator` do not share a base class (beyond
-`lineax.AbstractLinearOperator`); instead they *compose* their behaviour from the
+`lineax.AbstractLinearOperator`); instead they *compose* their behavior from the
 helpers here. The identical methods (`mv`, `as_matrix`, `in_structure`,
 `out_structure`) delegate to the `sparse_*` functions, and all of the Lineax
 `singledispatch` registrations are installed by `register_sparse_operator`, which each

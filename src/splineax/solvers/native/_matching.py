@@ -2,7 +2,7 @@
 
 Computed from a COO index pair alone, the same input `_ordering.py` works from, so this
 too is pattern-only and reusable across every matrix sharing a pattern. Unlike the
-reordering, the graph here is bipartite rather than symmetrised: a row vertex and a
+reordering, the graph here is bipartite rather than symmetrized: a row vertex and a
 column vertex for every index, joined whenever the corresponding entry is stored.
 
 See the theory page in `docs/theory/block-jacobi-gmres.md` for what a matching is used
@@ -149,7 +149,7 @@ def _augment(
     target_level: Integer[Array, ""],
     size: int,
 ) -> tuple[Integer[Array, " n"], Integer[Array, " n"]]:
-    """Realise a maximal set of vertex-disjoint shortest augmenting paths, walking
+    """Realize a maximal set of vertex-disjoint shortest augmenting paths, walking
     backward one level at a time from the free columns `_bfs_phase` found.
 
     Each active column claims its recorded parent row, with `size` conflicting claims
@@ -159,7 +159,7 @@ def _augment(
     since `parent_col` holds no alternative for a column to retry, so such a column is
     abandoned instead, and its stale match is cleared rather than left dangling.
 
-    Abandoning a column leaves its augmenting path unrealised this phase rather than
+    Abandoning a column leaves its augmenting path unrealized this phase rather than
     wrong: it stays free, and `_bfs_phase` will find it again, at this level or a
     later one, for as long as a shortest augmenting path to it still exists. What this
     guarantees is only that a nonempty phase strictly grows the matching. It need not

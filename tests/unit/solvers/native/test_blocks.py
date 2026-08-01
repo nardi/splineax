@@ -26,7 +26,7 @@ from splineax.solvers.native._blocks import (
 )
 
 # Sizes and block sizes chosen so that some combinations divide evenly and others leave the
-# last block pulled back over its neighbour, which is where the geometry is trickiest.
+# last block pulled back over its neighbor, which is where the geometry is trickiest.
 SIZES = [7, 10, 11, 17, 33, 64]
 BLOCK_SIZES = [1, 2, 3, 4, 8, 16]
 OVERLAPS = [0.0, 0.25, 0.5, 0.75]

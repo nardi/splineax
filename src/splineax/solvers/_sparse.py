@@ -280,9 +280,9 @@ def factorize_through_init(
     operator: AbstractLinearOperator,
     options: dict[str, Any],
 ) -> Iterator[SparseNumericState]:
-    """Shared `factorize` behaviour: run `init`, then numeric-factorize its state.
+    """Shared `factorize` behavior: run `init`, then numeric-factorize its state.
 
-    Reused by both `KLU.factorize` and `Spsolve.factorize` (behaviour reuse via a
+    Reused by both `KLU.factorize` and `Spsolve.factorize` (behavior reuse via a
     function instead of inheritance).
     """
     with solver.init(operator, options).factorize() as numeric_state:

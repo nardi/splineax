@@ -1,9 +1,9 @@
 """Test suite shared by every sparse operator.
 
-The same behavioural checks must hold for `BCOOLinearOperator` and
+The same behavioral checks must hold for `BCOOLinearOperator` and
 `BCSRLinearOperator` (the only differences between them are internal storage details).
 Rather than duplicating the suite per format, the `make_operator` fixture is
-parametrised over the two formats, so every test below runs once for each. Each test
+parametrized over the two formats, so every test below runs once for each. Each test
 receives a factory that wraps a *dense* reference matrix in the operator under test;
 this keeps the tests format-agnostic and lets us compare against the dense matrix as
 the source of truth.

@@ -1,6 +1,6 @@
 """KLU-specific tests for factorization reuse and handle lifecycle.
 
-This module tests behaviour that is unique to the `KLU` solver's `factorize()`
+This module tests behavior that is unique to the `KLU` solver's `factorize()`
 context manager: that solves inside the block call `solve_with_numeric` /
 `tsolve_with_numeric` rather than `klujax.solve`, and that every allocated
 handle (symbolic and numeric) is freed exactly once when the block exits.

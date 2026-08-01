@@ -4,13 +4,13 @@
 `klujax`), `Pardiso` (wrapping `pardiso_mkl_jax`, skipped if not installed), and
 `AutoSparseLinearSolver` must behave identically against either sparse operator format,
 modulo `Pardiso`'s documented real-only limitation (see `test_complex_solve`). The
-`solver` fixture is parametrised over all four and the `make_operator` fixture over
+`solver` fixture is parametrized over all four and the `make_operator` fixture over
 `["bcoo", "bcsr"]` (both in [conftest.py](conftest.py)), so every test below runs for the full
 solver x format cross-product, with the dense reference matrix as the source of truth.
 
 The solver-agnostic factorization-reuse contract lives in
 [test_factorization.py](test_factorization.py), solver-specific
-factorization/handle-lifecycle behaviour in [test_klu.py](test_klu.py) and
+factorization/handle-lifecycle behavior in [test_klu.py](test_klu.py) and
 [test_pardiso.py](test_pardiso.py), and `AutoSparseLinearSolver`'s dispatch logic in
 [test_auto.py](test_auto.py).
 """
@@ -118,7 +118,7 @@ def test_complex_solve(
 def test_non_square_raises(
     make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
 ) -> None:
-    """Both solvers only handle square systems, so initialising on a non-square operator
+    """Both solvers only handle square systems, so initializing on a non-square operator
     must fail loudly rather than producing nonsense."""
     operator = make_operator(WIDE_MATRIX)
     with pytest.raises(ValueError):
@@ -139,7 +139,7 @@ def _unsorted_bcoo(dense_matrix: jax.Array) -> BCOO:
 @pytest.mark.parametrize("fmt", ["bcoo", "bcsr"])
 def test_solve_with_unsorted_indices(fmt: str, solver: lx.AbstractLinearSolver) -> None:
     """A coalesced but *unsorted* operator (in either format) must still solve correctly:
-    `Spsolve` canonicalises the index order in `init`, while `KLU` is order-agnostic."""
+    `Spsolve` canonicalizes the index order in `init`, while `KLU` is order-agnostic."""
     unsorted_bcoo = _unsorted_bcoo(SQUARE_MATRIX)
     if fmt == "bcoo":
         operator = BCOOLinearOperator(unsorted_bcoo)

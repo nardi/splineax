@@ -40,7 +40,7 @@ def elementwise_function(x: jax.Array, args: object) -> jax.Array:
 
 
 def banded_function(x: jax.Array, args: object) -> jax.Array:
-    """A nearest-neighbour coupling, whose (rectangular) Jacobian is banded and
+    """A nearest-neighbor coupling, whose (rectangular) Jacobian is banded and
     needs more than one color."""
     del args
     return jnp.diff(x) * x[:-1] + jnp.cos(x[1:])
@@ -87,7 +87,7 @@ def test_mv_matches_dense_jacobian(fn) -> None:
 def test_transpose_stays_sparse_and_matches_dense() -> None:
     """`transpose()` must return another `SparseJacobianLinearOperator` (not a
     dense fallback) whose products and materialisation match the dense transpose,
-    and transposing twice must recover the original behaviour."""
+    and transposing twice must recover the original behavior."""
     operator = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
     expected = dense_jacobian(banded_function, EVALUATION_POINT)
     transposed = operator.transpose()

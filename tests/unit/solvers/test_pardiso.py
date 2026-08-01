@@ -103,7 +103,7 @@ def test_factorize_closes_solver_on_exit(make_operator: OperatorFactory) -> None
 
 
 def test_factorize_symbolic_reuses_analysis_across_solves() -> None:
-    """A `factorize_symbolic` scope analyses once and reuses it across solves, redoing the
+    """A `factorize_symbolic` scope analyzes once and reuses it across solves, redoing the
     numeric phase per call through `factor_and_solve_stateful`, and releasing on scope
     exit."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
@@ -139,7 +139,7 @@ def test_factorize_symbolic_reuses_analysis_across_solves() -> None:
     assert jnp.allclose(second_solution, expected, atol=1e-5)
 
 
-def test_symbolic_scope_reused_under_jit_analyses_once() -> None:
+def test_symbolic_scope_reused_under_jit_analyzes_once() -> None:
     """The core requirement: open the symbolic factorization scope eagerly, then reuse the
     scope inside a jitted function across different values. The analysis must run exactly
     once (analysis_count stays 1) and every solve must be correct."""
@@ -241,7 +241,7 @@ def test_zero_diagonal_matrix_solves_accurately() -> None:
 
     All three of `Pardiso`'s state paths are covered, because each reaches Pardiso
     through a different native entry point (`solve`, `factor_and_solve_stateful`, and
-    `solve_stateful` respectively) and each re-initialises `iparm` on its own.
+    `solve_stateful` respectively) and each re-initializes `iparm` on its own.
     """
     matrix = jnp.asarray(ZERO_DIAGONAL_MATRIX)
     vector = jnp.asarray(ZERO_DIAGONAL_RIGHT_HAND_SIDE)

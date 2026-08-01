@@ -122,7 +122,7 @@ def saddle_point(size: int, seed: int = 0) -> np.ndarray:
 def divergence_saddle_point(size: int) -> np.ndarray:
     """An `[[F, B^T], [B, 0]]` block system shaped like a real saddle point rather than an
     adversarial one: `F` a tridiagonal Laplacian, `B` a rectangular discrete divergence
-    coupling each constraint to three neighbouring ordinary unknowns.
+    coupling each constraint to three neighboring ordinary unknowns.
 
     Unlike `saddle_point` above, whose random `B` has no locality, a constraint here couples
     only to unknowns near it, which is what lets a block method capture it at all. This is the

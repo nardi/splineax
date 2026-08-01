@@ -47,7 +47,7 @@ def _grid_laplacian(side: int) -> np.ndarray:
 def _shuffled_banded(size: int, half_width: int, seed: int = 0) -> np.ndarray:
     """A diagonally dominant banded matrix with only its rows permuted, so the
     numbering hides a perfectly good diagonal for almost every row without the matrix
-    becoming a saddle point: the underlying problem is still ordinary, just relabelled.
+    becoming a saddle point: the underlying problem is still ordinary, just relabeled.
 
     Permuting rows *and* columns together (`matrix[np.ix_(p, p)]`) would be a symmetric
     similarity transform, and a symmetric transform preserves which rows have a
@@ -70,7 +70,7 @@ def _mildly_shuffled_banded(
     than every row permuted.
 
     This is what an accidental hidden diagonal looks like in practice: a few unknowns
-    end up relabelled, not the whole system. A full random permutation of every row
+    end up relabeled, not the whole system. A full random permutation of every row
     (as `_shuffled_banded` above produces) destroys the matrix's locality altogether,
     which is a harder problem than a hidden diagonal and not one a row permutation
     alone can be expected to fix, since bandwidth reduction still has to work with
@@ -121,7 +121,7 @@ def test_the_guard_declines_a_shuffled_matrix(enable_x64: None) -> None:
 
 
 def test_row_permutation_repairs_a_mildly_hidden_diagonal(enable_x64: None) -> None:
-    """A handful of relabelled rows, the realistic shape of an accidental hidden
+    """A handful of relabeled rows, the realistic shape of an accidental hidden
     diagonal, must be repaired well enough to solve to a tight tolerance. `perm` and
     `inv_perm` must also have visibly stopped being mutual inverses, confirming the row
     permutation actually engaged rather than the solve succeeding some other way."""
@@ -145,7 +145,7 @@ def test_row_permutation_repairs_a_mildly_hidden_diagonal(enable_x64: None) -> N
 
 
 def test_row_permutation_survives_the_adversarial_case(enable_x64: None) -> None:
-    """A matrix with almost every row relabelled destroys locality outright, which is a
+    """A matrix with almost every row relabeled destroys locality outright, which is a
     harder problem than a hidden diagonal and not one a row permutation alone fixes.
     Nothing here promises convergence, only that the solve stays finite and a reported
     success is backed by a small residual, the same bar `test_block_jacobi.py` sets for
@@ -274,7 +274,7 @@ def test_converges_as_the_saddle_point_grows(size: int, enable_x64: None) -> Non
     # `choose_block_size` would make eagerly (see
     # `test_a_traced_pattern_falls_back_to_an_estimated_block_size`). That estimate is
     # sized for the *average* row of a general pattern, and on this family it can land on
-    # a block too small for the grouping's pairing guarantee to be realised within a
+    # a block too small for the grouping's pairing guarantee to be realized within a
     # block's owned core rather than merely somewhere in its wider, overlapping window,
     # which is a real sensitivity worth a caveat on the theory page rather than something
     # to route around silently here.

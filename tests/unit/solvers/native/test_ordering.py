@@ -44,8 +44,8 @@ def _reordered_bandwidth(matrix: np.ndarray, ordering: Ordering) -> int:
     assert sorted(np.asarray(perm).tolist()) == list(range(size)), (
         f"{ordering.name} did not return a permutation"
     )
-    relabelled = inverse_permutation(perm)
-    return int(bandwidth(relabelled[rows], relabelled[cols]))
+    relabeled = inverse_permutation(perm)
+    return int(bandwidth(relabeled[rows], relabeled[cols]))
 
 
 def _scipy_bandwidth(matrix: np.ndarray) -> int:
@@ -54,8 +54,8 @@ def _scipy_bandwidth(matrix: np.ndarray) -> int:
     perm = scipy.sparse.csgraph.reverse_cuthill_mckee(
         scipy.sparse.csr_matrix(matrix), symmetric_mode=True
     )
-    relabelled = inverse_permutation(jnp.asarray(perm, dtype=jnp.int32))
-    return int(bandwidth(relabelled[rows], relabelled[cols]))
+    relabeled = inverse_permutation(jnp.asarray(perm, dtype=jnp.int32))
+    return int(bandwidth(relabeled[rows], relabeled[cols]))
 
 
 def _grid_laplacian(side: int) -> np.ndarray:
@@ -146,7 +146,7 @@ def test_rcm_matches_scipy(case: str) -> None:
 
     Equality is not required, since the two break ties differently, but a gap would mean
     something is wrong: both number by breadth-first level and order within a level by the
-    position of the earliest-numbered neighbour, so they should agree closely.
+    position of the earliest-numbered neighbor, so they should agree closely.
     """
     matrix = CASES[case]
     assert _reordered_bandwidth(matrix, Ordering.RCM) <= _scipy_bandwidth(matrix)
@@ -156,7 +156,7 @@ def test_rcm_matches_scipy(case: str) -> None:
 def test_rcm_reaches_the_grid_optimum(side: int) -> None:
     """On a grid the narrowest possible band is one grid line wide, and the level-set
     ordering must find it even when the original numbering is shuffled. This is what fails
-    if a level is ordered by neighbour index rather than neighbour position."""
+    if a level is ordered by neighbor index rather than neighbor position."""
     shuffled = _shuffled(_grid_laplacian(side), seed=2)
     assert _reordered_bandwidth(shuffled, Ordering.RCM) == side
 
@@ -177,7 +177,7 @@ def test_path_is_already_optimal() -> None:
 
 
 def test_handles_a_non_symmetric_pattern() -> None:
-    """Reordering symmetrises the pattern, so an operator whose pattern is not symmetric
+    """Reordering symmetrizes the pattern, so an operator whose pattern is not symmetric
     must still be reordered rather than rejected."""
     dense = scipy.sparse.random(150, 150, density=0.02, random_state=7).toarray()
     matrix = dense + np.eye(150) * 5.0

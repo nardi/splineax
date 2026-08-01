@@ -6,7 +6,7 @@ stages, which map onto the symbolic, numeric and solve tiers of the factorizatio
 reorder the pattern to narrow its band, cut the reordered range into overlapping blocks, then
 invert those blocks and hand them to GMRES as a preconditioner.
 
-The reordering and the blocking see only the sparsity pattern, so a pattern analysed once
+The reordering and the blocking see only the sparsity pattern, so a pattern analyzed once
 serves every matrix sharing it. That is what `factorize_symbolic` reuses here, and it is a
 real saving rather than the no-op it is for `Spsolve`.
 
@@ -94,7 +94,7 @@ class _BlockJacobiAnalysis(eqx.Module):
     """New position of each original index, for restoring a solution."""
     constraint: Bool[Array, " n"]
     """Which reordered rows are constraint rows of a detected saddle point, meaning they have
-    no diagonal entry and the pattern passed the guard in `_analyse`. All `False` otherwise.
+    no diagonal entry and the pattern passed the guard in `_analyze`. All `False` otherwise.
     Diagnostic: nothing downstream reads it, but it is what a caller checks to see whether the
     matching-informed grouping engaged."""
     gather_index: Integer[Array, "num_blocks b"]
@@ -119,7 +119,7 @@ class _BlockJacobiAnalysis(eqx.Module):
     traced and so could not be measured."""
     structural_rank: int = eqx.field(static=True)
     """The size of a maximum matching between the pattern's rows and columns, as a diagnostic.
-    Equal to `size` unless the pattern is structurally singular, in which case `_analyse` has
+    Equal to `size` unless the pattern is structurally singular, in which case `_analyze` has
     already raised rather than returning. `-1` when the pattern was traced and so could not be
     measured, mirroring `captured`."""
 
@@ -144,7 +144,7 @@ class _BlockJacobiState(eqx.Module):
 
 
 class _BlockJacobiSymbolicScope(eqx.Module):
-    """An open symbolic-factorization scope holding one analysed pattern."""
+    """An open symbolic-factorization scope holding one analyzed pattern."""
 
     solver: "BlockJacobiGMRES"
     analysis: _BlockJacobiAnalysis
@@ -326,7 +326,7 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
                 "matrices"
             )
         matrix = _as_bcoo(operator)
-        analysis = self._analyse(matrix, operator.in_size())
+        analysis = self._analyze(matrix, operator.in_size())
         return self._factorize(operator, analysis)
 
     def factorize(
@@ -349,14 +349,14 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
     ) -> AbstractContextManager[
         _BlockJacobiSymbolicScope | SymbolicScopedSparseLinearSolver
     ]:
-        """Analyse a sparsity pattern once, for reuse across matrices sharing it.
+        """Analyze a sparsity pattern once, for reuse across matrices sharing it.
 
         The reordering and the block partition depend only on the pattern, so this is where
         almost all of the analysis happens. Every state derived from the scope skips straight
         to assembling and inverting the blocks.
 
         Args:
-            sparsity: the pattern to analyse. Only its indices are read.
+            sparsity: the pattern to analyze. Only its indices are read.
             as_solver: yield a `SymbolicScopedSparseLinearSolver` pairing the scope with this
                        solver, instead of the bare scope, so the two need not be passed
                        around together.
@@ -372,9 +372,9 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
         # since `@contextmanager` and `@overload` do not compose.
         matrix = _sparsity_pattern(sparsity)
         rows, _ = matrix.shape
-        yield _BlockJacobiSymbolicScope(self, self._analyse(matrix, rows))
+        yield _BlockJacobiSymbolicScope(self, self._analyze(matrix, rows))
 
-    def _analyse(self, matrix: BCOO, size: int) -> _BlockJacobiAnalysis:
+    def _analyze(self, matrix: BCOO, size: int) -> _BlockJacobiAnalysis:
         """Reorder the pattern and lay out the blocks. Reads no values."""
         if self.block_inverse is BlockInverse.QR and jax.default_backend() == "tpu":
             raise ValueError(
@@ -503,7 +503,7 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
 
         Measuring capture needs the pattern's indices as values, not placeholders, because
         the block size it chooses sets array shapes. Indices are values when the pattern is
-        analysed eagerly, which is what `factorize_symbolic` is for, but not when
+        analyzed eagerly, which is what `factorize_symbolic` is for, but not when
         `lineax.linear_solve` stages `init` into its own trace, which it does even for a call
         with no surrounding `jax.jit` of the caller's own. The estimate below covers that case
         using only the shape, and it can choose differently from what measuring the same
@@ -772,13 +772,13 @@ BlockJacobiGMRES.__init__.__doc__ = """**Arguments:**
     no surrounding `jax.jit` of the caller's own, since `lineax.linear_solve` stages `init`
     into a trace of its own. The estimate can choose a size that measuring the pattern
     eagerly would not have, occasionally by enough to weaken the preconditioner
-    substantially. Defaults to `False`, matching prior behaviour. Set `block_size=` or
+    substantially. Defaults to `False`, matching prior behavior. Set `block_size=` or
     resolve the analysis eagerly first with `factorize_symbolic` to avoid the estimate
     regardless of this setting.
 - `max_block_size`: largest block size that may be chosen. Since inverting the blocks costs
     on the order of `n * max_block_size^2`, this is the main control on the cost of a
     numeric factorization. Defaults to `128`.
-- `overlap_fraction`: fraction of each block that overlaps its neighbour. Raising it is
+- `overlap_fraction`: fraction of each block that overlaps its neighbor. Raising it is
     usually the cheapest way to improve convergence, since it increases the part of the
     matrix the preconditioner captures at a cost of only `1 / (1 - overlap_fraction)`.
     Defaults to `0.25`.

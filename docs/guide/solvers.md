@@ -104,7 +104,7 @@ The settings worth knowing about, in the order you would usually try them:
   unsuccessful `lineax.RESULTS` rather than raising, so check `solution.result` if you passed
   `throw=False`.
 - `overlap_fraction` is usually the cheapest way to improve convergence. Raising it widens each
-  block over its neighbours, so more of the matrix reaches the preconditioner, at a cost of
+  block over its neighbors, so more of the matrix reaches the preconditioner, at a cost of
   about `1 / (1 - overlap_fraction)`.
 - `max_block_size` caps how large a block may get. Inverting the blocks costs on the order of
   `n * max_block_size^2`, so this is the main control on how expensive a numeric factorization

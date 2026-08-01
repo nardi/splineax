@@ -42,12 +42,12 @@ An iterative method avoids factoring altogether. A **Krylov subspace method** bu
 spanned by $b, Ab, A^2 b, \ldots$ and takes the best approximation to $x$ available in it, so the
 only thing it ever asks of $A$ is the ability to multiply a vector. The method used here is the
 **generalized minimal residual** method (GMRES) of [Saad and Schultz](#ref-saad-schultz), which
-picks the approximation minimising the residual norm $\lVert b - A x \rVert$ over that space, and
+picks the approximation minimizing the residual norm $\lVert b - A x \rVert$ over that space, and
 which asks nothing about symmetry or definiteness of $A$. In its restarted form the space is capped
 at a fixed dimension and rebuilt from the current approximation, which bounds memory.
 
 How fast a Krylov method converges depends on the spectrum of $A$, and for most matrices coming out
-of discretised problems it converges far too slowly to be useful on its own. The remedy is an
+of discretized problems it converges far too slowly to be useful on its own. The remedy is an
 operator $M \approx A^{-1}$, so that the iteration effectively works with $M A$, whose spectrum is
 clustered near one. Choosing $M$ is a trade-off with no general answer: a more accurate $M$ costs
 more to build and more to apply on every iteration, and the exact inverse would be an admission that
@@ -131,14 +131,14 @@ choose it purely to improve structure, without changing what is being solved.
 In COO it's cheaper still, and worth spelling out because it explains why the reordering costs so
 little. The permutation appears nowhere in the values. Applying the inverse permutation elementwise
 to the stored row-index and column-index vectors relabels every entry with where it now lies, and
-that relabelling *is* the similarity transform. The cost is linear in $\mathrm{nse}$ and consists
-entirely of integer reads. Recovering CSR afterwards needs the relabelled index pairs sorted, and
+that relabeling *is* the similarity transform. The cost is linear in $\mathrm{nse}$ and consists
+entirely of integer reads. Recovering CSR afterwards needs the relabeled index pairs sorted, and
 because that sort is determined by the pattern alone we compute it once and afterwards replay it as
 a reordered read of the values.
 
 Two closely related operators get stored quite differently here, which is worth pausing on. The
 permutation $P$ is never built as a matrix. It's an index vector, its action on a vector is a
-reordered read, and $P A P^{\mathsf{T}}$ is the relabelling just described, so materialising it
+reordered read, and $P A P^{\mathsf{T}}$ is the relabeling just described, so materialising it
 would buy nothing. The reordered matrix $A'$, on the other hand, is built and kept, even though we
 could get the same effect by permuting on either side of every product with the original $A$. It's
 built because the iteration applies it many times, and because holding it in the reordered layout is
@@ -148,13 +148,13 @@ matrix-vector product, and only the second payoff needs the reordered matrix to 
 
 ## Reordering
 
-Finding the permutation that minimises bandwidth is NP-hard, so we use heuristics. Both of the ones
+Finding the permutation that minimizes bandwidth is NP-hard, so we use heuristics. Both of the ones
 available here treat the pattern of $A$ as a graph on $n$ vertices, with an edge between $i$ and $j$
 whenever $A_{ij}$ or $A_{ji}$ is nonzero.
 
 That graph needs no separate construction, which is the main reason this works as array code at all.
 The COO index pair already *is* an edge list, and reading each stored entry in both directions
-symmetrises it. Vertex degrees, the expansion of a search frontier and products with the graph
+symmetrizes it. Vertex degrees, the expansion of a search frontier and products with the graph
 Laplacian are then all reductions grouped by endpoint over that edge list. Nothing resembling an
 adjacency list or a linked structure is needed anywhere, which matters because those are exactly
 what make graph algorithms awkward to write as array operations.
@@ -169,7 +169,7 @@ repeat it here.
 
 What is worth understanding is *why* a breadth-first numbering narrows the band, because that also
 tells us when it will fail to. Once vertices are numbered by level, an edge can only join vertices
-in the same or in adjacent levels, since a vertex two levels away isn't a neighbour by definition.
+in the same or in adjacent levels, since a vertex two levels away isn't a neighbor by definition.
 So the bandwidth of the reordered matrix is bounded by the largest number of vertices in any two
 consecutive levels. Thin levels give a narrow band, and notice that this bound holds no matter how
 we order the vertices *within* a level. Ordering within a level is a refinement that improves the
@@ -189,18 +189,18 @@ lost by leaving them alone, but it's a genuine limitation of this heuristic.
 
 The alternative, due to [Barnard, Pothen and Simon](#ref-barnard), sidesteps the level-count problem
 by replacing the search with an eigenvector computation. Let $L = D - W$ be the **graph Laplacian**,
-where $W$ is the adjacency matrix of the symmetrised pattern and $D$ the diagonal matrix of vertex
+where $W$ is the adjacency matrix of the symmetrized pattern and $D$ the diagonal matrix of vertex
 degrees. $L$ is symmetric and positive semidefinite, its smallest eigenvalue is zero with the
 constant vector as eigenvector, and the eigenvector of the second smallest eigenvalue is the
 **Fiedler vector**. Sorting the vertices by its entries gives the ordering.
 
 Why should that work? The Fiedler vector is the smoothest non-trivial function on the graph, in the
-sense that it minimises $\sum_{(i,j)} (v_i - v_j)^2$ over unit vectors orthogonal to the constant.
+sense that it minimizes $\sum_{(i,j)} (v_i - v_j)^2$ over unit vectors orthogonal to the constant.
 Adjacent vertices therefore receive similar values, so sorting by those values places connected
 vertices close together, which is precisely what a small bandwidth asks for.[^minsum]
 
-[^minsum]: More formally, the same minimisation is a continuous relaxation of the
-discrete problem of minimising $\sum_{(i,j)} (\pi_i - \pi_j)^2$ over permutations $\pi$, known as
+[^minsum]: More formally, the same minimization is a continuous relaxation of the
+discrete problem of minimizing $\sum_{(i,j)} (\pi_i - \pi_j)^2$ over permutations $\pi$, known as
 the minimum 2-sum problem, a quantity closely related to the envelope. The relaxation and the
 envelope bound it gives are due to [Barnard, Pothen and Simon](#ref-barnard), who report envelope
 reductions of more than a factor of two over level-set orderings on some matrices. That result is
@@ -249,7 +249,7 @@ approximating a matrix, and it's what makes such an aggressive approximation saf
 Blocks that don't overlap nevertheless throw away more than they need to. An interaction between two
 unknowns is captured only when both fall in the same group, so an unknown sitting near a group
 boundary loses most of its interactions no matter how narrow the band is. Widening each group so it
-overlaps its neighbours recovers them. Overlap turns a group into a **subdomain**, and the resulting
+overlaps its neighbors recovers them. Overlap turns a group into a **subdomain**, and the resulting
 family of methods are the **Schwarz** methods.
 
 Overlap creates a difficulty of its own, though: a row belonging to several subdomains would have
@@ -271,7 +271,7 @@ makes the preconditioner cheap to apply, and it's why a block method is preferre
 stronger preconditioner built on triangular factors.
 
 Which subdomain a stored entry belongs to, and where it sits inside that subdomain, follow directly
-from its relabelled indices, so assembling every block is one pass over the stored entries. Entries
+from its relabeled indices, so assembling every block is one pass over the stored entries. Entries
 that no subdomain covers get a destination outside the block array and are discarded there, which
 turns "ignore what falls outside the blocks" into an addressing choice rather than a test applied
 per entry.
@@ -323,7 +323,7 @@ cheapest partition that reaches a required capture:
 > 3. Among the rest, keep the one of least cost, preferring the smaller $b$ on a tie.
 > 4. If no candidate reaches the target, keep the largest permitted $b$.
 
-Minimising cost rather than $b$ matters for small matrices, where the two come apart. When $n$ is
+Minimizing cost rather than $b$ matters for small matrices, where the two come apart. When $n$ is
 below the permitted maximum, one block spanning the whole matrix captures everything and costs
 $n^2$. A slightly smaller block reaching the same capture target would need two blocks and cost
 more, so the single block wins. In that regime the preconditioner is the exact inverse of $A'$ and
@@ -414,7 +414,7 @@ preconditioned at all. Those unknowns aren't some oddity, though. They're the de
 whole class of problems, so it's worth choosing the blocks differently so the case doesn't come up.
 
 A **saddle-point system** is one where some unknowns carry no coefficient on their own diagonal,
-because their equations are constraints rather than balances. Discretised incompressible flow is the
+because their equations are constraints rather than balances. Discretized incompressible flow is the
 standard example. A velocity unknown appears in a Laplacian and so has a large diagonal entry, while
 a pressure unknown appears only as the multiplier enforcing that the velocity field is
 divergence-free, and no pressure-pressure term exists at all. Grouping the unknowns by kind gives
@@ -428,11 +428,11 @@ the unknowns. What we *can* change is which unknowns share a block.
 
 ### The pattern as a bipartite graph
 
-The reordering stage read the pattern as a graph on a single set of vertices, symmetrised so that an
+The reordering stage read the pattern as a graph on a single set of vertices, symmetrized so that an
 entry and its transpose became one edge. Here we need the other reading. Take two disjoint sets of
 vertices, one for the rows and one for the columns, and join row $i$ to column $j$ whenever $A_{ij}$
 is stored. That's a **bipartite graph**, and the stored index pair is already its edge list, this
-time with no symmetrisation.
+time with no symmetrization.
 
 A **matching** is a set of edges no two of which share a vertex. Read as a table, that's a partial
 one-to-one assignment of rows to columns in which every assigned pair is a stored entry. A matching
@@ -535,7 +535,7 @@ Choosing the blocks well doesn't widen what a block method can see. Eliminating 
 unknowns leaves the constraint unknowns coupled to one another through $B F^{-1} B^{\mathsf{T}}$,
 and $F^{-1}$ is dense, so that coupling can reach clear across the problem. Where it does, no
 partition into small blocks captures it and the iteration converges slowly however we choose the
-blocks. The method leans on the constraints being local, which holds for a discretised problem and
+blocks. The method leans on the constraints being local, which holds for a discretized problem and
 fails for a pattern whose entries are scattered at random.
 
 There's also a subtler gap between adjacency in the reordered range and adjacency inside the block
@@ -600,7 +600,7 @@ after finding its transversal rather than before.
 [^duff-koster-2001]: The matching here is unweighted, choosing among several
 rows that could fill a column by a fixed rule rather than by the size of the entry. [Duff and
 Koster](#ref-duff-koster-2001)'s fuller treatment (and the MC64 codes built on it) weight the
-matching to maximise the product of the chosen entries, which needs the values rather than the
+matching to maximize the product of the chosen entries, which needs the values rather than the
 pattern alone. That's a real difference in a way the next section comes back to, not just a
 refinement left for later.
 
@@ -622,7 +622,7 @@ right-hand side and restoring a solution swap roles under a transpose, exactly a
 linear system, so building the transposed pair is `perm ↦ inverse_permutation(inv_perm)` and
 `inv_perm ↦ inverse_permutation(perm)`. Applied when the two already are each other's inverse, which
 covers every pattern without a transversal, this reproduces them unchanged. So it's a strict
-generalisation of what the solver already did, rather than a special case bolted on beside it.
+generalization of what the solver already did, rather than a special case bolted on beside it.
 
 ### What this repair does and doesn't guarantee
 
@@ -643,7 +643,7 @@ eigenvalues, and with them how readily GMRES converges, far worse than the origi
 nothing about its condition number.
 
 Both effects are mild when only a few rows are actually out of place, which is what an accidental
-relabelling ordinarily looks like, and both grow with how much of the matrix a single transversal
+relabeling ordinarily looks like, and both grow with how much of the matrix a single transversal
 has to move. Neither turns into a wrong answer, only into a slower one: the transversal only
 permutes equations, so whatever the iteration converges to still solves the system it was asked to
 solve. A matrix shuffled so thoroughly that its own locality is gone is, in that sense, no different
@@ -684,7 +684,7 @@ reordered matrix is a considerably better approximate inverse than a block-diago
 applying it needs triangular solves, which is the sequential structure this method set out to avoid.
 Two established remedies fit the same constraints as the present design: solving the triangular
 systems approximately by a few Jacobi sweeps, and [incomplete sparse approximate
-inverses](#ref-anzt-isai), which generalise block-Jacobi by solving small local problems for the
+inverses](#ref-anzt-isai), which generalize block-Jacobi by solving small local problems for the
 sparsity pattern of the inverse itself.
 
 **Mixed and adaptive precision.** The preconditioner needn't be as accurate as the matrix, since its

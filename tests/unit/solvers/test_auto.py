@@ -4,7 +4,7 @@
 dependency is installed) or otherwise `KLU` on CPU when x64 is enabled, since both are
 double precision only, and `Spsolve` otherwise (CPU without x64, or any other
 platform). It exposes the same factorization API as `Pardiso`/`KLU` so it can be
-substituted verbatim. The generic solve-correctness suite (parametrised over all
+substituted verbatim. The generic solve-correctness suite (parametrized over all
 solvers) lives in `test_solvers.py`, and the shared factorization-reuse contract in
 `test_factorization.py`. This module covers Auto-specific dispatch and Protocol
 conformance.

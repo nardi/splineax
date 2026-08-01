@@ -15,7 +15,7 @@ most since there is no other way to tell a good answer from a bad one.
 
 *A small residual* is required only of the tractable families. Demanding it of the hard ones
 would be asserting that a weak preconditioner works, which it does not, and pinning a failure
-threshold would only record today's behaviour.
+threshold would only record today's behavior.
 
 Note that the tractable families are judged on the relative residual rather than on the success
 flag. Lineax's criterion is a max norm scaled by the right-hand side, so whether it is met

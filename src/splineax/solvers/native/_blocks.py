@@ -1,6 +1,6 @@
 """Geometry of the overlapping block partition, and the choice of block size.
 
-The reordered index range is cut into equal-size intervals that overlap their neighbours by
+The reordered index range is cut into equal-size intervals that overlap their neighbors by
 a fixed fraction. Each interval indexes one diagonal block of the reordered matrix, and each
 row is assigned a single owning interval so that applying the collection of block inverses
 sums to a well-defined operator rather than double-counting the overlaps.

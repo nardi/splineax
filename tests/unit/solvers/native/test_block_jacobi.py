@@ -255,7 +255,7 @@ def test_capture_is_reported(enable_x64: None) -> None:
 
 
 def test_symbolic_analysis_is_reused_across_values(enable_x64: None) -> None:
-    """One analysed pattern must serve different values, which is the whole point of
+    """One analyzed pattern must serve different values, which is the whole point of
     separating the stages. Solving twice through the same scope must give both answers."""
     size = 256
     matrix = _banded(size, half_width=2, seed=9)

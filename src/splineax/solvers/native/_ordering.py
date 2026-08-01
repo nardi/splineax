@@ -21,7 +21,7 @@ from jaxtyping import Array, Bool, Inexact, Integer
 # unnumbered vertices sort last and `rank == _UNRANKED` is the "still to do" test.
 _UNRANKED = jnp.iinfo(jnp.int32).max
 
-# Below this size the Laplacian is small enough to diagonalise densely, which is exact and
+# Below this size the Laplacian is small enough to diagonalize densely, which is exact and
 # free of the convergence risk an iterative eigensolver carries. Above it the dense matrix
 # would be the largest array in the solver, so LOBPCG takes over.
 _DENSE_EIGH_LIMIT = 256
@@ -61,7 +61,7 @@ def order(
 
     The result is in new-position order: entry `k` is the original index that ends up at
     position `k`. Reordering a vector is therefore an indexing by the result, while
-    relabelling stored indices needs `inverse_permutation` of it.
+    relabeling stored indices needs `inverse_permutation` of it.
     """
     match ordering:
         case Ordering.NONE:
@@ -89,7 +89,7 @@ def _undirected_edges(
 ) -> tuple[Integer[Array, " 2nse"], Integer[Array, " 2nse"], Bool[Array, " 2nse"]]:
     """The pattern as an undirected edge list, plus a mask dropping the diagonal.
 
-    Reading every stored entry in both directions symmetrises the pattern, which is what
+    Reading every stored entry in both directions symmetrizes the pattern, which is what
     both orderings need and what the pattern of `A + A^T` would give. Self-loops carry no
     adjacency information, so the mask excludes them.
     """
@@ -118,10 +118,10 @@ def _reverse_cuthill_mckee(
     An edge can only join vertices in the same or adjacent levels, so the bandwidth is
     bounded by the largest number of vertices in two consecutive levels: thin levels give a
     narrow band. Within a level, vertices are ordered by the position of their
-    lowest-numbered neighbour in the previous level and then by degree, which keeps siblings
+    lowest-numbered neighbor in the previous level and then by degree, which keeps siblings
     together and is what separates Cuthill-McKee from a plain breadth-first numbering.
 
-    Ordering by neighbour *position* rather than neighbour index is what makes the result
+    Ordering by neighbor *position* rather than neighbor index is what makes the result
     independent of how the unknowns happened to be numbered to begin with. It costs one sort
     per level, since a level's positions are only known once the previous level has been
     numbered.
@@ -222,8 +222,8 @@ def _spectral(
 
     def score(vector: Inexact[Array, " n"]) -> tuple[Array, Array]:
         perm = jnp.argsort(vector).astype(jnp.int32)
-        relabelled = inverse_permutation(perm)
-        return perm, bandwidth(relabelled[rows], relabelled[cols])
+        relabeled = inverse_permutation(perm)
+        return perm, bandwidth(relabeled[rows], relabeled[cols])
 
     permutations, bandwidths = jax.vmap(score, in_axes=1)(candidates)
     return permutations[jnp.argmin(bandwidths)]
@@ -255,12 +255,12 @@ def _small_laplacian_eigenvectors(
         return vectors[:, 1:wanted]
 
     def laplacian_product(block: Inexact[Array, "n k"]) -> Inexact[Array, "n k"]:
-        neighbour_sum = jax.ops.segment_sum(
+        neighbor_sum = jax.ops.segment_sum(
             jnp.where(off_diagonal[:, None], block[target], 0.0),
             source,
             num_segments=size,
         )
-        return diagonal[:, None] * block - neighbour_sum
+        return diagonal[:, None] * block - neighbor_sum
 
     # LOBPCG finds the *largest* eigenvalues, so the Laplacian is reflected about a shift
     # exceeding its spectral radius. The largest eigenvalues of the reflection belong to the

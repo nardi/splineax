@@ -1,11 +1,11 @@
-"""Behavioural factorization-reuse suite, shared across all sparse solvers.
+"""Behavioral factorization-reuse suite, shared across all sparse solvers.
 
 Every solver exposing the factorization-reuse API (`factorize`, `factorize_symbolic`)
 must satisfy the same contract: the returned states solve correctly, survive being reused
 across right-hand sides, transpose correctly, and can be passed into a jitted function.
 The same holds for a scope bundled with its solver by
 `factorize_symbolic(..., as_solver=True)`, covered by the `as_solver` tests at the end.
-This module checks that contract at the public API level, parametrised over the `solver`
+This module checks that contract at the public API level, parametrized over the `solver`
 fixture (spsolve, klu, pardiso, auto) from [conftest.py](conftest.py).
 
 The solver-internal lifecycle tests (which underlying function each tier calls, when
