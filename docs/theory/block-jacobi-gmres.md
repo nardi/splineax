@@ -548,7 +548,10 @@ estimate sized for an average row rather than the pattern actually given, can ma
 instead. Nothing breaks when it happens: the rank-revealing block inverse is exactly the fallback
 this leans on, so the affected rows are only as preconditioned as they would have been without the
 grouping. It is a reason to prefer measuring the block size eagerly, or setting one explicitly,
-over trusting the estimate on a pattern with pronounced local structure.
+over trusting the estimate on a pattern with pronounced local structure, and
+`reject_estimated_block_size` turns that preference into something the solver enforces rather than
+something a caller has to remember: with it set, reaching the estimate at all raises instead of
+estimating.
 
 ### Provenance
 

@@ -318,6 +318,58 @@ def test_a_traced_pattern_falls_back_to_an_estimated_block_size(
     assert np.allclose(np.asarray(solution), expected, atol=1e-6)
 
 
+def test_reject_estimated_block_size_declines_a_traced_pattern(
+    enable_x64: None,
+) -> None:
+    """`reject_estimated_block_size=True` must refuse the same traced pattern the
+    previous test accepts, rather than silently falling back to the shape-only
+    estimate: a caller who asked for the choice to be measured, not guessed, should
+    hear about it when that cannot be honoured."""
+    size = 128
+    matrix = _banded(size, half_width=2, seed=13)
+    sparsity = BCOO.fromdense(jnp.asarray(matrix))
+    shape = sparsity.shape
+
+    @jax.jit
+    def run(indices: jnp.ndarray, values: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
+        operator = BCOOLinearOperator(BCOO((values, indices), shape=shape))
+        solver = BlockJacobiGMRES(
+            rtol=1e-10, atol=1e-10, reject_estimated_block_size=True
+        )
+        return lx.linear_solve(operator, b, solver=solver).value
+
+    vector = _rhs(size, seed=14)
+    with pytest.raises(ValueError, match="reject_estimated_block_size"):
+        run(sparsity.indices, sparsity.data, vector)
+
+
+def test_reject_estimated_block_size_allows_an_explicit_size(
+    enable_x64: None,
+) -> None:
+    """The setting only guards the estimate. An explicit `block_size` never estimates
+    anything, so the same traced pattern must still solve when one is given."""
+    size = 128
+    matrix = _banded(size, half_width=2, seed=13)
+    sparsity = BCOO.fromdense(jnp.asarray(matrix))
+    shape = sparsity.shape
+
+    @jax.jit
+    def run(indices: jnp.ndarray, values: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
+        operator = BCOOLinearOperator(BCOO((values, indices), shape=shape))
+        solver = BlockJacobiGMRES(
+            rtol=1e-10,
+            atol=1e-10,
+            block_size=16,
+            reject_estimated_block_size=True,
+        )
+        return lx.linear_solve(operator, b, solver=solver).value
+
+    vector = _rhs(size, seed=14)
+    solution = run(sparsity.indices, sparsity.data, vector)
+    expected = np.linalg.solve(matrix, np.asarray(vector))
+    assert np.allclose(np.asarray(solution), expected, atol=1e-6)
+
+
 def test_choosing_a_block_size_rejects_a_traced_pattern() -> None:
     """The choice itself must fail with an explanation rather than an opaque tracer error,
     since the fix is to pass a block size and that is not otherwise obvious."""

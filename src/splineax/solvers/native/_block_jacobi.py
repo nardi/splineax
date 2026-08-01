@@ -309,6 +309,7 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
     stagnation_iters: int = eqx.field(default=20, static=True)
     ordering: Ordering = eqx.field(default=Ordering.RCM, static=True)
     block_size: int | None = eqx.field(default=None, static=True)
+    reject_estimated_block_size: bool = eqx.field(default=False, static=True)
     max_block_size: int = eqx.field(default=128, static=True)
     overlap_fraction: float = eqx.field(default=0.25, static=True)
     capture_target: float = eqx.field(default=0.8, static=True)
@@ -503,8 +504,11 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
         Measuring capture needs the pattern's indices as values, not placeholders, because
         the block size it chooses sets array shapes. Indices are values when the pattern is
         analysed eagerly, which is what `factorize_symbolic` is for, but not when
-        `lineax.linear_solve` stages `init` into its own trace. The estimate below covers
-        that case using only the shape.
+        `lineax.linear_solve` stages `init` into its own trace, which it does even for a call
+        with no surrounding `jax.jit` of the caller's own. The estimate below covers that case
+        using only the shape, and it can choose differently from what measuring the same
+        pattern eagerly would: on a pattern with pronounced local structure the difference can
+        be enough to matter, which is what `reject_estimated_block_size` is for.
         """
         measurable = not isinstance(reordered_rows, jax.core.Tracer)
         if self.block_size is not None:
@@ -517,6 +521,16 @@ class BlockJacobiGMRES(AbstractSparseLinearSolver[_BlockJacobiState]):
                 self.max_block_size,
                 self.overlap_fraction,
                 self.capture_target,
+            )
+        elif self.reject_estimated_block_size:
+            raise ValueError(
+                "`BlockJacobiGMRES(reject_estimated_block_size=True)` was asked to choose "
+                "a block size, but the pattern is not available as concrete values here, so "
+                "the choice can only be estimated from its shape rather than measured "
+                "against it. Pass `block_size=` explicitly, or resolve the analysis eagerly "
+                "first with `factorize_symbolic` or a direct call to `solver.init`, either "
+                "of which measures the real pattern regardless of how the solve that reuses "
+                "the result is later called."
             )
         else:
             chosen = self._estimated_block_size(size, stored)
@@ -753,6 +767,14 @@ BlockJacobiGMRES.__init__.__doc__ = """**Arguments:**
     choose. Choosing needs a pattern whose indices are known values, since the block size
     sets array shapes; setting this explicitly makes the solver traceable even when they are
     not.
+- `reject_estimated_block_size`: raise instead of silently estimating a block size from the
+    pattern's shape when its indices are not known values, which happens even for a call with
+    no surrounding `jax.jit` of the caller's own, since `lineax.linear_solve` stages `init`
+    into a trace of its own. The estimate can choose a size that measuring the pattern
+    eagerly would not have, occasionally by enough to weaken the preconditioner
+    substantially. Defaults to `False`, matching prior behaviour. Set `block_size=` or
+    resolve the analysis eagerly first with `factorize_symbolic` to avoid the estimate
+    regardless of this setting.
 - `max_block_size`: largest block size that may be chosen. Since inverting the blocks costs
     on the order of `n * max_block_size^2`, this is the main control on the cost of a
     numeric factorization. Defaults to `128`.

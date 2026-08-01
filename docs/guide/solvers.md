@@ -110,6 +110,15 @@ The settings worth knowing about, in the order you would usually try them:
   `n * max_block_size^2`, so this is the main control on how expensive a numeric factorization
   is. That cost is paid per set of values, which matters if you are solving a sequence of
   related systems.
+- `reject_estimated_block_size` matters when you call `lx.linear_solve` directly without
+  choosing `block_size` yourself: `lineax.linear_solve` stages the solve into a trace of its
+  own, even without any `jax.jit` of your own around the call, so choosing a block size falls
+  back to a shape-only estimate rather than measuring the actual pattern. That estimate can
+  differ from what eager measurement would choose, occasionally by enough to weaken the
+  preconditioner substantially. Set `block_size=` yourself, or resolve the analysis eagerly
+  first with `factorize_symbolic`, to avoid the estimate outright. Set
+  `reject_estimated_block_size=True` to have the solver raise rather than silently fall back
+  to it if you forget.
 - `ordering` selects the reordering. The default, `Ordering.RCM`, gives the narrowest band on
   everything measured here. Use `Ordering.NONE` for an operator that is already banded, since
   reordering it only costs time, and `Ordering.SPECTRAL` for a pattern whose graph has very many
