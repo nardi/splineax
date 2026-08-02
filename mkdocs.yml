@@ -58,7 +58,9 @@ nav:
       - Basic usage: guide/basic.md
       - Operators: guide/operators.md
       - Solvers: guide/solvers.md
+      - Iterative solvers: guide/iterative.md
       - Advanced usage: guide/advanced.md
   - API reference:
       - Operators: api/operators.md
       - Solvers: api/solvers.md
+      - Preconditioners: api/preconditioners.md

@@ -1,6 +1,6 @@
 # splineax
 
-Sparse linear operators and direct solvers for
+Sparse linear operators and solvers for
 [Lineax](https://github.com/patrick-kidger/lineax).
 
 `splineax` lets you keep a linear system in its native sparse storage
@@ -21,6 +21,11 @@ It provides:
   SuiteSparse KLU library via `klujax`, with factorization reuse), and
   [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] which picks one based on the
   platform.
+- A **preconditioned iterative solver**,
+  [`PreconditionedIterativeLinearSolver`][splineax.PreconditionedIterativeLinearSolver],
+  which gives lineax's `CG` / `BiCGStab` / `GMRES` the preconditioner they need but do
+  not build --- such as [`BlockJacobi`][splineax.BlockJacobi], analysed once from the
+  sparsity pattern and rebuilt cheaply per solve.
 - A [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol for separating
   factorization from solving.
 
@@ -81,12 +86,14 @@ with solver.factorize(operator) as factorized_state:
 - [Basic usage](guide/basic.md): build operators and solve, just like plain lineax.
 - [Operators](guide/operators.md): `BCOO` vs `BCSR`, how to construct them, and details on sparse
   Jacobian operators.
-- [Solvers](guide/solvers.md): what each solver does and when to use it.
+- [Solvers](guide/solvers.md): what each direct solver does and when to use it.
+- [Iterative solvers](guide/iterative.md): preconditioning a Krylov method, and how a
+  preconditioner's parameters are fulfilled by values or by injected providers.
 - [Advanced usage](guide/advanced.md): reuse a factorization across many solves with the
   `SparseLinearSolver` protocol.
 
 !!! note
 
-    The solvers handle **square, nonsingular** operators only. `KLU` additionally runs on
+    The direct solvers handle **square, nonsingular** operators only. `KLU` additionally runs on
     **CPU in double precision** only (see [Solvers](guide/solvers.md)); `Spsolve` runs on
     any backend.

@@ -7,7 +7,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import KLUHandleManager
 from lineax import AbstractLinearOperator, materialise
@@ -20,13 +19,10 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
+from splineax._pattern import as_coo_pattern
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.operators._jacobian import (
-    JacobianColoring,
-    SparseJacobianLinearOperator,
-    SparseJacobianLinearOperatorColoring,
-)
+from splineax.operators._jacobian import SparseJacobianLinearOperator
 from splineax.solvers._handle import (
     HandleDependencies,
     _HandleToken,
@@ -388,62 +384,7 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         # The scope itself, kept separate from `factorize_symbolic` above so that the
         # public method can be overloaded on `as_solver` (`@contextmanager` and
         # `@overload` do not compose).
-        match sparsity:
-            case SparseJacobianLinearOperator(transposed=True):
-                # The stored pattern describes the forward Jacobian. asdex emits
-                # `BCOO` values in the pattern's index order and `BCOO.T` swaps the
-                # index columns without reordering entries, so swapping rows and
-                # columns here keeps the indices aligned with the values that
-                # `_KLUSymbolicScope.init` later pairs them with.
-                pattern = sparsity.coloring.sparsity
-                Ai = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                Aj = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                shape = pattern.shape[::-1]
-            case (
-                SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring()
-            ):
-                # Both hold the coloring one level in: the operator stores an
-                # `asdex.ColoredPattern` whose `.sparsity` is the pattern, and the
-                # operator coloring stores a `JacobianColoring` whose `.sparsity`
-                # property returns the same pattern.
-                pattern = sparsity.coloring.sparsity
-                Ai = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                Aj = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                shape = pattern.shape
-            case JacobianColoring():
-                # A bare coloring exposes the pattern directly through its
-                # `.sparsity` property.
-                pattern = sparsity.sparsity
-                Ai = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                Aj = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                shape = pattern.shape
-            case BCSRLinearOperator():
-                bcoo = sparsity.matrix.to_bcoo()
-                Ai = bcoo.indices[:, 0].astype(jnp.int32)
-                Aj = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-            case BCOOLinearOperator():
-                bcoo = sparsity.matrix
-                Ai = bcoo.indices[:, 0].astype(jnp.int32)
-                Aj = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-            case BCSR():
-                bcoo = sparsity.to_bcoo()
-                Ai = bcoo.indices[:, 0].astype(jnp.int32)
-                Aj = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-            case BCOO():
-                Ai = sparsity.indices[:, 0].astype(jnp.int32)
-                Aj = sparsity.indices[:, 1].astype(jnp.int32)
-                shape = sparsity.shape
-            case _:
-                raise TypeError(
-                    "`KLU.factorize_symbolic` requires a `BCOO`, `BCSR`, "
-                    "`BCOOLinearOperator`, `BCSRLinearOperator`, "
-                    "`SparseJacobianLinearOperator`, "
-                    "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
-                    f"got {type(sparsity).__name__}."
-                )
+        Ai, Aj, shape = as_coo_pattern(sparsity, "`KLU.factorize_symbolic`")
 
         if shape[0] != shape[1]:
             raise ValueError(

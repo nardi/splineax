@@ -20,6 +20,10 @@
 
 ---
 
+::: splineax.PreconditionedIterativeLinearSolver
+
+---
+
 ::: splineax.solvers.ReorderingScheme
 
 ---

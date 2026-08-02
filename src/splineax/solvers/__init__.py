@@ -1,4 +1,10 @@
 from ._auto import AutoSparseLinearSolver as AutoSparseLinearSolver
+from ._iterative import (
+    IterativeLinearSolver as IterativeLinearSolver,
+)
+from ._iterative import (
+    PreconditionedIterativeLinearSolver as PreconditionedIterativeLinearSolver,
+)
 from ._klu import KLU as KLU
 from ._pardiso import Pardiso as Pardiso
 from ._sparse import (

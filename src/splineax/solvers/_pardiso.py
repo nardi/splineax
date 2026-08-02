@@ -18,12 +18,11 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
+from splineax._pattern import as_coo_pattern, sparsity_values
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
-    JacobianColoring,
     SparseJacobianLinearOperator,
-    SparseJacobianLinearOperatorColoring,
 )
 from splineax.solvers._handle import (
     HandleDependencies,
@@ -493,58 +492,8 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
         # The scope itself, kept separate from `factorize_symbolic` above so that the
         # public method can be overloaded on `as_solver` (`@contextmanager` and
         # `@overload` do not compose).
-        values = None
-        match sparsity:
-            case SparseJacobianLinearOperator(transposed=True):
-                # See `KLU.factorize_symbolic`'s matching case for why rows/columns
-                # are swapped here.
-                pattern = sparsity.coloring.sparsity
-                rows = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                cols = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                shape = pattern.shape[::-1]
-            case (
-                SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring()
-            ):
-                pattern = sparsity.coloring.sparsity
-                rows = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                cols = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                shape = pattern.shape
-            case JacobianColoring():
-                pattern = sparsity.sparsity
-                rows = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                cols = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                shape = pattern.shape
-            case BCSRLinearOperator():
-                bcoo = sparsity.matrix.to_bcoo()
-                rows = bcoo.indices[:, 0].astype(jnp.int32)
-                cols = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-                values = bcoo.data
-            case BCOOLinearOperator():
-                bcoo = sparsity.matrix
-                rows = bcoo.indices[:, 0].astype(jnp.int32)
-                cols = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-                values = bcoo.data
-            case BCSR():
-                bcoo = sparsity.to_bcoo()
-                rows = bcoo.indices[:, 0].astype(jnp.int32)
-                cols = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-                values = bcoo.data
-            case BCOO():
-                rows = sparsity.indices[:, 0].astype(jnp.int32)
-                cols = sparsity.indices[:, 1].astype(jnp.int32)
-                shape = sparsity.shape
-                values = sparsity.data
-            case _:
-                raise TypeError(
-                    "`Pardiso.factorize_symbolic` requires a `BCOO`, `BCSR`, "
-                    "`BCOOLinearOperator`, `BCSRLinearOperator`, "
-                    "`SparseJacobianLinearOperator`, "
-                    "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
-                    f"got {type(sparsity).__name__}."
-                )
+        rows, cols, shape = as_coo_pattern(sparsity, "`Pardiso.factorize_symbolic`")
+        values = sparsity_values(sparsity)
 
         if shape[0] != shape[1]:
             raise ValueError(

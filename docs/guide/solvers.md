@@ -1,6 +1,7 @@
 # Solvers
 
-`splineax` provides four sparse direct solvers. All implement Lineax's
+`splineax` provides four sparse **direct** solvers, plus a preconditioned **iterative**
+solver documented separately in [Iterative solvers](iterative.md). All implement Lineax's
 `AbstractLinearSolver` interface (so they work with `lineax.linear_solve`) and the
 [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol (factorization reuse, see
 [Advanced usage](advanced.md)). All handle **square, nonsingular** operators only.

@@ -17,3 +17,7 @@
 ---
 
 ::: splineax.SparseJacobianLinearOperatorColoring
+
+---
+
+::: splineax.BlockDiagonalLinearOperator

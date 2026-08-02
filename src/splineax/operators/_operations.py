@@ -7,9 +7,13 @@ helpers here. The identical methods (`mv`, `as_matrix`, `in_structure`,
 `singledispatch` registrations are installed by `register_sparse_operator`, which each
 operator calls on its own class. The few format-specific operations (`transpose`,
 `_as_bcoo`, `_conj`) remain methods on the concrete operators.
-"""
 
-from typing import Any
+Those registrations come in two layers. `register_operator_tags` installs everything
+answerable from an operator's tags and shape, and is shared with
+`BlockDiagonalLinearOperator`, which has no `matrix` to speak of;
+`register_sparse_operator` adds the band extraction (`diagonal`, `tridiagonal`) that
+reads one.
+"""
 
 import jax
 import jax.numpy as jnp
@@ -43,7 +47,7 @@ from lineax._tags import (
     upper_triangular_tag,
 )
 
-from splineax.operators._sparse import SparseLinearOperator
+from splineax.operators._sparse import SparseLinearOperator, TaggedLinearOperator
 
 
 def _bcoo_band(matrix: BCOO, offset: int) -> Inexact[Array, " size"]:
@@ -99,15 +103,15 @@ def sparse_out_structure(
 # Shared `singledispatch` implementations. These mirror `lineax.MatrixLinearOperator`.
 
 
-def _has_real_dtype(operator: SparseLinearOperator[BCOO | BCSR]) -> bool:
-    leaves = jtu.tree_leaves(
-        (sparse_in_structure(operator), sparse_out_structure(operator))
-    )
+def _has_real_dtype(operator: TaggedLinearOperator) -> bool:
+    # Reads the structures through the operator's own methods rather than
+    # `sparse_in_structure`, so that this works for storage-free operators too.
+    leaves = jtu.tree_leaves((operator.in_structure(), operator.out_structure()))
     dtype = jnp.result_type(*leaves)
     return not jnp.issubdtype(dtype, jnp.complexfloating)
 
 
-def _is_symmetric(operator: SparseLinearOperator[Any]) -> bool:
+def _is_symmetric(operator: TaggedLinearOperator) -> bool:
     if symmetric_tag in operator.tags or diagonal_tag in operator.tags:
         return True
     if (
@@ -118,33 +122,33 @@ def _is_symmetric(operator: SparseLinearOperator[Any]) -> bool:
     return False
 
 
-def _is_diagonal(operator: SparseLinearOperator[Any]) -> bool:
+def _is_diagonal(operator: TaggedLinearOperator) -> bool:
     return diagonal_tag in operator.tags or (
         operator.in_size() == 1 and operator.out_size() == 1
     )
 
 
-def _is_tridiagonal(operator: SparseLinearOperator[Any]) -> bool:
+def _is_tridiagonal(operator: TaggedLinearOperator) -> bool:
     return tridiagonal_tag in operator.tags or diagonal_tag in operator.tags
 
 
-def _has_unit_diagonal(operator: SparseLinearOperator[Any]) -> bool:
+def _has_unit_diagonal(operator: TaggedLinearOperator) -> bool:
     return unit_diagonal_tag in operator.tags
 
 
-def _is_lower_triangular(operator: SparseLinearOperator[Any]) -> bool:
+def _is_lower_triangular(operator: TaggedLinearOperator) -> bool:
     return lower_triangular_tag in operator.tags
 
 
-def _is_upper_triangular(operator: SparseLinearOperator[Any]) -> bool:
+def _is_upper_triangular(operator: TaggedLinearOperator) -> bool:
     return upper_triangular_tag in operator.tags
 
 
-def _is_positive_semidefinite(operator: SparseLinearOperator[Any]) -> bool:
+def _is_positive_semidefinite(operator: TaggedLinearOperator) -> bool:
     return positive_semidefinite_tag in operator.tags
 
 
-def _is_negative_semidefinite(operator: SparseLinearOperator[Any]) -> bool:
+def _is_negative_semidefinite(operator: TaggedLinearOperator) -> bool:
     return negative_semidefinite_tag in operator.tags
 
 
@@ -174,14 +178,25 @@ def _tridiagonal(
     return _bcoo_band(matrix, 0), _bcoo_band(matrix, -1), _bcoo_band(matrix, 1)
 
 
-def _conj(operator: SparseLinearOperator[Any]) -> AbstractLinearOperator:
+def _conj(operator: TaggedLinearOperator) -> AbstractLinearOperator:
     return operator._conj()
 
 
-def register_sparse_operator(cls: type[SparseLinearOperator[BCOO | BCSR]]) -> None:
-    """Registers all of Lineax's `singledispatch` operations for a sparse operator
-    `cls`, so that it works with Lineax's solvers. Shared by both operators in lieu of
-    a common base class.
+def register_operator_tags(cls: type[TaggedLinearOperator]) -> None:
+    """Registers the Lineax `singledispatch` operations that every operator here shares.
+
+    These are exactly the ones answerable from `tags` and the operator's shape, plus the
+    two that must stay away from a dense fallback. Split out from
+    `register_sparse_operator` because `BlockDiagonalLinearOperator` stores a stack of
+    dense blocks rather than a `matrix`, so it can take all of this but none of the
+    band extraction below.
+
+    Registering `linearise` and `materialise` as the identity is load-bearing rather
+    than an optimisation. Lineax's default rules would densify the operator into an
+    `n x n` array -- and `preconditioner_and_y0` calls `linearise` on whatever is passed
+    as `options["preconditioner"]`, so without this every preconditioned solve would
+    quietly allocate a dense matrix of the very size the sparse operator exists to
+    avoid.
     """
     is_symmetric.register(cls, _is_symmetric)
     is_diagonal.register(cls, _is_diagonal)
@@ -193,6 +208,15 @@ def register_sparse_operator(cls: type[SparseLinearOperator[BCOO | BCSR]]) -> No
     is_negative_semidefinite.register(cls, _is_negative_semidefinite)
     linearise.register(cls, _identity)
     materialise.register(cls, _identity)
+    conj.register(cls, _conj)
+
+
+def register_sparse_operator(cls: type[SparseLinearOperator[BCOO | BCSR]]) -> None:
+    """Registers all of Lineax's `singledispatch` operations for a sparse operator
+    `cls`, so that it works with Lineax's solvers. Shared by both operators in lieu of
+    a common base class.
+    """
+    register_operator_tags(cls)
+    # Band extraction, which needs the operator's `matrix`.
     diagonal.register(cls, _diagonal)
     tridiagonal.register(cls, _tridiagonal)
-    conj.register(cls, _conj)
