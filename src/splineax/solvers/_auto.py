@@ -44,15 +44,15 @@ class AutoSparseLinearSolver(
     (SuiteSparse, factorization reuse). Both are double precision only, hence the x64
     requirement. On any other backend, or on CPU when x64 is disabled, it dispatches to
     `Spsolve`, which works in single or double precision and on any backend. Exposes the
-    same factorization API as `Pardiso`/`KLU` (`factorize`, `factorize_symbolic`), so it
-    can be substituted for either verbatim. When it dispatches to `Spsolve`, these
+    same factorization API as `Pardiso`/`KLU` (`analyze_numeric`, `analyze_symbolic`), so
+    it can be substituted for either verbatim. When it dispatches to `Spsolve`, these
     factorization calls degrade to no-ops.
 
     `pardiso_mkl_jax` does not support complex matrices (see `Pardiso`'s docstring), so
-    `init`/`factorize` fall back to `KLU` for a complex operator even when `Pardiso` was
-    otherwise selected, keeping `Auto` able to solve anything `KLU` can. `factorize_symbolic`
-    cannot make the same check, since a bare sparsity pattern carries no values to
-    inspect, so it stays on `Pardiso`. Construct `KLU()` directly for
+    `init`/`analyze_numeric` fall back to `KLU` for a complex operator even when
+    `Pardiso` was otherwise selected, keeping `Auto` able to solve anything `KLU` can.
+    `analyze_symbolic` cannot make the same check, since a bare sparsity pattern carries
+    no values to inspect, so it stays on `Pardiso`. Construct `KLU()` directly for
     symbolic-factorization reuse on a complex operator.
     """
 
@@ -88,8 +88,8 @@ class AutoSparseLinearSolver(
         """The concrete solver that must handle `state`.
 
         Usually `self._chosen_solver`, except when it's `Pardiso` but `state` isn't
-        one of Pardiso's own state types: that means `init`/`factorize` fell back to
-        `KLU` for a complex operator (see the class docstring), and later calls on
+        one of Pardiso's own state types: that means `init`/`analyze_numeric` fell back
+        to `KLU` for a complex operator (see the class docstring), and later calls on
         that same state need to keep using `KLU` too.
         """
         chosen = self._chosen_solver
@@ -128,39 +128,40 @@ class AutoSparseLinearSolver(
     def assume_full_rank(self) -> bool:
         return self._chosen_solver.assume_full_rank()
 
-    def factorize(
+    def analyze_numeric(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> AbstractContextManager[SparseNumericState]:
         chosen = self._chosen_solver
         if isinstance(chosen, Pardiso):
-            # `Pardiso.factorize`/`KLU.factorize` are both just `self.init(...).factorize()`
-            # (see `factorize_through_init`), and unlike `init` itself, `factorize()`
-            # doesn't raise eagerly: it returns a context manager that only runs `init`
-            # once entered, by which point it's too late to switch solvers. Calling
-            # `init` here instead, and reusing its state, lets the same try/except
-            # fallback as `init` above work without that trap.
+            # `Pardiso.analyze_numeric`/`KLU.analyze_numeric` are both just
+            # `self.init(...).analyze_numeric()` (see `analyze_numeric_through_init`),
+            # and unlike `init` itself, `analyze_numeric()` doesn't raise eagerly: it
+            # returns a context manager that only runs `init` once entered, by which
+            # point it's too late to switch solvers. Calling `init` here instead, and
+            # reusing its state, lets the same try/except fallback as `init` above
+            # work without that trap.
             try:
                 init_state = chosen.init(operator, options)
             except TypeError:
                 # See `init`'s matching fallback.
-                return KLU().factorize(operator, options)
-            return init_state.factorize()
-        return chosen.factorize(operator, options)
+                return KLU().analyze_numeric(operator, options)
+            return init_state.analyze_numeric()
+        return chosen.analyze_numeric(operator, options)
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
     ) -> AbstractContextManager[SparseSymbolicScope]: ...
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[True]
     ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
 
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: bool = False
     ) -> AbstractContextManager[SparseSymbolicScope | SymbolicScopedSparseLinearSolver]:
-        scope = self._chosen_solver.factorize_symbolic(sparsity)
+        scope = self._chosen_solver.analyze_symbolic(sparsity)
         # Pair the scope with `self`, not with the chosen solver: solving through
         # `AutoSparseLinearSolver` dispatches to the same solver anyway (see
         # `_solver_for_state`), and this keeps the scoped solver as substitutable for

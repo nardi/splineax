@@ -124,8 +124,8 @@ def test_auto_solve_matches_numpy(
 def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
     make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`pardiso_mkl_jax` doesn't support complex matrices, so `init`/`factorize` must
-    fall back to `KLU` for a complex operator even when `Pardiso` was otherwise
+    """`pardiso_mkl_jax` doesn't support complex matrices, so `init`/`analyze_numeric`
+    must fall back to `KLU` for a complex operator even when `Pardiso` was otherwise
     selected, keeping `Auto` able to solve anything `KLU` can."""
     monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
 
@@ -149,12 +149,12 @@ def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
         ).value
         assert jnp.allclose(solution, expected, atol=1e-5)
 
-        with solver.factorize(operator) as numeric_state:
+        with solver.analyze_numeric(operator) as numeric_state:
             assert isinstance(numeric_state, KLU_STATE_TYPES)
-            factorized_solution = lx.linear_solve(
+            numeric_solution = lx.linear_solve(
                 operator, right_hand_side, solver=solver, state=numeric_state
             ).value
-        assert jnp.allclose(factorized_solution, expected, atol=1e-5)
+        assert jnp.allclose(numeric_solution, expected, atol=1e-5)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +184,6 @@ def test_states_and_scopes_satisfy_protocols(
 
     for solver in solvers:
         assert isinstance(solver.init(operator, {}), SparseBasicState)
-        with solver.factorize_symbolic(sparsity) as scope:
+        with solver.analyze_symbolic(sparsity) as scope:
             assert isinstance(scope, SparseSymbolicScope)
             assert isinstance(scope.init(operator), SparseSymbolicState)

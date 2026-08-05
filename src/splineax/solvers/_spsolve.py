@@ -27,8 +27,8 @@ from splineax.solvers._sparse import (
     SparseNumericState,
     SymbolicScopedSparseLinearSolver,
     _Sparsity,
+    analyze_numeric_through_init,
     as_scoped_solver,
-    factorize_through_init,
 )
 
 
@@ -37,7 +37,7 @@ class _SpsolveState(NamedTuple):
     packed_structures: PackedStructures
 
     @contextmanager
-    def factorize(self) -> Iterator["_SpsolveState"]:
+    def analyze_numeric(self) -> Iterator["_SpsolveState"]:
         # No-op: Spsolve has no separate numeric factorization phase.
         yield self
 
@@ -53,8 +53,10 @@ class _SpsolveSymbolicScope(NamedTuple):
         return self.solver.init(operator, options)
 
     @contextmanager
-    def factorize(self, operator: AbstractLinearOperator) -> Iterator[_SpsolveState]:
-        with self.init(operator).factorize() as state:
+    def analyze_numeric(
+        self, operator: AbstractLinearOperator
+    ) -> Iterator[_SpsolveState]:
+        with self.init(operator).analyze_numeric() as state:
             yield state
 
 
@@ -148,23 +150,23 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
 
         return _SpsolveState(matrix_bcsr, pack_structures(operator))
 
-    def factorize(
+    def analyze_numeric(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> AbstractContextManager[SparseNumericState]:
         # No-op factorization for parity with KLU: yields the ordinary solver state.
-        return factorize_through_init(self, operator, options)
+        return analyze_numeric_through_init(self, operator, options)
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
     ) -> AbstractContextManager[_SpsolveSymbolicScope]: ...
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[True]
     ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
 
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: bool = False
     ) -> AbstractContextManager[
         _SpsolveSymbolicScope | SymbolicScopedSparseLinearSolver
@@ -178,16 +180,14 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
                        with this solver, instead of the bare scope, so that the two
                        need not be passed around together.
         """
-        scope = self._factorize_symbolic(sparsity)
+        scope = self._analyze_symbolic(sparsity)
         return as_scoped_solver(self, scope) if as_solver else scope
 
     @contextmanager
-    def _factorize_symbolic(
-        self, sparsity: _Sparsity
-    ) -> Iterator[_SpsolveSymbolicScope]:
+    def _analyze_symbolic(self, sparsity: _Sparsity) -> Iterator[_SpsolveSymbolicScope]:
         # No-op symbolic factorization: the sparsity is accepted for parity with KLU but
         # not used, since Spsolve cannot pre-analyze a sparsity pattern. Kept separate
-        # from `factorize_symbolic` above so that the public method can be overloaded on
+        # from `analyze_symbolic` above so that the public method can be overloaded on
         # `as_solver` (`@contextmanager` and `@overload` do not compose).
         del sparsity
         yield _SpsolveSymbolicScope(self)

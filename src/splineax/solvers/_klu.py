@@ -38,8 +38,8 @@ from splineax.solvers._sparse import (
     SparseNumericState,
     SymbolicScopedSparseLinearSolver,
     _Sparsity,
+    analyze_numeric_through_init,
     as_scoped_solver,
-    factorize_through_init,
 )
 
 # `Ai` (row indices), `Aj` (column indices), `Ax` (values): the matrix in COO form.
@@ -114,7 +114,7 @@ class _KLUBasicState(NamedTuple):
     packed_structures: PackedStructures
 
     @contextmanager
-    def factorize(self):
+    def analyze_numeric(self):
         klujax = _klujax()
         Ai, Aj, Ax = self.coo
 
@@ -143,11 +143,11 @@ class _KLUSymbolicState(NamedTuple):
     transposed: bool = False
 
     @contextmanager
-    def factorize(self):
+    def analyze_numeric(self):
         Ai, Aj, Ax = self.coo
         with _KLUHandleAllocationScopeManager.begin_scope():
             # Only the numeric handle is registered here. The symbolic handle is
-            # owned and freed by the outer factorize_symbolic() scope.
+            # owned and freed by the outer analyze_symbolic() scope.
             numeric = _KLUHandleAllocationScopeManager.register_handle(
                 _KLUHandleType.NUMERIC,
                 _klujax().factor(Ai, Aj, Ax, handle_value(self.symbolic)),
@@ -227,8 +227,8 @@ class _KLUSymbolicScope(NamedTuple):
         )
 
     @contextmanager
-    def factorize(self, operator: AbstractLinearOperator):
-        with self.init(operator).factorize() as state:
+    def analyze_numeric(self, operator: AbstractLinearOperator):
+        with self.init(operator).analyze_numeric() as state:
             yield state
 
 
@@ -333,26 +333,26 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
             pack_structures(operator),
         )
 
-    def factorize(
+    def analyze_numeric(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> AbstractContextManager[SparseNumericState]:
         """Pre-compute a full (symbolic + numeric) factorization for reuse.
 
-        Equivalent to `self.init(operator, options).factorize()`.
+        Equivalent to `self.init(operator, options).analyze_numeric()`.
         """
-        return factorize_through_init(self, operator, options)
+        return analyze_numeric_through_init(self, operator, options)
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
     ) -> AbstractContextManager["_KLUSymbolicScope"]: ...
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[True]
     ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
 
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: bool = False
     ) -> AbstractContextManager["_KLUSymbolicScope | SymbolicScopedSparseLinearSolver"]:
         """Open a scope with a pre-computed KLU symbolic factorization.
@@ -360,8 +360,8 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         Yields a `_KLUSymbolicScope`. Inside the block, call:
         - `.init(operator)` to create a `_KLUSymbolicState` for `lx.linear_solve`
           (uses `solve_with_symbol`: factors numerically on each call, symbolic reused).
-        - `.init(operator).factorize()` or equivalently `.factorize(operator)` to also
-          pre-compute the numeric factorization (uses `solve_with_numeric`).
+        - `.init(operator).analyze_numeric()` or equivalently `.analyze_numeric(operator)`
+          to also pre-compute the numeric factorization (uses `solve_with_numeric`).
 
         The symbolic handle is freed when the `with` block exits, after all
         registered solve-result dependencies have been consumed.
@@ -380,12 +380,12 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                        with this solver, instead of the bare scope, so that the two
                        need not be passed around together.
         """
-        scope = self._factorize_symbolic(sparsity)
+        scope = self._analyze_symbolic(sparsity)
         return as_scoped_solver(self, scope) if as_solver else scope
 
     @contextmanager
-    def _factorize_symbolic(self, sparsity: _Sparsity) -> Iterator["_KLUSymbolicScope"]:
-        # The scope itself, kept separate from `factorize_symbolic` above so that the
+    def _analyze_symbolic(self, sparsity: _Sparsity) -> Iterator["_KLUSymbolicScope"]:
+        # The scope itself, kept separate from `analyze_symbolic` above so that the
         # public method can be overloaded on `as_solver` (`@contextmanager` and
         # `@overload` do not compose).
         match sparsity:
@@ -438,7 +438,7 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                 shape = sparsity.shape
             case _:
                 raise TypeError(
-                    "`KLU.factorize_symbolic` requires a `BCOO`, `BCSR`, "
+                    "`KLU.analyze_symbolic` requires a `BCOO`, `BCSR`, "
                     "`BCOOLinearOperator`, `BCSRLinearOperator`, "
                     "`SparseJacobianLinearOperator`, "
                     "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
@@ -447,7 +447,7 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
 
         if shape[0] != shape[1]:
             raise ValueError(
-                f"`KLU.factorize_symbolic` requires a square matrix; got shape {shape}."
+                f"`KLU.analyze_symbolic` requires a square matrix; got shape {shape}."
             )
 
         with _KLUHandleAllocationScopeManager.begin_scope():

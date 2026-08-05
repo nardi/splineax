@@ -1,10 +1,11 @@
 """Behavioural factorization-reuse suite, shared across all sparse solvers.
 
-Every solver exposing the factorization-reuse API (`factorize`, `factorize_symbolic`)
-must satisfy the same contract: the returned states solve correctly, survive being reused
-across right-hand sides, transpose correctly, and can be passed into a jitted function.
+Every solver exposing the factorization-reuse API (`analyze_numeric`,
+`analyze_symbolic`) must satisfy the same contract: the returned states solve
+correctly, survive being reused across right-hand sides, transpose correctly, and can
+be passed into a jitted function.
 The same holds for a scope bundled with its solver by
-`factorize_symbolic(..., as_solver=True)`, covered by the `as_solver` tests at the end.
+`analyze_symbolic(..., as_solver=True)`, covered by the `as_solver` tests at the end.
 This module checks that contract at the public API level, parametrised over the `solver`
 fixture (spsolve, klu, pardiso, auto) from [conftest.py](conftest.py).
 
@@ -33,14 +34,15 @@ from splineax import (
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
 
-def test_factorize_solves_correctly(
+def test_analyze_numeric_solves_correctly(
     make_operator: OperatorFactory, solver: AbstractSparseLinearSolver
 ) -> None:
-    """`solver.factorize(operator)` yields a reusable state that solves correctly."""
+    """`solver.analyze_numeric(operator)` yields a reusable state that solves
+    correctly."""
     operator = make_operator(SQUARE_MATRIX)
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
 
-    with solver.factorize(operator) as state:
+    with solver.analyze_numeric(operator) as state:
         solution = lx.linear_solve(
             operator, RIGHT_HAND_SIDE, solver=solver, state=state
         ).value
@@ -48,7 +50,7 @@ def test_factorize_solves_correctly(
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 
-def test_factorize_reuses_state_across_vectors(
+def test_analyze_numeric_reuses_state_across_vectors(
     make_operator: OperatorFactory, solver: AbstractSparseLinearSolver
 ) -> None:
     """A single factorized state must solve several right-hand sides correctly."""
@@ -57,27 +59,27 @@ def test_factorize_reuses_state_across_vectors(
     # would otherwise mismatch the (float32) operator.
     second_rhs = jnp.array([4.0, 3.0, 2.0, 1.0]).astype(RIGHT_HAND_SIDE.dtype)
 
-    with solver.factorize(operator) as state:
+    with solver.analyze_numeric(operator) as state:
         for rhs in (RIGHT_HAND_SIDE, second_rhs):
             solution = lx.linear_solve(operator, rhs, solver=solver, state=state).value
             expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(rhs))
             assert jnp.allclose(solution, expected, atol=1e-5)
 
 
-def test_factorize_symbolic_solves_correctly(
+def test_analyze_symbolic_solves_correctly(
     make_operator: OperatorFactory, solver: AbstractSparseLinearSolver
 ) -> None:
-    """A `factorize_symbolic` scope solves correctly through both its `init` state and its
+    """A `analyze_symbolic` scope solves correctly through both its `init` state and its
     fully-factorized state."""
     operator = make_operator(SQUARE_MATRIX)
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
 
-    with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+    with solver.analyze_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
         symbolic_state = scope.init(operator)
         symbolic_solution = lx.linear_solve(
             operator, RIGHT_HAND_SIDE, solver=solver, state=symbolic_state
         ).value
-        with scope.factorize(operator) as numeric_state:
+        with scope.analyze_numeric(operator) as numeric_state:
             numeric_solution = lx.linear_solve(
                 operator, RIGHT_HAND_SIDE, solver=solver, state=numeric_state
             ).value
@@ -95,7 +97,7 @@ def test_transpose_of_numeric_state_solves_transposed(
         np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
     )
 
-    with solver.factorize(operator) as state:
+    with solver.analyze_numeric(operator) as state:
         transposed_state, _ = solver.transpose(state, options={})
         # Force the result before the block frees the underlying native factorization.
         solution = np.asarray(solver.compute(transposed_state, RIGHT_HAND_SIDE, {})[0])
@@ -117,7 +119,7 @@ def test_symbolic_state_solve_under_jit(
     def run(solver, state, b):
         return lx.linear_solve(operator, b, solver=solver, state=state).value
 
-    with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+    with solver.analyze_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
         state = scope.init(operator)
         # Force the result before the scope frees the native factorization.
         solution = np.asarray(run(solver, state, RIGHT_HAND_SIDE))
@@ -137,7 +139,7 @@ def test_numeric_state_solve_under_jit(
     def run(solver, state, b):
         return lx.linear_solve(operator, b, solver=solver, state=state).value
 
-    with solver.factorize(operator) as state:
+    with solver.analyze_numeric(operator) as state:
         solution = np.asarray(run(solver, state, RIGHT_HAND_SIDE))
 
     assert jnp.allclose(solution, expected, atol=1e-5)
@@ -163,7 +165,7 @@ def test_symbolic_scope_solve_under_jit(solver: AbstractSparseLinearSolver) -> N
         state = scope.init(operator)
         return lx.linear_solve(operator, b, solver=solver, state=state).value
 
-    with solver.factorize_symbolic(sparsity) as scope:
+    with solver.analyze_symbolic(sparsity) as scope:
         # Reuse the scope inside the jit with two different value arrays on the same
         # pattern, without ever calling `scope.init` eagerly first: both `KLU` and
         # `Pardiso` allocate their factorization handle as an ordinary JAX array value,
@@ -175,10 +177,10 @@ def test_symbolic_scope_solve_under_jit(solver: AbstractSparseLinearSolver) -> N
     assert jnp.allclose(other_solution, other_expected, atol=1e-5)
 
 
-def test_factorize_symbolic_opens_entirely_under_jit(
+def test_analyze_symbolic_opens_entirely_under_jit(
     solver: AbstractSparseLinearSolver,
 ) -> None:
-    """`factorize_symbolic` itself, not just a state derived from it, can run inside a
+    """`analyze_symbolic` itself, not just a state derived from it, can run inside a
     jitted function: opening the scope, deriving a state, the solve, and the scope's
     handle free all trace together, for every solver that supports factorization reuse.
 
@@ -204,7 +206,7 @@ def test_factorize_symbolic_opens_entirely_under_jit(
     @eqx.filter_jit
     def run(solver, data, b):
         operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
-        with solver.factorize_symbolic(operator) as scope:
+        with solver.analyze_symbolic(operator) as scope:
             state = scope.init(operator)
             return splx.linear_solve(operator, b, solver, state=state).value
 
@@ -217,9 +219,9 @@ def test_symbolic_scope_full_jit_raw_linear_solve_raises_helpful_error(
     solver: AbstractSparseLinearSolver,
 ) -> None:
     """Solving via bare `lineax.linear_solve`, instead of `splineax.linear_solve`, inside
-    a `factorize_symbolic` scope opened and closed entirely under one `jax.jit` call is
+    a `analyze_symbolic` scope opened and closed entirely under one `jax.jit` call is
     unsafe for a solver that owns a native handle: see
-    `test_factorize_symbolic_opens_entirely_under_jit` above for why. `HandleDependencies`
+    `test_analyze_symbolic_opens_entirely_under_jit` above for why. `HandleDependencies`
     now catches this at trace time, in `compute`, and raises a clear error pointing at
     `splineax.linear_solve` instead of letting it surface later as an opaque tracer error
     or a native use-after-free. `Spsolve` owns no handle, so nothing needs to order its
@@ -231,7 +233,7 @@ def test_symbolic_scope_full_jit_raw_linear_solve_raises_helpful_error(
     @eqx.filter_jit
     def run(solver, data, b):
         operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
-        with solver.factorize_symbolic(operator) as scope:
+        with solver.analyze_symbolic(operator) as scope:
             state = scope.init(operator)
             return lx.linear_solve(operator, b, solver=solver, state=state).value
 
@@ -253,9 +255,9 @@ def test_symbolic_scope_full_jit_raw_linear_solve_raises_helpful_error(
 
 
 def test_as_solver_yields_a_scoped_solver(solver: AbstractSparseLinearSolver) -> None:
-    """`factorize_symbolic(..., as_solver=True)` yields the scope paired with the solver
+    """`analyze_symbolic(..., as_solver=True)` yields the scope paired with the solver
     it was called on, rather than the bare scope."""
-    with solver.factorize_symbolic(
+    with solver.analyze_symbolic(
         BCOO.fromdense(SQUARE_MATRIX), as_solver=True
     ) as scoped_solver:
         assert isinstance(scoped_solver, SymbolicScopedSparseLinearSolver)
@@ -267,17 +269,17 @@ def test_as_solver_solves_correctly(
 ) -> None:
     """A scoped solver solves correctly when passed as `solver=` with no state: its
     `init` is the scope's, so `lineax.linear_solve` builds a symbolic-tier state itself.
-    Its own `factorize` covers the numeric tier, exactly as the scope's does."""
+    Its own `analyze_numeric` covers the numeric tier, exactly as the scope's does."""
     operator = make_operator(SQUARE_MATRIX)
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
 
-    with solver.factorize_symbolic(
+    with solver.analyze_symbolic(
         BCOO.fromdense(SQUARE_MATRIX), as_solver=True
     ) as scoped_solver:
         symbolic_solution = lx.linear_solve(
             operator, RIGHT_HAND_SIDE, solver=scoped_solver
         ).value
-        with scoped_solver.factorize(operator) as numeric_state:
+        with scoped_solver.analyze_numeric(operator) as numeric_state:
             numeric_solution = lx.linear_solve(
                 operator, RIGHT_HAND_SIDE, solver=scoped_solver, state=numeric_state
             ).value
@@ -294,7 +296,7 @@ def test_as_solver_init_matches_scope_init(
     operator = make_operator(SQUARE_MATRIX)
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
 
-    with solver.factorize_symbolic(
+    with solver.analyze_symbolic(
         BCOO.fromdense(SQUARE_MATRIX), as_solver=True
     ) as scoped_solver:
         state = scoped_solver.init(operator)
@@ -316,10 +318,10 @@ def test_as_solver_transposes_through_the_wrapped_solver(
         np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
     )
 
-    with solver.factorize_symbolic(
+    with solver.analyze_symbolic(
         BCOO.fromdense(SQUARE_MATRIX), as_solver=True
     ) as scoped_solver:
-        with scoped_solver.factorize(operator) as state:
+        with scoped_solver.analyze_numeric(operator) as state:
             transposed_state, _ = scoped_solver.transpose(state, options={})
             # Force the result before the scope frees the native factorization.
             solution = np.asarray(
@@ -346,7 +348,7 @@ def test_as_solver_solve_under_jit(solver: AbstractSparseLinearSolver) -> None:
         operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
         return lx.linear_solve(operator, b, solver=scoped_solver).value
 
-    with solver.factorize_symbolic(sparsity, as_solver=True) as scoped_solver:
+    with solver.analyze_symbolic(sparsity, as_solver=True) as scoped_solver:
         # Force the results before the scope frees the native factorization.
         solution = np.asarray(run(scoped_solver, sparsity.data, RIGHT_HAND_SIDE))
         other_solution = np.asarray(
@@ -361,7 +363,7 @@ def test_as_solver_opens_entirely_under_jit(
     solver: AbstractSparseLinearSolver,
 ) -> None:
     """A scoped solver can also be opened and closed inside one jitted function, like the
-    bare scope in `test_factorize_symbolic_opens_entirely_under_jit`.
+    bare scope in `test_analyze_symbolic_opens_entirely_under_jit`.
 
     Solving through `splineax.linear_solve` without a state is what makes this safe: it
     runs the scoped solver's `init` itself, in the outer trace, so the resulting state is
@@ -375,7 +377,7 @@ def test_as_solver_opens_entirely_under_jit(
     @eqx.filter_jit
     def run(solver, data, b):
         operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
-        with solver.factorize_symbolic(operator, as_solver=True) as scoped_solver:
+        with solver.analyze_symbolic(operator, as_solver=True) as scoped_solver:
             return splx.linear_solve(operator, b, scoped_solver).value
 
     solution = np.asarray(run(solver, sparsity.data, RIGHT_HAND_SIDE))
@@ -395,7 +397,7 @@ def test_as_solver_full_jit_raw_linear_solve_raises_helpful_error(
     @eqx.filter_jit
     def run(solver, data, b):
         operator = BCOOLinearOperator(BCOO((data, indices), shape=shape))
-        with solver.factorize_symbolic(operator, as_solver=True) as scoped_solver:
+        with solver.analyze_symbolic(operator, as_solver=True) as scoped_solver:
             return lx.linear_solve(operator, b, solver=scoped_solver).value
 
     resolved = solver

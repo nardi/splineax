@@ -305,8 +305,8 @@ def test_linear_solve_matches_numpy(solver, enable_x64: None) -> None:
     assert np.allclose(np.asarray(solution), expected, atol=1e-5)
 
 
-def test_factorize_symbolic_round_trip(enable_x64: None) -> None:
-    """`KLU.factorize_symbolic` must accept the operator, a bound
+def test_analyze_symbolic_round_trip(enable_x64: None) -> None:
+    """`KLU.analyze_symbolic` must accept the operator, a bound
     `SparseJacobianLinearOperatorColoring`, and a bare `JacobianColoring`, deriving
     the indices host-side from the stored sparsity pattern in each case. Solving
     through the resulting scope must match the dense solve, which fails if the
@@ -324,7 +324,7 @@ def test_factorize_symbolic_round_trip(enable_x64: None) -> None:
     )
 
     for sparsity_source in (operator, operator_coloring, bare_coloring):
-        with solver.factorize_symbolic(sparsity_source) as scope:
+        with solver.analyze_symbolic(sparsity_source) as scope:
             state = scope.init(operator)
             solution = lx.linear_solve(
                 operator, RIGHT_HAND_SIDE, solver=solver, state=state

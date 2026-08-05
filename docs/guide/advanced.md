@@ -21,8 +21,9 @@ implements.
 
 ## Reusing a full factorization
 
-Use `solver.factorize(operator)` as a context manager. Inside the block the operator is
-factorized once; every `linear_solve` that passes the yielded `state` reuses it.
+Use `solver.analyze_numeric(operator)` as a context manager. Inside the block the
+operator is factorized once; every `linear_solve` that passes the yielded `state`
+reuses it.
 
 ```python
 import jax
@@ -50,35 +51,35 @@ b3 = b1 + 1.0
 operator = splx.BCOOLinearOperator(BCOO.fromdense(dense))
 solver = splx.KLU()
 
-with solver.factorize(operator) as state:
+with solver.analyze_numeric(operator) as state:
     x1 = lx.linear_solve(operator, b1, solver=solver, state=state).value
     x2 = lx.linear_solve(operator, b2, solver=solver, state=state).value
     # ... reuse `state` for as many right-hand sides as you like.
 ```
 
-This is equivalent to `solver.init(operator, options).factorize()`.
+This is equivalent to `solver.init(operator, options).analyze_numeric()`.
 
 ## Reusing a symbolic factorization
 
 If you know the *sparsity pattern* ahead of time but the values change (for example,
 solving a family of matrices with identical structure), pre-analyze the pattern with
-`solver.factorize_symbolic(sparsity)`. It yields a *scope* offering two options.
+`solver.analyze_symbolic(sparsity)`. It yields a *scope* offering two options.
 
 ```{.python continuation}
 sparsity = BCOO.fromdense(dense)  # only the structure matters here
 
-with solver.factorize_symbolic(sparsity) as scope:
+with solver.analyze_symbolic(sparsity) as scope:
     # Option A: reuse the symbolic analysis, refactor numerically on each solve.
     state = scope.init(operator)
     x = lx.linear_solve(operator, b1, solver=solver, state=state).value
 
     # Option B: also pre-compute the numeric factorization for full reuse.
-    with scope.factorize(operator) as numeric_state:
+    with scope.analyze_numeric(operator) as numeric_state:
         x1 = lx.linear_solve(operator, b1, solver=solver, state=numeric_state).value
         x2 = lx.linear_solve(operator, b2, solver=solver, state=numeric_state).value
 ```
 
-`factorize_symbolic` accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`,
+`analyze_symbolic` accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`,
 `BCSRLinearOperator`, `SparseJacobianLinearOperator`,
 `SparseJacobianLinearOperatorColoring`, or `JacobianColoring`. Only its sparsity
 pattern is read. For the Jacobian operator and the two coloring wrappers, the pattern
@@ -93,11 +94,11 @@ across solves whose values are only known under the trace.
 A scope is only usable together with the solver it came from, so the two normally
 travel as a pair: every call site takes both, and every `linear_solve` repeats
 `solver=solver, state=scope.init(operator)`. Passing `as_solver=True` to
-`factorize_symbolic` collapses that pair into a single object, a
+`analyze_symbolic` collapses that pair into a single object, a
 [`SymbolicScopedSparseLinearSolver`][splineax.SymbolicScopedSparseLinearSolver]:
 
 ```{.python continuation}
-with solver.factorize_symbolic(sparsity, as_solver=True) as scoped_solver:
+with solver.analyze_symbolic(sparsity, as_solver=True) as scoped_solver:
     x1 = lx.linear_solve(operator, b1, solver=scoped_solver).value
     x2 = lx.linear_solve(operator, b2, solver=scoped_solver).value
 ```
@@ -115,20 +116,20 @@ def solve_all(solver, operator, right_hand_sides):
     return [lx.linear_solve(operator, b, solver=solver).value for b in right_hand_sides]
 
 
-with solver.factorize_symbolic(sparsity, as_solver=True) as scoped_solver:
+with solver.analyze_symbolic(sparsity, as_solver=True) as scoped_solver:
     xs = solve_all(scoped_solver, operator, [b1, b2, b3])
 ```
 
 The numeric tier is reachable the same way as on the scope itself:
-`scoped_solver.factorize(operator)` is `scope.factorize(operator)`, yielding a state to
-pass as `state=` for full reuse across right-hand sides. Like the scope it wraps, the
-scoped solver is only valid inside its `with` block: the factorization is freed on
-exit.
+`scoped_solver.analyze_numeric(operator)` is `scope.analyze_numeric(operator)`, yielding
+a state to pass as `state=` for full reuse across right-hand sides. Like the scope it
+wraps, the scoped solver is only valid inside its `with` block: the factorization is
+freed on exit.
 
 ## Solving fully inside `jax.jit`
 
 A factorization handle is an ordinary JAX array value rather than a native object tied
-to the Python side, so `solver.factorize_symbolic(...)` may be opened *and* closed
+to the Python side, so `solver.analyze_symbolic(...)` may be opened *and* closed
 entirely inside a jitted function too, not just called on from outside it:
 
 ```{.python continuation}
@@ -137,7 +138,7 @@ def solve_under_jit(values, b):
     operator = splx.BCOOLinearOperator(
         BCOO((values, sparsity.indices), shape=sparsity.shape)
     )
-    with solver.factorize_symbolic(operator) as scope:
+    with solver.analyze_symbolic(operator) as scope:
         state = scope.init(operator)
         return splx.linear_solve(operator, b, solver, state=state).value
 
@@ -167,7 +168,7 @@ def solve_scoped_under_jit(values, b):
     operator = splx.BCOOLinearOperator(
         BCOO((values, sparsity.indices), shape=sparsity.shape)
     )
-    with solver.factorize_symbolic(operator, as_solver=True) as scoped_solver:
+    with solver.analyze_symbolic(operator, as_solver=True) as scoped_solver:
         return splx.linear_solve(operator, b, scoped_solver).value
 
 
@@ -187,19 +188,19 @@ The protocol describes a small family of state types
 ([`SparseSymbolicScope`][splineax.solvers.SparseSymbolicScope]):
 
 ```
-solver.init(operator)                                 -> SparseBasicState
-       .factorize()                                   -> SparseNumericState   (context manager)
+solver.init(operator)                             -> SparseBasicState
+       .analyze_numeric()                         -> SparseNumericState   (context manager)
 
-solver.factorize(operator)                            -> SparseNumericState   (context manager)
+solver.analyze_numeric(operator)                  -> SparseNumericState   (context manager)
 
-solver.factorize_symbolic(sparsity)                   -> SparseSymbolicScope  (context manager)
-       .init(operator)                                -> SparseSymbolicState
-       .factorize(operator)                           -> SparseNumericState   (context manager)
+solver.analyze_symbolic(sparsity)                 -> SparseSymbolicScope  (context manager)
+       .init(operator)                            -> SparseSymbolicState
+       .analyze_numeric(operator)                 -> SparseNumericState   (context manager)
 
-solver.factorize_symbolic(sparsity, as_solver=True)   -> SymbolicScopedSparseLinearSolver
-                                                                               (context manager)
-       .init(operator)                                -> SparseSymbolicState
-       .factorize(operator)                           -> SparseNumericState   (context manager)
+solver.analyze_symbolic(sparsity, as_solver=True) -> SymbolicScopedSparseLinearSolver
+                                                                           (context manager)
+       .init(operator)                            -> SparseSymbolicState
+       .analyze_numeric(operator)                 -> SparseNumericState   (context manager)
 ```
 
 Any of these states can be passed as `state=` to `lineax.linear_solve`. The last one is
@@ -218,7 +219,7 @@ from splineax import AbstractSparseLinearSolver
 
 
 def solve_many(solver: AbstractSparseLinearSolver, operator, right_hand_sides):
-    with solver.factorize(operator) as state:
+    with solver.analyze_numeric(operator) as state:
         return [
             lx.linear_solve(operator, b, solver=solver, state=state).value
             for b in right_hand_sides

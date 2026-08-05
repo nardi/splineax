@@ -29,7 +29,7 @@ from splineax.operators._jacobian import (
 )
 from splineax.solvers._handle import mark_via_linear_solve
 
-# Everything `factorize_symbolic` accepts as a sparsity pattern.
+# Everything `analyze_symbolic` accepts as a sparsity pattern.
 _Sparsity = (
     BCOO
     | BCSR
@@ -55,7 +55,7 @@ class SparseBasicState(Protocol):
     Can be turned into a numeric factorization for reuse across solves.
     """
 
-    def factorize(self) -> AbstractContextManager[SparseNumericState]:
+    def analyze_numeric(self) -> AbstractContextManager[SparseNumericState]:
         """Pre-compute a numeric factorization, yielding a reusable state."""
         ...
 
@@ -68,7 +68,7 @@ class SparseSymbolicState(Protocol):
     be turned into a numeric factorization.
     """
 
-    def factorize(self) -> AbstractContextManager[SparseNumericState]:
+    def analyze_numeric(self) -> AbstractContextManager[SparseNumericState]:
         """Pre-compute a numeric factorization, reusing the symbolic one."""
         ...
 
@@ -76,7 +76,7 @@ class SparseSymbolicState(Protocol):
 @runtime_checkable
 class SparseSymbolicScope(Protocol):
     """A pre-analyzed symbolic-factorization scope yielded by
-    `SparseLinearSolver.factorize_symbolic`."""
+    `SparseLinearSolver.analyze_symbolic`."""
 
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
@@ -84,7 +84,7 @@ class SparseSymbolicScope(Protocol):
         """Build a directly-solvable state reusing the scope's symbolic factorization."""
         ...
 
-    def factorize(
+    def analyze_numeric(
         self, operator: AbstractLinearOperator
     ) -> AbstractContextManager[SparseNumericState]:
         """Also pre-compute the numeric factorization, reusing the symbolic one."""
@@ -100,23 +100,23 @@ class SparseLinearSolver(Protocol):
         self, operator: AbstractLinearOperator, options: dict[str, Any]
     ) -> SparseBasicState: ...
 
-    def factorize(
+    def analyze_numeric(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> AbstractContextManager[SparseNumericState]:
         """Pre-compute a full factorization for reuse across multiple solves."""
         ...
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
     ) -> AbstractContextManager[SparseSymbolicScope]: ...
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[True]
     ) -> AbstractContextManager["SymbolicScopedSparseLinearSolver"]: ...
 
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: bool = False
     ) -> AbstractContextManager[
         "SparseSymbolicScope | SymbolicScopedSparseLinearSolver"
@@ -137,31 +137,31 @@ class AbstractSparseLinearSolver(
 ):
     """Abstract base for sparse direct solvers that support factorization reuse.
 
-    Extends the lineax `AbstractLinearSolver` interface with `factorize` and
-    `factorize_symbolic`. Concrete subclasses (`KLU`, `Spsolve`,
+    Extends the lineax `AbstractLinearSolver` interface with `analyze_numeric` and
+    `analyze_symbolic`. Concrete subclasses (`KLU`, `Spsolve`,
     `AutoSparseLinearSolver`) are therefore usable both with `lineax.linear_solve`
     (which requires an `AbstractLinearSolver`) and the factorization-reuse API. They
     also structurally satisfy the `SparseLinearSolver` protocol.
     """
 
     @abc.abstractmethod
-    def factorize(
+    def analyze_numeric(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> AbstractContextManager[SparseNumericState]:
         """Pre-compute a full factorization for reuse across multiple solves."""
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
     ) -> AbstractContextManager[SparseSymbolicScope]: ...
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[True]
     ) -> AbstractContextManager["SymbolicScopedSparseLinearSolver"]: ...
 
     @abc.abstractmethod
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: bool = False
     ) -> AbstractContextManager[
         "SparseSymbolicScope | SymbolicScopedSparseLinearSolver"
@@ -178,12 +178,12 @@ class SymbolicScopedSparseLinearSolver(
 ):
     """A solver bound to one open symbolic-factorization scope.
 
-    Returned by `solver.factorize_symbolic(sparsity, as_solver=True)`, for the common
+    Returned by `solver.analyze_symbolic(sparsity, as_solver=True)`, for the common
     case where a solver and a scope derived from it are used together and would
     otherwise have to be passed around as a pair:
 
     ```python
-    with solver.factorize_symbolic(sparsity, as_solver=True) as scoped_solver:
+    with solver.analyze_symbolic(sparsity, as_solver=True) as scoped_solver:
         x = lx.linear_solve(operator, b, solver=scoped_solver).value
     ```
 
@@ -214,17 +214,17 @@ class SymbolicScopedSparseLinearSolver(
         """
         return self.scope.init(operator, options)
 
-    def factorize(
+    def analyze_numeric(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> AbstractContextManager[SparseNumericState]:
         """Also pre-compute the numeric factorization, reusing the symbolic one.
 
-        Identical to the scope's own `factorize`. `options` is accepted for parity
-        with `AbstractSparseLinearSolver.factorize` and unused, since a scope's
-        `factorize` takes none.
+        Identical to the scope's own `analyze_numeric`. `options` is accepted for parity
+        with `AbstractSparseLinearSolver.analyze_numeric` and unused, since a scope's
+        `analyze_numeric` takes none.
         """
         del options
-        return self.scope.factorize(operator)
+        return self.scope.analyze_numeric(operator)
 
     def compute(
         self,
@@ -252,9 +252,9 @@ SymbolicScopedSparseLinearSolver.__init__.__doc__ = """**Arguments:**
 
 - `solver`: the sparse solver performing the solves.
 - `scope`: an open symbolic-factorization scope, as opened by that solver's
-    `factorize_symbolic`.
+    `analyze_symbolic`.
 
-Usually not constructed directly: call `solver.factorize_symbolic(sparsity,
+Usually not constructed directly: call `solver.analyze_symbolic(sparsity,
 as_solver=True)` instead, which opens the scope and pairs it with the solver.
 """
 
@@ -264,9 +264,9 @@ def as_scoped_solver(
     solver: AbstractSparseLinearSolver[Any],
     scope_manager: AbstractContextManager[SparseSymbolicScope],
 ) -> Iterator[SymbolicScopedSparseLinearSolver]:
-    """Wrap an unopened `factorize_symbolic` scope into a scoped solver.
+    """Wrap an unopened `analyze_symbolic` scope into a scoped solver.
 
-    Shared implementation of `factorize_symbolic(..., as_solver=True)` for every
+    Shared implementation of `analyze_symbolic(..., as_solver=True)` for every
     solver: opening and closing the scoped solver opens and closes the scope itself,
     so the factorization lives exactly as long as it would have.
     """
@@ -275,17 +275,18 @@ def as_scoped_solver(
 
 
 @contextmanager
-def factorize_through_init(
+def analyze_numeric_through_init(
     solver: SparseLinearSolver,
     operator: AbstractLinearOperator,
     options: dict[str, Any],
 ) -> Iterator[SparseNumericState]:
-    """Shared `factorize` behaviour: run `init`, then numeric-factorize its state.
+    """Shared `analyze_numeric` behaviour: run `init`, then numerically analyze its
+    state.
 
-    Reused by both `KLU.factorize` and `Spsolve.factorize` (behaviour reuse via a
-    function instead of inheritance).
+    Reused by both `KLU.analyze_numeric` and `Spsolve.analyze_numeric` (behaviour reuse
+    via a function instead of inheritance).
     """
-    with solver.init(operator, options).factorize() as numeric_state:
+    with solver.init(operator, options).analyze_numeric() as numeric_state:
         yield numeric_state
 
 
@@ -307,7 +308,7 @@ def linear_solve(
     throw: bool = True,
 ) -> Solution:
     """Drop-in replacement for `lineax.linear_solve`, needed for a state derived from
-    `KLU`'s or `Pardiso`'s `factorize_symbolic` scope when the scope is opened and
+    `KLU`'s or `Pardiso`'s `analyze_symbolic` scope when the scope is opened and
     closed entirely inside one `jax.jit` call.
 
     `lineax.linear_solve` stages the solve into a trace nested inside whichever trace

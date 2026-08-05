@@ -162,7 +162,7 @@ A [`JacobianColoring`][splineax.JacobianColoring] is created either by detection
 it across points, hand it to
 `SparseJacobianLinearOperatorColoring.from_jacobian_coloring(coloring, fn, x)`.
 
-`KLU.factorize_symbolic` (see [the advanced guide](advanced.md)) also accepts a
+`KLU.analyze_symbolic` (see [the advanced guide](advanced.md)) also accepts a
 `SparseJacobianLinearOperator`, a `SparseJacobianLinearOperatorColoring`, or a
 `JacobianColoring` directly, reading the indices from the precomputed pattern without
 materialising the Jacobian numerically.

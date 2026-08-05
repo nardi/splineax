@@ -63,15 +63,15 @@ vectors = [jnp.ones(n), jnp.arange(n) % 2]
 solver = splx.AutoSparseLinearSolver()
 
 # Calculate factorization once...
-with solver.factorize(operator) as factorized_state:
+with solver.analyze_numeric(operator) as numeric_state:
     # ...and reuse for multiple solves.
     solution = lx.linear_solve(
-        operator, vectors[0], solver=solver, state=factorized_state
+        operator, vectors[0], solver=solver, state=numeric_state
     )
     assert jnp.allclose(matrix @ solution.value, vectors[0], atol=1e-4)
 
     solution = lx.linear_solve(
-        operator, vectors[1], solver=solver, state=factorized_state
+        operator, vectors[1], solver=solver, state=numeric_state
     )
     assert jnp.allclose(matrix @ solution.value, vectors[1], atol=1e-4)
 ```

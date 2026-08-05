@@ -40,8 +40,8 @@ from splineax.solvers._sparse import (
     SparseNumericState,
     SymbolicScopedSparseLinearSolver,
     _Sparsity,
+    analyze_numeric_through_init,
     as_scoped_solver,
-    factorize_through_init,
 )
 
 # `indptr`, `indices`, `values`: the matrix in CSR form.
@@ -185,7 +185,7 @@ def _csr_from_coo_pattern(
 ) -> tuple[Integer[Array, " n+1"], Integer[Array, " nse"], Inexact[Array, " nse"]]:
     """Convert a COO `(row, col)` sparsity pattern to sorted CSR `(indptr, indices, values)`.
 
-    `values` is optional because some `factorize_symbolic` inputs (a bare sparsity
+    `values` is optional because some `analyze_symbolic` inputs (a bare sparsity
     pattern, with no associated matrix) carry no numeric data. When omitted, a dummy
     `1.0` is used instead, exactly as for the pattern-only conversion this replaces:
     the symbolic analysis this feeds only needs *some* representative values to run,
@@ -209,7 +209,7 @@ class _PardisoBasicState(NamedTuple):
     transposed: bool = False
 
     @contextmanager
-    def factorize(self) -> Iterator["_PardisoNumericState"]:
+    def analyze_numeric(self) -> Iterator["_PardisoNumericState"]:
         primitive = _pardiso_mkl_jax().primitive
         pmj = _pardiso_mkl_jax()
         indptr, indices, values = self.csr
@@ -249,7 +249,7 @@ class _PardisoSymbolicScope(NamedTuple):
                 bcoo = matrix
             case _:
                 raise TypeError(
-                    "`Pardiso.factorize_symbolic` scope's `.init` requires a "
+                    "`Pardiso.analyze_symbolic` scope's `.init` requires a "
                     "`BCOOLinearOperator`, `BCSRLinearOperator`, or "
                     "`SparseJacobianLinearOperator`; got "
                     f"{type(operator).__name__}."
@@ -262,7 +262,7 @@ class _PardisoSymbolicScope(NamedTuple):
             )
 
         # `BCSR.from_bcoo` sorts into the same canonical (row, then column) order used
-        # to build the scope's pattern in `Pardiso.factorize_symbolic`, so the reordered
+        # to build the scope's pattern in `Pardiso.analyze_symbolic`, so the reordered
         # values line up with the indices the stored `handle` was analyzed against.
         matrix_bcsr = BCSR.from_bcoo(bcoo)
         indptr = matrix_bcsr.indptr.astype(jnp.int32)
@@ -275,24 +275,24 @@ class _PardisoSymbolicScope(NamedTuple):
         )
 
     @contextmanager
-    def factorize(
+    def analyze_numeric(
         self, operator: AbstractLinearOperator
     ) -> Iterator["_PardisoNumericState"]:
-        with self.init(operator).factorize() as state:
+        with self.init(operator).analyze_numeric() as state:
             yield state
 
 
 class _PardisoSymbolicState(eqx.Module):
-    """A solvable state that reuses a `factorize_symbolic` scope's symbolic analysis.
+    """A solvable state that reuses an `analyze_symbolic` scope's symbolic analysis.
 
     The analysis was run once, when the scope was opened. Each `compute` reuses it and
     refactors numerically for `csr`'s values in one fused jit-safe call, so `handle` and
-    `csr` are carried as dynamic pytree leaves and may be tracers, which is what lets the
-    whole scope, not just this state, compose inside a jitted function. `.factorize()`
-    promotes this to a `_PardisoNumericState` by running the numeric factorization once,
-    to reuse it across many solves; it does not open its own handle-freeing scope, since
-    the resulting numeric state shares the same handle the outer `factorize_symbolic`
-    scope already owns and will free.
+    `csr` are carried as dynamic pytree leaves and may be tracers, which is what lets
+    the whole scope, not just this state, compose inside a jitted function.
+    `.analyze_numeric()` promotes this to a `_PardisoNumericState` by running the
+    numeric factorization once, to reuse it across many solves; it does not open its
+    own handle-freeing scope, since the resulting numeric state shares the same handle
+    the outer `analyze_symbolic` scope already owns and will free.
     """
 
     csr: _CSR
@@ -305,7 +305,7 @@ class _PardisoSymbolicState(eqx.Module):
     transposed: bool = eqx.field(static=True, default=False)
 
     @contextmanager
-    def factorize(self) -> Iterator["_PardisoNumericState"]:
+    def analyze_numeric(self) -> Iterator["_PardisoNumericState"]:
         primitive = _pardiso_mkl_jax().primitive
         pmj = _pardiso_mkl_jax()
         indptr, indices, values = self.csr
@@ -428,26 +428,26 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
             (indptr, indices, values), matrix_bcsr.shape, pack_structures(operator)
         )
 
-    def factorize(
+    def analyze_numeric(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> AbstractContextManager[SparseNumericState]:
         """Pre-compute a full (analysis + numeric) factorization for reuse.
 
-        Equivalent to `self.init(operator, options).factorize()`.
+        Equivalent to `self.init(operator, options).analyze_numeric()`.
         """
-        return factorize_through_init(self, operator, options)
+        return analyze_numeric_through_init(self, operator, options)
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
     ) -> AbstractContextManager[_PardisoSymbolicScope]: ...
 
     @overload
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: Literal[True]
     ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
 
-    def factorize_symbolic(
+    def analyze_symbolic(
         self, sparsity: _Sparsity, *, as_solver: bool = False
     ) -> AbstractContextManager[
         _PardisoSymbolicScope | SymbolicScopedSparseLinearSolver
@@ -458,15 +458,15 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
         - `.init(operator)` to create a `_PardisoSymbolicState` for `lx.linear_solve`.
           Every solve reuses the analysis performed when this scope was opened and only
           re-runs the numeric phase.
-        - `.init(operator).factorize()` or equivalently `.factorize(operator)` to also
-          pre-compute the numeric factorization.
+        - `.init(operator).analyze_numeric()` or equivalently `.analyze_numeric(operator)`
+          to also pre-compute the numeric factorization.
 
         The symbolic analysis runs once, as this scope is opened, using representative
         values from `sparsity` itself where it carries any (a `BCOO`, `BCSR`,
         `BCOOLinearOperator`, or `BCSRLinearOperator`), or a placeholder otherwise (a
         bare sparsity pattern from a coloring). Because the resulting handle is an
         ordinary JAX array value, not a native object, this whole scope, including the
-        analysis, composes inside a jitted function: `with solver.factorize_symbolic(...)
+        analysis, composes inside a jitted function: `with solver.analyze_symbolic(...)
         as scope:` may be written directly inside `@jax.jit`, or the scope may be built
         eagerly and passed into one, either way is safe to reuse across solves.
 
@@ -475,7 +475,7 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
 
         Args:
             sparsity: Sparse matrix whose sparsity pattern to pre-analyze. Accepts the
-                      same types as `KLU.factorize_symbolic`: `BCOO`, `BCSR`,
+                      same types as `KLU.analyze_symbolic`: `BCOO`, `BCSR`,
                       `BCOOLinearOperator`, `BCSRLinearOperator`,
                       `SparseJacobianLinearOperator`,
                       `SparseJacobianLinearOperatorColoring`, or `JacobianColoring`.
@@ -483,20 +483,18 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                        with this solver, instead of the bare scope, so that the two
                        need not be passed around together.
         """
-        scope = self._factorize_symbolic(sparsity)
+        scope = self._analyze_symbolic(sparsity)
         return as_scoped_solver(self, scope) if as_solver else scope
 
     @contextmanager
-    def _factorize_symbolic(
-        self, sparsity: _Sparsity
-    ) -> Iterator[_PardisoSymbolicScope]:
-        # The scope itself, kept separate from `factorize_symbolic` above so that the
+    def _analyze_symbolic(self, sparsity: _Sparsity) -> Iterator[_PardisoSymbolicScope]:
+        # The scope itself, kept separate from `analyze_symbolic` above so that the
         # public method can be overloaded on `as_solver` (`@contextmanager` and
         # `@overload` do not compose).
         values = None
         match sparsity:
             case SparseJacobianLinearOperator(transposed=True):
-                # See `KLU.factorize_symbolic`'s matching case for why rows/columns
+                # See `KLU.analyze_symbolic`'s matching case for why rows/columns
                 # are swapped here.
                 pattern = sparsity.coloring.sparsity
                 rows = jnp.asarray(pattern.cols, dtype=jnp.int32)
@@ -539,7 +537,7 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                 values = sparsity.data
             case _:
                 raise TypeError(
-                    "`Pardiso.factorize_symbolic` requires a `BCOO`, `BCSR`, "
+                    "`Pardiso.analyze_symbolic` requires a `BCOO`, `BCSR`, "
                     "`BCOOLinearOperator`, `BCSRLinearOperator`, "
                     "`SparseJacobianLinearOperator`, "
                     "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
@@ -548,7 +546,7 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
 
         if shape[0] != shape[1]:
             raise ValueError(
-                f"`Pardiso.factorize_symbolic` requires a square matrix; got shape "
+                f"`Pardiso.analyze_symbolic` requires a square matrix; got shape "
                 f"{shape}."
             )
 

@@ -1,6 +1,6 @@
 """KLU-specific tests for factorization reuse and handle lifecycle.
 
-This module tests behaviour that is unique to the `KLU` solver's `factorize()`
+This module tests behaviour that is unique to the `KLU` solver's `analyze_numeric()`
 context manager: that solves inside the block call `solve_with_numeric` /
 `tsolve_with_numeric` rather than `klujax.solve`, and that every allocated
 handle (symbolic and numeric) is freed exactly once when the block exits.
@@ -142,11 +142,11 @@ def _spy_solve(function_name: str) -> Generator[list[bool], None, None]:
 
 
 @pytest.mark.parametrize("use_jit", [False, True], ids=["no_jit", "jit"])
-def test_factorize_reuses_numeric_solve(
+def test_analyze_numeric_reuses_numeric_solve(
     make_operator: OperatorFactory,
     use_jit: bool,
 ) -> None:
-    """Inside a `factorize()` block, `compute` must call `solve_with_numeric`
+    """Inside an `analyze_numeric()` block, `compute` must call `solve_with_numeric`
     (not `klujax.solve`), and both the symbolic and numeric handles must be
     freed when the block exits.  Verified for both non-JIT and JIT execution.
     """
@@ -167,7 +167,7 @@ def test_factorize_reuses_numeric_solve(
 
         def run(right_hand_side):
             state_init = solver.init(operator, options={})
-            with state_init.factorize() as numeric_state:
+            with state_init.analyze_numeric() as numeric_state:
                 # Under JIT these are Tracer object ids; the spy in _spy_frees
                 # captures the same Tracer ids when begin_scope() exits.
                 captured_handle_ids.append(
@@ -191,15 +191,15 @@ def test_factorize_reuses_numeric_solve(
     )
     assert not solve_calls, "klujax.solve was called; factorization was not reused"
     assert symbolic_handle_id in freed_symbolic_ids, (
-        "symbolic handle was not freed when the factorize block exited"
+        "symbolic handle was not freed when the analyze_numeric block exited"
     )
     assert numeric_handle_id in freed_numeric_ids, (
-        "numeric handle was not freed when the factorize block exited"
+        "numeric handle was not freed when the analyze_numeric block exited"
     )
 
 
-def test_transpose_in_factorize_reuses_factorization() -> None:
-    """Calling `solver.transpose()` on a managed state inside a `factorize()`
+def test_transpose_in_analyze_numeric_reuses_factorization() -> None:
+    """Calling `solver.transpose()` on a managed state inside an `analyze_numeric()`
     block must reuse the existing symbolic and numeric handles unchanged (KLU's
     `tsolve_with_numeric` solves A^T x = b from the original numeric LU without
     re-factoring).  Both handles must be freed on block exit.
@@ -213,7 +213,7 @@ def test_transpose_in_factorize_reuses_factorization() -> None:
         _spy_solve("solve_with_numeric") as solve_with_numeric_calls,
     ):
         state_init = solver.init(operator, options={})
-        with state_init.factorize() as numeric_state:
+        with state_init.analyze_numeric() as numeric_state:
             symbolic_handle_id = id(numeric_state.factorization.symbolic)
             numeric_handle_id = id(numeric_state.factorization.numeric)
 
@@ -236,10 +236,10 @@ def test_transpose_in_factorize_reuses_factorization() -> None:
         "klujax.solve_with_numeric was called; should use tsolve_with_numeric for transpose"
     )
     assert symbolic_handle_id in freed_symbolic_ids, (
-        "symbolic handle was not freed when the factorize block exited"
+        "symbolic handle was not freed when the analyze_numeric block exited"
     )
     assert numeric_handle_id in freed_numeric_ids, (
-        "numeric handle was not freed when the factorize block exited"
+        "numeric handle was not freed when the analyze_numeric block exited"
     )
 
 
@@ -253,7 +253,7 @@ def test_conj_real_reuses_both_handles() -> None:
 
     with _spy_frees() as (freed_symbolic_ids, freed_numeric_ids):
         state_init = solver.init(operator, options={})
-        with state_init.factorize() as numeric_state:
+        with state_init.analyze_numeric() as numeric_state:
             symbolic_handle_id = id(numeric_state.factorization.symbolic)
             numeric_handle_id = id(numeric_state.factorization.numeric)
 
@@ -277,14 +277,14 @@ def test_conj_complex_reuses_symbolic_creates_new_numeric() -> None:
     """For a complex matrix, `solver.conj()` must reuse the symbolic analysis
     handle (same sparsity, no re-analyze needed) and allocate a fresh numeric
     handle for conj(A).  All three handles — one symbolic and two numerics —
-    must be freed when the `factorize()` block exits.
+    must be freed when the `analyze_numeric()` block exits.
     """
     operator = BCOOLinearOperator(BCOO.fromdense(COMPLEX_MATRIX))
     solver = KLU()
 
     with _spy_frees() as (freed_symbolic_ids, freed_numeric_ids):
         state_init = solver.init(operator, options={})
-        with state_init.factorize() as numeric_state:
+        with state_init.analyze_numeric() as numeric_state:
             symbolic_handle_id = id(numeric_state.factorization.symbolic)
             original_numeric_handle_id = id(numeric_state.factorization.numeric)
 
@@ -318,10 +318,10 @@ def test_conj_complex_reuses_symbolic_creates_new_numeric() -> None:
     )
 
 
-def test_factorize_symbolic_init_uses_solve_with_symbol(
+def test_analyze_symbolic_init_uses_solve_with_symbol(
     make_operator: OperatorFactory,
 ) -> None:
-    """Inside a `factorize_symbolic()` block, calling `.init(operator)` then solving
+    """Inside a `analyze_symbolic()` block, calling `.init(operator)` then solving
     must use `klujax.solve_with_symbol` (factors numerically on each call, reusing
     the pre-computed symbolic analysis).  The symbolic handle must be freed when the
     outer block exits and the solution must be numerically correct.
@@ -335,7 +335,7 @@ def test_factorize_symbolic_init_uses_solve_with_symbol(
         _spy_solve("solve_with_symbol") as solve_with_symbol_calls,
         _spy_solve("solve") as solve_calls,
     ):
-        with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+        with solver.analyze_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
             symbolic_handle_id = id(scope.symbolic)
             state = scope.init(operator)
             assert isinstance(state, _KLUSymbolicState)
@@ -346,7 +346,7 @@ def test_factorize_symbolic_init_uses_solve_with_symbol(
     )
     assert not solve_calls, "klujax.solve was called; should use solve_with_symbol"
     assert symbolic_handle_id in freed_symbolic_ids, (
-        "symbolic handle was not freed when the factorize_symbolic block exited"
+        "symbolic handle was not freed when the analyze_symbolic block exited"
     )
     assert not freed_numeric_ids, (
         "a numeric handle was unexpectedly registered in the scope (solve_with_symbol "
@@ -357,10 +357,10 @@ def test_factorize_symbolic_init_uses_solve_with_symbol(
     )
 
 
-def test_factorize_symbolic_factorize_reuses_symbolic_creates_numeric(
+def test_analyze_numeric_after_analyze_symbolic_reuses_symbolic_creates_numeric(
     make_operator: OperatorFactory,
 ) -> None:
-    """Inside a `factorize_symbolic()` block, calling `.factorize(operator)` must
+    """Inside a `analyze_symbolic()` block, calling `.analyze_numeric(operator)` must
     reuse the pre-computed symbolic handle and create exactly one new numeric handle.
     The symbolic is freed by the outer scope; the numeric by the inner scope.
     The solution must be numerically correct.
@@ -376,9 +376,9 @@ def test_factorize_symbolic_factorize_reuses_symbolic_creates_numeric(
     ):
         captured: list[tuple[int, int]] = []
 
-        with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+        with solver.analyze_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
             symbolic_handle_id = id(scope.symbolic)
-            with scope.factorize(operator) as numeric_state:
+            with scope.analyze_numeric(operator) as numeric_state:
                 captured.append(
                     (
                         id(numeric_state.factorization.symbolic),
@@ -398,13 +398,13 @@ def test_factorize_symbolic_factorize_reuses_symbolic_creates_numeric(
         "klujax.solve_with_symbol was called; numeric factorization should be used"
     )
     assert captured_symbolic_id == symbolic_handle_id, (
-        "numeric state did not reuse the symbolic handle from factorize_symbolic"
+        "numeric state did not reuse the symbolic handle from analyze_symbolic"
     )
     assert captured_symbolic_id in freed_symbolic_ids, (
-        "symbolic handle was not freed by the outer factorize_symbolic scope"
+        "symbolic handle was not freed by the outer analyze_symbolic scope"
     )
     assert captured_numeric_id in freed_numeric_ids, (
-        "numeric handle was not freed by the inner factorize scope"
+        "numeric handle was not freed by the inner analyze_numeric scope"
     )
     assert len(freed_numeric_ids) == 1, (
         f"expected exactly 1 numeric free, got {len(freed_numeric_ids)}"
@@ -414,7 +414,7 @@ def test_factorize_symbolic_factorize_reuses_symbolic_creates_numeric(
     )
 
 
-def test_factorize_symbolic_transpose_uses_tsolve_with_symbol(
+def test_analyze_symbolic_transpose_uses_tsolve_with_symbol(
     make_operator: OperatorFactory,
 ) -> None:
     """Transposing a `_KLUSymbolicState` and then solving must use
@@ -430,7 +430,7 @@ def test_factorize_symbolic_transpose_uses_tsolve_with_symbol(
         _spy_solve("tsolve_with_symbol") as tsolve_calls,
         _spy_solve("solve_with_symbol") as solve_calls,
     ):
-        with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+        with solver.analyze_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
             state = scope.init(operator)
             transposed_state, _ = solver.transpose(state, options={})
             solution = solver.compute(transposed_state, RIGHT_HAND_SIDE, options={})[0]

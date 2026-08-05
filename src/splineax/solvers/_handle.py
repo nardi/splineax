@@ -159,7 +159,7 @@ class HandleDependencies:
             and not _via_linear_solve.get()
         ):
             raise RuntimeError(
-                "A solve inside a `factorize_symbolic` scope was run through "
+                "A solve inside a `analyze_symbolic` scope was run through "
                 "`lineax.linear_solve` while the whole scope is traced together with "
                 "the solve (opened and closed inside one `jax.jit` call). "
                 "`lineax.linear_solve` stages the solve into a nested trace, so this "

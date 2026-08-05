@@ -80,9 +80,10 @@ def _spy(name: str) -> Generator[list[bool], None, None]:
         setattr(primitive, name, original)
 
 
-def test_factorize_closes_solver_on_exit(make_operator: OperatorFactory) -> None:
-    """`Pardiso().factorize(operator)` must call `.factor()` (not just `.analyze()`)
-    exactly once, and release the underlying handle when the block exits."""
+def test_analyze_numeric_closes_solver_on_exit(make_operator: OperatorFactory) -> None:
+    """`Pardiso().analyze_numeric(operator)` must call `.factor()` (not just
+    `.analyze()`) exactly once, and release the underlying handle when the block
+    exits."""
     operator = make_operator(SQUARE_MATRIX)
     solver = Pardiso()
 
@@ -90,7 +91,7 @@ def test_factorize_closes_solver_on_exit(make_operator: OperatorFactory) -> None
         _spy("factor") as factor_calls,
         _spy("release") as release_calls,
     ):
-        with solver.factorize(operator) as state:
+        with solver.analyze_numeric(operator) as state:
             assert not release_calls, "handle was released before the block exited"
             solution = lx.linear_solve(
                 operator, RIGHT_HAND_SIDE, solver=solver, state=state
@@ -99,11 +100,13 @@ def test_factorize_closes_solver_on_exit(make_operator: OperatorFactory) -> None
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
     assert jnp.allclose(solution, expected, atol=1e-5)
     assert factor_calls, "primitive.factor was not called"
-    assert release_calls, "the handle was not released when the factorize block exited"
+    assert release_calls, (
+        "the handle was not released when the analyze_numeric block exited"
+    )
 
 
-def test_factorize_symbolic_reuses_analysis_across_solves() -> None:
-    """A `factorize_symbolic` scope analyses once and reuses it across solves, redoing the
+def test_analyze_symbolic_reuses_analysis_across_solves() -> None:
+    """A `analyze_symbolic` scope analyses once and reuses it across solves, redoing the
     numeric phase per call through `factor_and_solve_stateful`, and releasing on scope
     exit."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
@@ -115,7 +118,7 @@ def test_factorize_symbolic_reuses_analysis_across_solves() -> None:
         _spy("factor_and_solve_stateful") as factor_and_solve_calls,
         _spy("release") as release_calls,
     ):
-        with solver.factorize_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
+        with solver.analyze_symbolic(BCOO.fromdense(SQUARE_MATRIX)) as scope:
             handle = scope.handle
 
             first_state = scope.init(operator)
@@ -158,7 +161,7 @@ def test_symbolic_scope_reused_under_jit_analyses_once() -> None:
         state = scope.init(operator)
         return lx.linear_solve(operator, b, solver=solver, state=state).value
 
-    with solver.factorize_symbolic(sparsity) as scope:
+    with solver.analyze_symbolic(sparsity) as scope:
         handle = scope.handle
         solution = np.asarray(run(scope, sparsity.data, RIGHT_HAND_SIDE))
         other_solution = np.asarray(run(scope, 2.0 * sparsity.data, RIGHT_HAND_SIDE))
@@ -169,13 +172,13 @@ def test_symbolic_scope_reused_under_jit_analyses_once() -> None:
 
 
 def test_symbolic_scope_handle_released_exactly_once() -> None:
-    """The handle a `factorize_symbolic` scope allocates is released exactly once, on
+    """The handle a `analyze_symbolic` scope allocates is released exactly once, on
     scope exit, whether or not the scope's state is ever used inside a jitted function."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     solver = Pardiso()
 
     with _spy("release") as release_calls:
-        with solver.factorize_symbolic(sparsity) as scope:
+        with solver.analyze_symbolic(sparsity) as scope:
             handle = scope.handle
             state = scope.init(BCOOLinearOperator(sparsity))
             solver.compute(state, RIGHT_HAND_SIDE, {})
@@ -199,7 +202,7 @@ def test_transpose_reuses_factorization() -> None:
         np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
     )
 
-    with solver.init(operator, {}).factorize() as state:
+    with solver.init(operator, {}).analyze_numeric() as state:
         with (
             _spy("analyze") as analyze_calls,
             _spy("factor") as factor_calls,
@@ -224,7 +227,7 @@ def test_conj_real_is_noop() -> None:
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = Pardiso()
 
-    with solver.init(operator, {}).factorize() as state:
+    with solver.init(operator, {}).analyze_numeric() as state:
         conj_state, _ = solver.conj(state, options={})
         assert conj_state is state
 
@@ -258,13 +261,13 @@ def test_zero_diagonal_matrix_solves_accurately() -> None:
     basic = lx.linear_solve(operator, vector, solver=solver).value
     assert residual(basic) < 1e-10, "one-shot solve perturbed its pivots"
 
-    with solver.factorize_symbolic(operator) as scope:
+    with solver.analyze_symbolic(operator) as scope:
         symbolic = lx.linear_solve(
             operator, vector, solver=solver, state=scope.init(operator)
         ).value
         assert residual(symbolic) < 1e-10, "symbolic-scope solve perturbed its pivots"
 
-        with scope.factorize(operator) as numeric_state:
+        with scope.analyze_numeric(operator) as numeric_state:
             numeric = lx.linear_solve(
                 operator, vector, solver=solver, state=numeric_state
             ).value
