@@ -1,4 +1,6 @@
 from ._auto import AutoSparseLinearSolver as AutoSparseLinearSolver
+from ._iterative import PreconditionedIterativeSolver as PreconditionedIterativeSolver
+from ._iterative import block_jacobi_solver as block_jacobi_solver
 from ._klu import KLU as KLU
 from ._pardiso import Pardiso as Pardiso
 from ._sparse import (

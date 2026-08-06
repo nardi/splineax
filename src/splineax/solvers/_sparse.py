@@ -13,32 +13,14 @@ from typing import (
 
 import equinox as eqx
 import jax
-from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, PyTree
 from lineax import AbstractLinearOperator, AutoLinearSolver
 from lineax import linear_solve as _lx_linear_solve
 from lineax._solution import RESULTS, Solution
 from lineax._solve import AbstractLinearSolver, sentinel
 
-from splineax.operators._bcoo import BCOOLinearOperator
-from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.operators._jacobian import (
-    JacobianColoring,
-    SparseJacobianLinearOperator,
-    SparseJacobianLinearOperatorColoring,
-)
+from splineax.operators._pattern import _Sparsity as _Sparsity
 from splineax.solvers._handle import mark_via_linear_solve
-
-# Everything `analyze_symbolic` accepts as a sparsity pattern.
-_Sparsity = (
-    BCOO
-    | BCSR
-    | BCOOLinearOperator
-    | BCSRLinearOperator
-    | SparseJacobianLinearOperator
-    | SparseJacobianLinearOperatorColoring
-    | JacobianColoring
-)
 
 
 class SparseNumericState(Protocol):

@@ -26,6 +26,9 @@ from .solvers import (
     Pardiso as Pardiso,
 )
 from .solvers import (
+    PreconditionedIterativeSolver as PreconditionedIterativeSolver,
+)
+from .solvers import (
     SparseLinearSolver as SparseLinearSolver,
 )
 from .solvers import (
@@ -33,6 +36,9 @@ from .solvers import (
 )
 from .solvers import (
     SymbolicScopedSparseLinearSolver as SymbolicScopedSparseLinearSolver,
+)
+from .solvers import (
+    block_jacobi_solver as block_jacobi_solver,
 )
 from .solvers import (
     linear_solve as linear_solve,
