@@ -3,6 +3,7 @@ from typing import Any, Iterator, Literal, NamedTuple, overload
 
 import jax.numpy as jnp
 from jax.experimental.sparse import BCOO
+from jaxtyping import Array, PyTree
 from lineax import CG, GMRES, AbstractLinearOperator, conj, materialise
 from lineax import linear_solve as _lx_linear_solve
 from lineax._solution import RESULTS
@@ -239,8 +240,8 @@ class PreconditionedIterativeSolver(AbstractSparseLinearSolver[_IterativeState])
         yield _IterativeScope(transform_plan, preconditioner_plan)
 
     def compute(
-        self, state: _IterativeState, vector: Any, options: dict[str, Any]
-    ) -> tuple[Any, RESULTS, dict[str, Any]]:
+        self, state: _IterativeState, vector: PyTree[Array], options: dict[str, Any]
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
         del options
         match state:
             case _IterativeNumericState():
