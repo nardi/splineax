@@ -24,6 +24,14 @@
 
 ---
 
+::: splineax.PreconditionedIterativeSolver
+
+---
+
+::: splineax.block_jacobi_solver
+
+---
+
 ::: splineax.SymbolicScopedSparseLinearSolver
 
 ## Base class and protocols

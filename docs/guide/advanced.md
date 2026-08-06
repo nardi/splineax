@@ -232,3 +232,12 @@ solve_many(splx.AutoSparseLinearSolver(), operator, [b1, b2, b3])
 
 The [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol describes the same surface
 structurally, for when you prefer duck typing or `isinstance` checks.
+
+## Beyond direct solves
+
+[`PreconditionedIterativeSolver`][splineax.PreconditionedIterativeSolver] stages the
+same way: `analyze_symbolic` and `analyze_numeric` here are pattern analysis (e.g.
+clustering) and value-dependent work (e.g. scaling, block inversion) instead of
+symbolic and numeric factorization. See the
+[preconditioning guide](preconditioning.md) for how it fits together, and when to
+reach for it instead of a direct solve.

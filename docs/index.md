@@ -21,6 +21,11 @@ It provides:
   SuiteSparse KLU library via `klujax`, with factorization reuse), and
   [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] which picks one based on the
   platform.
+- **Preconditioned iterative solvers**:
+  [`PreconditionedIterativeSolver`][splineax.PreconditionedIterativeSolver] rewrites the
+  system (clustering, scaling) and builds a preconditioner before handing it to a lineax
+  Krylov solver, for systems too large or too GPU-bound for a direct solve. See
+  [`block_jacobi_solver`][splineax.block_jacobi_solver] for a ready-made instance.
 - A [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol for separating
   factorization from solving.
 
@@ -84,6 +89,8 @@ with solver.analyze_numeric(operator) as numeric_state:
 - [Solvers](guide/solvers.md): what each solver does and when to use it.
 - [Advanced usage](guide/advanced.md): reuse a factorization across many solves with the
   `SparseLinearSolver` protocol.
+- [Preconditioning](guide/preconditioning.md): solve large systems iteratively with a
+  preconditioner built from the sparsity pattern.
 
 !!! note
 
