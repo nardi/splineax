@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
+import pytest
 from jax.experimental.sparse import BCOO
 
 import splineax as splx
@@ -28,6 +29,7 @@ from splineax import (
     BCOOLinearOperator,
     BCSRLinearOperator,
     SparseJacobianLinearOperator,
+    Spsolve,
 )
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
@@ -101,6 +103,99 @@ class TestFactorizeDifferentiability:
             assert jnp.allclose(
                 jax.jacrev(solve)(RIGHT_HAND_SIDE), expected, atol=1e-5
             )
+
+
+# ---------------------------------------------------------------------------
+# 1b. Factorize scope opened inside the differentiated function
+# ---------------------------------------------------------------------------
+
+
+def _solver_owns_native_handle(solver: AbstractSparseLinearSolver) -> bool:
+    """True for solvers whose factorize/factorize_symbolic allocates a native handle
+    that is freed by the context manager's __exit__. When such a scope is opened inside
+    a function being reverse-mode-differentiated, the handle is freed during the forward
+    pass before the VJP's backward pass can use it for the transposed solve."""
+    resolved = solver
+    if isinstance(resolved, splx.AutoSparseLinearSolver):
+        resolved = resolved.select_solver(
+            BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
+        )
+    return not isinstance(resolved, Spsolve)
+
+
+class TestFactorizeInsideAdFunction:
+    """Reverse-mode AD when factorize is opened *inside* the differentiated function.
+
+    Solvers with native handles (KLU, Pardiso) cannot support this: the context
+    manager's ``__exit__`` frees the handle during the forward pass, before ``jacrev``'s
+    backward function can use it for the transposed solve. Forward mode works because
+    JVP tangents propagate alongside the primal while the handle is still alive.
+
+    The reverse-mode tests are marked ``xfail`` for handle-owning solvers to document
+    this limitation and detect if a future change (e.g. AD rules for klujax's
+    ``free_*`` primitives) lifts it.
+    """
+
+    def test_wrt_vector_jacfwd(
+        self,
+        make_operator: OperatorFactory,
+        solver: AbstractSparseLinearSolver,
+    ) -> None:
+        operator = make_operator(SQUARE_MATRIX)
+
+        def solve(b: jax.Array) -> jax.Array:
+            with solver.factorize(operator) as state:
+                return lx.linear_solve(
+                    operator, b, solver=solver, state=state
+                ).value
+
+        expected = _dense_reference_jacobian_wrt_vector()
+        assert jnp.allclose(jax.jacfwd(solve)(RIGHT_HAND_SIDE), expected, atol=1e-5)
+
+    def test_wrt_vector_jacrev(
+        self,
+        make_operator: OperatorFactory,
+        solver: AbstractSparseLinearSolver,
+    ) -> None:
+        if _solver_owns_native_handle(solver):
+            pytest.xfail(
+                "Reverse-mode AD through factorize opened inside the differentiated "
+                "function is unsupported for handle-owning solvers: the handle is freed "
+                "during the forward pass before the VJP backward pass runs."
+            )
+        operator = make_operator(SQUARE_MATRIX)
+
+        def solve(b: jax.Array) -> jax.Array:
+            with solver.factorize(operator) as state:
+                return lx.linear_solve(
+                    operator, b, solver=solver, state=state
+                ).value
+
+        expected = _dense_reference_jacobian_wrt_vector()
+        assert jnp.allclose(jax.jacrev(solve)(RIGHT_HAND_SIDE), expected, atol=1e-5)
+
+    def test_wrt_vector_jacrev_factorize_symbolic(
+        self,
+        make_operator: OperatorFactory,
+        solver: AbstractSparseLinearSolver,
+    ) -> None:
+        if _solver_owns_native_handle(solver):
+            pytest.xfail(
+                "Reverse-mode AD through factorize_symbolic opened inside the "
+                "differentiated function is unsupported for handle-owning solvers."
+            )
+        operator = make_operator(SQUARE_MATRIX)
+        sparsity = BCOO.fromdense(SQUARE_MATRIX)
+
+        def solve(b: jax.Array) -> jax.Array:
+            with solver.factorize_symbolic(sparsity) as scope:
+                state = scope.init(operator)
+                return lx.linear_solve(
+                    operator, b, solver=solver, state=state
+                ).value
+
+        expected = _dense_reference_jacobian_wrt_vector()
+        assert jnp.allclose(jax.jacrev(solve)(RIGHT_HAND_SIDE), expected, atol=1e-5)
 
 
 # ---------------------------------------------------------------------------
