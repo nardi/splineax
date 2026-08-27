@@ -62,18 +62,15 @@ operator = splx.BCOOLinearOperator(matrix)
 vectors = [jnp.ones(n), jnp.arange(n) % 2]
 solver = splx.AutoSparseLinearSolver()
 
-# Calculate factorization once...
-with solver.factorize(operator) as factorized_state:
-    # ...and reuse for multiple solves.
-    solution = lx.linear_solve(
-        operator, vectors[0], solver=solver, state=factorized_state
-    )
-    assert jnp.allclose(matrix @ solution.value, vectors[0], atol=1e-4)
+# Solve once, then thread the returned state back in to reuse the factorization.
+solution, state = splx.linear_solve(operator, vectors[0], solver)
+assert jnp.allclose(matrix @ solution.value, vectors[0], atol=1e-4)
 
-    solution = lx.linear_solve(
-        operator, vectors[1], solver=solver, state=factorized_state
-    )
-    assert jnp.allclose(matrix @ solution.value, vectors[1], atol=1e-4)
+solution, state = splx.linear_solve(operator, vectors[1], solver, state=state)
+assert jnp.allclose(matrix @ solution.value, vectors[1], atol=1e-4)
+
+# Free the factorization when you are done with it.
+solver.release(state)
 ```
 
 ## Where to next
