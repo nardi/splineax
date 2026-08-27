@@ -1,4 +1,5 @@
 import abc
+import secrets
 import warnings
 from contextlib import AbstractContextManager, contextmanager
 from typing import (
@@ -14,6 +15,8 @@ from typing import (
 
 import equinox as eqx
 import jax
+import jax.core
+import numpy as np
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, PyTree
 from lineax import AbstractLinearOperator, AutoLinearSolver
@@ -69,6 +72,129 @@ def warn_if_unsorted(matrix: BCOO | BCSR, solver_name: str) -> None:
             PerformanceWarning,
             stacklevel=2,
         )
+
+
+class _HasRepr:
+    """A tag object whose only content is its repr, matching lineax's own tags."""
+
+    def __init__(self, string: str) -> None:
+        self.string = string
+
+    def __repr__(self) -> str:
+        return self.string
+
+
+sparse_indices_sorted = _HasRepr("sparse_indices_sorted")
+"""One global assertion that an operator's indices are already row-major sorted, so
+`Pardiso` and `Spsolve` may skip the sort they would otherwise do in `init`."""
+
+
+class _ContentPatternTag:
+    """A sparsity-pattern tag identified by the content of its index arrays.
+
+    Two tags are equal when their indices match exactly, so operators built with the same
+    pattern reuse each other's factorization even when tagged separately. This follows
+    asdex's `_HashableEntries`, which carries concrete index arrays as hashable static aux
+    data.
+    """
+
+    __slots__ = ("_hash", "indices", "shape")
+
+    def __init__(self, indices: np.ndarray, shape: tuple[int, ...]) -> None:
+        self.indices = indices
+        self.shape = shape
+        self._hash: int | None = None
+
+    def __hash__(self) -> int:
+        # Content hashing is O(nnz), so compute it lazily and cache it. A frozenset
+        # hashes the tag every time it is built.
+        if self._hash is None:
+            self._hash = hash(
+                (self.indices.tobytes(), str(self.indices.dtype), self.shape)
+            )
+        return self._hash
+
+    def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, _ContentPatternTag):
+            return NotImplemented
+        # The dtype is compared alongside the contents to stay consistent with the hash.
+        return (
+            self.shape == other.shape
+            and self.indices.dtype == other.indices.dtype
+            and np.array_equal(self.indices, other.indices)
+        )
+
+
+class _IdentityPatternTag:
+    """A sparsity-pattern tag identified by a random id, for use under jit.
+
+    A traced index array cannot be hashed, so this stands in for the content tag. Two
+    instances differ, and the same instance threaded onto several operators marks them as
+    sharing a pattern. The random id keeps the tag hashable and stable across pytree
+    flatten and unflatten, where a bare `object()` identity would not survive.
+    """
+
+    __slots__ = ("_id",)
+
+    def __init__(self) -> None:
+        self._id = secrets.randbits(128)
+
+    def __hash__(self) -> int:
+        return hash(self._id)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _IdentityPatternTag):
+            return NotImplemented
+        return self._id == other._id
+
+
+def _pattern_indices(
+    pattern: "_Sparsity",
+) -> tuple[np.ndarray | None, tuple[int, ...] | None]:
+    """Read a pattern's COO index array and shape as concrete numpy data.
+
+    Returns `(None, None)` when the indices are traced or the pattern is a Jacobian form,
+    which sends `sparsity_pattern_tag` to its random-id fallback. The Jacobian forms get
+    their own content tags through the factory integration, see `_jacobian.py`.
+    """
+    match pattern:
+        case BCOO():
+            indices, shape = pattern.indices, pattern.shape
+        case BCSR():
+            bcoo = pattern.to_bcoo()
+            indices, shape = bcoo.indices, bcoo.shape
+        case BCOOLinearOperator():
+            indices, shape = pattern.matrix.indices, pattern.matrix.shape
+        case BCSRLinearOperator():
+            bcoo = pattern.matrix.to_bcoo()
+            indices, shape = bcoo.indices, bcoo.shape
+        case _:
+            return None, None
+    if isinstance(indices, jax.core.Tracer):
+        return None, None
+    return np.asarray(indices), tuple(shape)
+
+
+def sparsity_pattern_tag(pattern: "_Sparsity | None" = None) -> object:
+    """Create a tag marking an operator's structural sparsity pattern.
+
+    Attach the tag to operators through their `tags` argument. Two operators carrying
+    equal tags are asserted to have exactly the same index arrays, in the same order, so
+    a solver may reuse one operator's factorization for the other.
+
+    Given a concrete `pattern`, the tag is content-hashed, so independently tagged
+    operators with the same indices get equal tags. With no argument, or a pattern whose
+    indices are traced under jit, the tag instead carries a random id. Thread that one
+    tag object onto every operator sharing the pattern to mark them as equal.
+    """
+    if pattern is None:
+        return _IdentityPatternTag()
+    indices, shape = _pattern_indices(pattern)
+    if indices is None or shape is None:
+        return _IdentityPatternTag()
+    return _ContentPatternTag(indices, shape)
 
 
 class SparseNumericState(Protocol):
