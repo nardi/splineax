@@ -22,37 +22,29 @@
 
 ::: splineax.solvers.ReorderingScheme
 
----
+## Sparsity tags
 
-::: splineax.SymbolicScopedSparseLinearSolver
-
-## Base class and protocols
-
-All solvers subclass `AbstractSparseLinearSolver` and structurally satisfy the
-`SparseLinearSolver` protocol. The factorization-reuse API is described below (see
-[Advanced usage](../guide/advanced.md)).
-
-::: splineax.AbstractSparseLinearSolver
+::: splineax.sparsity_pattern_tag
 
 ---
+
+::: splineax.sparse_indices_sorted
+
+## Protocols
+
+Solvers structurally satisfy the `SparseLinearSolver` protocol, which extends the
+solver-agnostic `StatefulSolver`. The stateful reuse API is described in
+[Advanced usage](../guide/advanced.md).
 
 ::: splineax.SparseLinearSolver
 
 ---
 
-::: splineax.solvers.SparseSymbolicScope
+::: splineax.StatefulSolver
 
 ---
 
-::: splineax.solvers.SparseBasicState
-
----
-
-::: splineax.solvers.SparseSymbolicState
-
----
-
-::: splineax.solvers.SparseNumericState
+::: splineax.TrackingState
 
 ---
 
