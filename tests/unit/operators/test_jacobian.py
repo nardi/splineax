@@ -305,13 +305,13 @@ def test_linear_solve_matches_numpy(solver, enable_x64: None) -> None:
     assert np.allclose(np.asarray(solution), expected, atol=1e-5)
 
 
-def test_factorize_symbolic_round_trip(enable_x64: None) -> None:
-    """`KLU.factorize_symbolic` must accept the operator, a bound
+def test_init_symbolic_round_trip(enable_x64: None) -> None:
+    """`KLU.init_symbolic` must accept the operator, a bound
     `SparseJacobianLinearOperatorColoring`, and a bare `JacobianColoring`, deriving
-    the indices host-side from the stored sparsity pattern in each case. Solving
-    through the resulting scope must match the dense solve, which fails if the
-    pattern's index order ever disagrees with the order `asdex` emits when the
-    Jacobian is later materialised."""
+    the indices from the stored sparsity pattern in each case. Updating that state with
+    the operator and solving must match the dense solve, which fails if the pattern's
+    index order ever disagrees with the order `asdex` emits when the Jacobian is later
+    materialised."""
     solver = KLU()
     operator_coloring = SparseJacobianLinearOperatorColoring.detect(
         square_function, SQUARE_POINT
@@ -324,11 +324,12 @@ def test_factorize_symbolic_round_trip(enable_x64: None) -> None:
     )
 
     for sparsity_source in (operator, operator_coloring, bare_coloring):
-        with solver.factorize_symbolic(sparsity_source) as scope:
-            state = scope.init(operator)
-            solution = lx.linear_solve(
-                operator, RIGHT_HAND_SIDE, solver=solver, state=state
-            ).value
+        state = solver.init_symbolic(sparsity_source)
+        state = solver.update(state, operator)
+        solution = lx.linear_solve(
+            operator, RIGHT_HAND_SIDE, solver=solver, state=state
+        ).value
+        solver.release(state)
         assert np.allclose(np.asarray(solution), expected, atol=1e-5)
 
 

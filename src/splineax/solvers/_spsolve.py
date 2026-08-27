@@ -1,6 +1,5 @@
-from contextlib import AbstractContextManager, contextmanager
 from enum import IntEnum
-from typing import Any, Iterator, Literal, NamedTuple, overload
+from typing import Any
 
 import equinox as eqx
 from jax import custom_batching
@@ -9,6 +8,7 @@ from jax.experimental.sparse.linalg import _csr_transpose, spsolve
 from jaxtyping import Array, Inexact, PyTree
 from lineax import AbstractLinearOperator, materialise
 from lineax._solution import RESULTS
+from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
     PackedStructures,
     pack_structures,
@@ -23,40 +23,31 @@ from splineax.operators._jacobian import (
     SparseJacobianLinearOperator,
 )
 from splineax.solvers._sparse import (
-    AbstractSparseLinearSolver,
-    SparseNumericState,
-    SymbolicScopedSparseLinearSolver,
     _Sparsity,
-    as_scoped_solver,
-    factorize_through_init,
+    sparse_indices_sorted,
     warn_if_unsorted,
 )
 
 
-class _SpsolveState(NamedTuple):
-    matrix: BCSR
-    packed_structures: PackedStructures
+class _SpsolveState(eqx.Module):
+    """A Spsolve state.
 
-    @contextmanager
-    def factorize(self) -> Iterator["_SpsolveState"]:
-        # No-op: Spsolve has no separate numeric factorization phase.
-        yield self
+    `spsolve` has no separate factorization phase, so the stateful API is a set of
+    no-ops. A state straight from `init_symbolic` carries no matrix and is not solvable
+    until `update` gives it an operator.
+    """
 
+    operator: AbstractLinearOperator | None
+    """The operator this state was built on. Compared by identity in `update`."""
+    matrix: BCSR | None
+    """The sorted CSR matrix to solve, or None for a symbolic-only state."""
+    packed_structures: PackedStructures | None
+    """The lineax structure for ravel and unravel, None for a symbolic-only state."""
 
-class _SpsolveSymbolicScope(NamedTuple):
-    solver: "Spsolve"
-    """The originating solver, so built states keep its tol/reorder config."""
-
-    def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> _SpsolveState:
-        # No-op symbolic reuse: Spsolve cannot pre-analyze, so this is a normal init.
-        return self.solver.init(operator, options)
-
-    @contextmanager
-    def factorize(self, operator: AbstractLinearOperator) -> Iterator[_SpsolveState]:
-        with self.init(operator).factorize() as state:
-            yield state
+    def track(self, solution: Any) -> "_SpsolveState":
+        """No-op, since a Spsolve state owns no memory to order a release after."""
+        del solution
+        return self
 
 
 class ReorderingScheme(IntEnum):
@@ -95,7 +86,7 @@ def _spsolve(
     return spsolve_with_sequential_vmap(data, indices, indptr, b)
 
 
-class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
+class Spsolve(AbstractLinearSolver[_SpsolveState]):
     """Sparse direct solver wrapping `jax.experimental.sparse.linalg.spsolve`.
 
     This solver keeps the operator in its native sparse (CSR) storage rather than
@@ -104,6 +95,9 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
     sparse QR factorization (CUDA native; on CPU it falls back to
     `scipy.sparse.linalg.spsolve`).
 
+    It has no separate factorization phase, so the stateful reuse API (`init_symbolic`,
+    `update`, `release`) is a set of no-ops here, for parity with `KLU` and `Pardiso`.
+
     This solver can only handle square nonsingular operators.
     """
 
@@ -111,34 +105,35 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
     reorder: ReorderingScheme = eqx.field(default=ReorderingScheme.SYMRCM, static=True)
 
     def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any]
+        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _SpsolveState:
         if operator.in_size() != operator.out_size():
             raise ValueError(
                 "`Spsolve` may only be used for linear solves with square matrices"
             )
 
-        # `spsolve` consumes a CSR triple whose column indices are sorted within
-        # each row. We assume the matrix is coalesced (no duplicate indices) and
-        # only ensure the sorting here.
+        # `spsolve` consumes a CSR triple whose column indices are sorted within each
+        # row. We assume the matrix is coalesced (no duplicate indices) and only ensure
+        # the sorting here. An operator tagged `sparse_indices_sorted` asserts it needs
+        # no sort.
+        sorted_asserted = sparse_indices_sorted in getattr(operator, "tags", ())
         match operator:
             case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
                 return self.init(materialise(operator), options)
             case BCSRLinearOperator(matrix):
-                # Round-trip an unsorted `BCSR` through `BCOO`, since
-                # `BCSR.from_bcoo` sorts.
-                if matrix.indices_sorted:
+                # Round-trip an unsorted `BCSR` through `BCOO`, since `BCSR.from_bcoo`
+                # sorts.
+                if matrix.indices_sorted or sorted_asserted:
                     matrix_bcsr = matrix
                 else:
                     warn_if_unsorted(matrix, "Spsolve")
                     matrix_bcsr = BCSR.from_bcoo(matrix.to_bcoo())
             case BCOOLinearOperator(matrix):
-                # `BCSR.from_bcoo` sorts the indices itself when they are not
-                # already sorted.
-                warn_if_unsorted(matrix, "Spsolve")
-                matrix_bcsr = BCSR.from_bcoo(matrix)
+                if sorted_asserted:
+                    matrix_bcsr = BCSR.from_bcoo(matrix)
+                else:
+                    warn_if_unsorted(matrix, "Spsolve")
+                    matrix_bcsr = BCSR.from_bcoo(matrix)
             case _:
                 raise TypeError(
                     "`Spsolve` requires a sparse operator backed by a `BCOO` or `BCSR` "
@@ -148,56 +143,46 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
                     f"got {type(operator).__name__}."
                 )
 
-        return _SpsolveState(matrix_bcsr, pack_structures(operator))
+        return _SpsolveState(operator, matrix_bcsr, pack_structures(operator))
 
-    def factorize(
-        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> AbstractContextManager[SparseNumericState]:
-        # No-op factorization for parity with KLU: yields the ordinary solver state.
-        return factorize_through_init(self, operator, options)
+    def init_symbolic(
+        self, sparsity: _Sparsity, options: dict[str, Any] = {}
+    ) -> _SpsolveState:
+        """No-op symbolic init, for parity with `KLU`.
 
-    @overload
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
-    ) -> AbstractContextManager[_SpsolveSymbolicScope]: ...
-
-    @overload
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: Literal[True]
-    ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
-
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: bool = False
-    ) -> AbstractContextManager[
-        _SpsolveSymbolicScope | SymbolicScopedSparseLinearSolver
-    ]:
-        """Open a no-op symbolic-factorization scope, for parity with `KLU`.
-
-        Args:
-            sparsity: accepted and ignored, since `Spsolve` cannot pre-analyze a
-                      sparsity pattern.
-            as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
-                       with this solver, instead of the bare scope, so that the two
-                       need not be passed around together.
+        `Spsolve` cannot pre-analyze a sparsity pattern, so this returns an empty state
+        that `update` fills with the first real operator.
         """
-        scope = self._factorize_symbolic(sparsity)
-        return as_scoped_solver(self, scope) if as_solver else scope
+        del sparsity, options
+        return _SpsolveState(None, None, None)
 
-    @contextmanager
-    def _factorize_symbolic(
-        self, sparsity: _Sparsity
-    ) -> Iterator[_SpsolveSymbolicScope]:
-        # No-op symbolic factorization: the sparsity is accepted for parity with KLU but
-        # not used, since Spsolve cannot pre-analyze a sparsity pattern. Kept separate
-        # from `factorize_symbolic` above so that the public method can be overloaded on
-        # `as_solver` (`@contextmanager` and `@overload` do not compose).
-        del sparsity
-        yield _SpsolveSymbolicScope(self)
+    def update(
+        self,
+        state: _SpsolveState,
+        operator: AbstractLinearOperator,
+        options: dict[str, Any] = {},
+    ) -> _SpsolveState:
+        """Rebuild the state from `operator`, since `Spsolve` reuses no factorization.
+
+        Repeated calls with the same operator object are a no-op.
+        """
+        if operator is state.operator:
+            return state
+        return self.init(operator, options)
+
+    def release(self, state: _SpsolveState) -> None:
+        """No-op, since a Spsolve state owns nothing to free."""
+        del state
 
     def compute(
         self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
         del options
+        if state.matrix is None or state.packed_structures is None:
+            raise ValueError(
+                "`Spsolve` cannot solve with a symbolic-only state; call `update` with "
+                "an operator first."
+            )
         matrix = state.matrix
         packed_structures = state.packed_structures
         vector = ravel_vector(vector, packed_structures)
@@ -219,12 +204,15 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
     ) -> tuple[_SpsolveState, dict[str, Any]]:
         del options
         matrix = state.matrix
+        assert matrix is not None and state.packed_structures is not None
         matrix_T = BCSR(
             _csr_transpose(matrix.data, matrix.indices, matrix.indptr),
             shape=matrix.shape[::-1],
         )
         transpose_state = _SpsolveState(
-            matrix_T, transpose_packed_structures(state.packed_structures)
+            state.operator,
+            matrix_T,
+            transpose_packed_structures(state.packed_structures),
         )
         return transpose_state, {}
 
@@ -233,10 +221,11 @@ class Spsolve(AbstractSparseLinearSolver[_SpsolveState]):
     ) -> tuple[_SpsolveState, dict[str, Any]]:
         del options
         matrix = state.matrix
+        assert matrix is not None
         matrix_conj = BCSR(
             (matrix.data.conj(), matrix.indices, matrix.indptr), shape=matrix.shape
         )
-        return _SpsolveState(matrix_conj, state.packed_structures), {}
+        return _SpsolveState(state.operator, matrix_conj, state.packed_structures), {}
 
     def assume_full_rank(self) -> bool:
         return True
