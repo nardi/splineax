@@ -50,26 +50,17 @@ def _spy_frees() -> Generator[tuple[list[int], list[int]], None, None]:
     Why we intercept at the Python-wrapper level (not at `free_symbolic_p.bind`):
     Under JIT, `klujax.free_symbolic` passes the handle through
     `lax.optimization_barrier`, which produces a *new* Tracer. The id of that
-    new Tracer does not match the id of the original `manager.handle`, so
+    new Tracer does not match the id of the original token's `.handle`, so
     spying on the primitive's `.bind` would fail the id-equality assertions.
-    Intercepting the wrapper functions directly lets us read `manager.handle`
-    before the barrier is applied, giving us the same id as
+    Intercepting the wrapper functions directly lets us read the token's
+    `.handle` before the barrier is applied, giving us the same id as
     `numeric_state.factorization.symbolic/numeric`.
 
-    Why we only record when the first argument is a `KLUHandleManager`:
-    `KLUHandleAllocationScopeManager.begin_scope()` calls
-    `klujax.free_symbolic(manager, deps)` with a `KLUHandleManager`.
-    Inside that call, `manager.close()` triggers a *recursive* call to
-    `klujax.free_symbolic(raw_handle)` (because `close()` uses
-    `self.free_callable` which is the same function captured at manager
-    creation time). That recursive call receives a raw Array, not a
-    `KLUHandleManager`. The `isinstance` guard below prevents
-    double-recording the same handle from this recursive call.
-
-    Under JIT, `manager.close()` short-circuits (the handle is a Tracer and
-    cannot be eagerly freed), so `begin_scope()` is the only call site that
-    reaches the spy with a `KLUHandleManager`.  In both cases,
-    `id(manager.handle) == id(handle_value(numeric_state.factorization.symbolic/
+    Why we only record when the first argument is a token:
+    `KLUHandleAllocationScopeManager.begin_scope()` frees with the real
+    `SymbolToken`/`NumericToken`, so the `isinstance` guard records the
+    handle id from that call and ignores any bare-array call. In both cases,
+    `id(token.handle) == id(handle_value(numeric_state.factorization.symbolic/
     numeric))`: under JIT the state holds a `_HandleToken` wrapping the same
     array, not the array directly, so callers must unwrap it with
     `handle_value` before comparing ids (eagerly there is no token, and
@@ -84,19 +75,17 @@ def _spy_frees() -> Generator[tuple[list[int], list[int]], None, None]:
     original_free_numeric = klu.free_numeric
 
     def spy_free_symbolic(symbolic_or_handle, dependency=None):
-        if isinstance(symbolic_or_handle, klu.KLUHandleManager):
+        if isinstance(symbolic_or_handle, klu.SymbolToken):
             freed_symbolic_handle_ids.append(id(symbolic_or_handle.handle))
         return original_free_symbolic(symbolic_or_handle, dependency)
 
     def spy_free_numeric(numeric_or_handle, dependency=None):
-        if isinstance(numeric_or_handle, klu.KLUHandleManager):
+        if isinstance(numeric_or_handle, klu.NumericToken):
             freed_numeric_handle_ids.append(id(numeric_or_handle.handle))
         return original_free_numeric(numeric_or_handle, dependency)
 
-    # Replace the module-level attributes so that both `begin_scope()` and any
-    # newly-created `KLUHandleManager` (which captures `free_callable` from
-    # the module at construction time inside `klujax.analyze` / `klujax.factor`)
-    # see the spy.
+    # Replace the module-level attributes so that `begin_scope()`'s free calls
+    # hit the spy.
     klu.free_symbolic = spy_free_symbolic  # type: ignore
     klu.free_numeric = spy_free_numeric  # type: ignore
     try:

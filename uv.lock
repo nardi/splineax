@@ -813,7 +813,7 @@ wheels = [
 
 [[package]]
 name = "pardiso-mkl-jax"
-version = "0.1.3"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "equinox" },
@@ -822,14 +822,14 @@ dependencies = [
     { name = "numpy" },
     { name = "scipy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/27/7f/02b75fc2ee4694e752e10528a2b00300fff22cb54e7b7c0c360d93081646/pardiso_mkl_jax-0.1.3.tar.gz", hash = "sha256:b76752d41e384596d2e4873b5edf50c7bcf1484c9ff3d1a2645b75319ae769e9", size = 104374, upload-time = "2026-07-27T14:35:33.811Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/02/0d4e08f756569d5b2131bae27fe378a6e442d67b6d1762ca58c78486f6d6/pardiso_mkl_jax-0.2.0.tar.gz", hash = "sha256:ca4ea038bca496933d9cf926e0a51a89eb9a6eaa345c64d561e03205558fe298", size = 132855, upload-time = "2026-08-26T21:39:02.645Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f9/68/073bc23a01d49e16e5dccaed5b963033e4d24db94cb4b9057ef775425800/pardiso_mkl_jax-0.1.3-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:fcf1640f3a11c9d49ace6f3ee02cadec303e756bb0111a4c5141824e9d89d3c1", size = 90432, upload-time = "2026-07-27T14:35:26.616Z" },
-    { url = "https://files.pythonhosted.org/packages/56/d7/39b9f4e229589d62641fd69961d7c477a890bd4a6f7c1eb8f934bcfae161/pardiso_mkl_jax-0.1.3-cp311-cp311-win_amd64.whl", hash = "sha256:9f8dfc7d3f8de70e4e61fd5af21954f23cb9efe458dee03373e36adb582781d3", size = 255170, upload-time = "2026-07-27T14:35:28.004Z" },
-    { url = "https://files.pythonhosted.org/packages/42/02/9b1e8ca0af74b0b6d0a1a1eebe7c4ba7c904e88e6ebbe10cd4174dc207e0/pardiso_mkl_jax-0.1.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:100358f0253cf4fc6d32060d4ab9c9cfdba6ebc64e71703301e1c3763973587b", size = 91348, upload-time = "2026-07-27T14:35:29.144Z" },
-    { url = "https://files.pythonhosted.org/packages/0e/54/4bfa6d39a6ed2f8a6a7fc8b5c5e052dd99148ea48ecf419a23cf1451e6f4/pardiso_mkl_jax-0.1.3-cp312-cp312-win_amd64.whl", hash = "sha256:3dc6ee4d05c5d0cb986869e78c9745c56d9905ebfb0637cd8aa9490221c89cf4", size = 255377, upload-time = "2026-07-27T14:35:30.296Z" },
-    { url = "https://files.pythonhosted.org/packages/5e/b6/860f01a97393e654d6a5823c7b80ded04123230aeffa31263c9f49b76e01/pardiso_mkl_jax-0.1.3-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5c42b170d509cc5898f416d40596e07fab977e34bc839f8bb3f87699aaf5984d", size = 90716, upload-time = "2026-07-27T14:35:31.64Z" },
-    { url = "https://files.pythonhosted.org/packages/5e/bc/1555cf3458d6f9c6d67a3f0b2769453619f2303790d6e546762cf306232b/pardiso_mkl_jax-0.1.3-cp313-cp313-win_amd64.whl", hash = "sha256:6aadbeb7a5d7ad6244d47dfb856673275a82f0fa8f86ffbc57a8536838b562cb", size = 254705, upload-time = "2026-07-27T14:35:32.669Z" },
+    { url = "https://files.pythonhosted.org/packages/63/f0/96377e2de1b9bfd6f576b08b588423f947a4da608996cfd36722ddcb3944/pardiso_mkl_jax-0.2.0-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:fa4847e8fbe8e09b0f8c03e28168f65a78d669a378d2c8d3e8b8b13e2df0c896", size = 189183, upload-time = "2026-08-26T21:38:53.98Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/9d/ba99309cd702e9f97a93951bc3b0ee3db2c78f96eb986fba62cf3a4a8802/pardiso_mkl_jax-0.2.0-cp311-cp311-win_amd64.whl", hash = "sha256:8ad90b643e270cfcd9918cba7d4b1f7e2baa49e308e0b6d6c09f7bba70725e92", size = 324690, upload-time = "2026-08-26T21:38:55.497Z" },
+    { url = "https://files.pythonhosted.org/packages/73/25/b70bb4acce2f0d015738b8c0d21e962a994b41f235281763d592c4171155/pardiso_mkl_jax-0.2.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:efc8331f4c32409d467086e776d95b65ac11a619c58ed922cf4e5491fe1ff639", size = 190697, upload-time = "2026-08-26T21:38:56.934Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/19/d86f96066e2321308879b67d2ea947e387f51896c139f9dff16112cb89b6/pardiso_mkl_jax-0.2.0-cp312-cp312-win_amd64.whl", hash = "sha256:4325ee076d7821d278e34f19c197d1b743b17993eec74f85cc24fb1e7feb994c", size = 325668, upload-time = "2026-08-26T21:38:58.314Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/a2/a63b103a9409122ae8f297462332706b71d48980722317ad47d8a7dfb91f/pardiso_mkl_jax-0.2.0-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:45a3485ba6da083fd9b2c016206bd8dc85c5f195fceaaa910b3e51a41de5b74b", size = 189353, upload-time = "2026-08-26T21:39:00.029Z" },
+    { url = "https://files.pythonhosted.org/packages/64/f2/eddb3043543a44d15d022e6f0a20c18c6a55d24fd78e3a10d6e808e8bcdf/pardiso_mkl_jax-0.2.0-cp313-cp313-win_amd64.whl", hash = "sha256:61a8e011af2c946ead6d873c8c304eb3e41c3053d71bea4fdb31b8b90642a423", size = 325381, upload-time = "2026-08-26T21:39:01.477Z" },
 ]
 
 [[package]]
@@ -1144,8 +1144,8 @@ requires-dist = [
     { name = "jax", specifier = ">=0.4" },
     { name = "jaxtyping", specifier = ">=0.2" },
     { name = "lineax", specifier = ">=0.1.1" },
-    { name = "pardiso-mkl-jax", marker = "extra == 'pardiso'", specifier = ">=0.1.3" },
-    { name = "splineax-klujax", specifier = ">=0.5.0.post2" },
+    { name = "pardiso-mkl-jax", marker = "extra == 'pardiso'", specifier = ">=0.2.0" },
+    { name = "splineax-klujax", specifier = ">=0.5.0.post4" },
 ]
 provides-extras = ["pardiso"]
 
@@ -1161,7 +1161,7 @@ dev = [
 
 [[package]]
 name = "splineax-klujax"
-version = "0.5.0.post2"
+version = "0.5.0.post4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
@@ -1170,26 +1170,26 @@ dependencies = [
     { name = "numpy" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/72/e6/3a81b09711142845d978ca0be6a887779dff7f442da20514ffb4fdac72ae/splineax_klujax-0.5.0.post2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:6b44dca15953e66dbcb0e58f039e2a72a7f2c485543b4ed0afc9f9a540d4b44c", size = 255512, upload-time = "2026-07-23T20:26:25.2Z" },
-    { url = "https://files.pythonhosted.org/packages/c4/cb/b3000b2cbced42a3f161b7e17fb28aed64ae8e27f5c01ca2df613bda7dd6/splineax_klujax-0.5.0.post2-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:259b4ec05a70a3fb390f9478cf7f4927f643ed02769bf025b8e89cfb833ac679", size = 2842232, upload-time = "2026-07-23T20:26:27.054Z" },
-    { url = "https://files.pythonhosted.org/packages/33/0d/3f40c9ef7bb449d56f525a1c0094b37f9524fea5a3aded98eb81ac0fbb8d/splineax_klujax-0.5.0.post2-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1ab11d969b6b168e2f3add9ea8adb5db8df7d7f94faf92ed6acdf6bf2ae7a548", size = 2897310, upload-time = "2026-07-23T20:26:28.725Z" },
-    { url = "https://files.pythonhosted.org/packages/00/ea/41ed9254bd6bc80100208cf31090ef770d1134d5a29a4d1765bef66d3a8a/splineax_klujax-0.5.0.post2-cp311-cp311-win_amd64.whl", hash = "sha256:bc75fd2b8a3eec9bf91108c7b632ac403b7b14ac775e8bb0213be6d0bdd724a8", size = 183960, upload-time = "2026-07-23T20:26:30.287Z" },
-    { url = "https://files.pythonhosted.org/packages/13/bd/78d9e0c3168edfe7c2275fb2ba74bbb5a6737746012d49f838b70057bc0b/splineax_klujax-0.5.0.post2-cp311-cp311-win_arm64.whl", hash = "sha256:04bec6fbe079de288435bbe75f8c3364608fb2c4bb01d69a7b7f09379a32904f", size = 168986, upload-time = "2026-07-23T20:26:31.721Z" },
-    { url = "https://files.pythonhosted.org/packages/da/30/be3495dc564aae675439faa5080a2065b0e66fe404abda39336c90f53830/splineax_klujax-0.5.0.post2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:e6a7bca145a78aa3b81ab201773098676e1c631f7c2103ba2990420e37c6532f", size = 255168, upload-time = "2026-07-23T20:26:33.174Z" },
-    { url = "https://files.pythonhosted.org/packages/0d/9b/20bf9a479f4408ab089123687b7377575cc9fb74def05f644af0f9f4270e/splineax_klujax-0.5.0.post2-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:fcf14be786809507e518f648f055e58e5faa131fb0db318faab7648ea2dd4623", size = 2842327, upload-time = "2026-07-23T20:26:34.799Z" },
-    { url = "https://files.pythonhosted.org/packages/9b/3e/94440ea98788556095e736a72764a1fa4dac6621928468810ebb44b6db48/splineax_klujax-0.5.0.post2-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3d1c12ba8b2b18b168042ccedae32275203a92398dadbc2e04ac51044398d18c", size = 2914274, upload-time = "2026-07-23T20:26:36.592Z" },
-    { url = "https://files.pythonhosted.org/packages/d8/2a/beb9e2e54d2c57f52a4e5fc7e8b6c34b72d3df1c091802e48885b613132e/splineax_klujax-0.5.0.post2-cp312-cp312-win_amd64.whl", hash = "sha256:596dcbe4e1162500a3f942afe5d28be6769d345303a0a5d5a5fee8ba4eca8b4a", size = 184404, upload-time = "2026-07-23T20:26:38.271Z" },
-    { url = "https://files.pythonhosted.org/packages/a0/64/d36af4258b8a27740583e79246c7b21f8e73a7222fab36668d304bcba371/splineax_klujax-0.5.0.post2-cp312-cp312-win_arm64.whl", hash = "sha256:224d616c565572b33e7abe770db77379d2b4357b438695ea1f3401d01b5b1301", size = 168067, upload-time = "2026-07-23T20:26:39.677Z" },
-    { url = "https://files.pythonhosted.org/packages/3c/ce/6f79ee011970344263adde4d1a7e0a0a7a0981f582db3dab1890cfa11b49/splineax_klujax-0.5.0.post2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:28e1ec17fb6104f7a71726fe8306c4db586aa38ac637ccd6e98337e40de97698", size = 255190, upload-time = "2026-07-23T20:26:41.184Z" },
-    { url = "https://files.pythonhosted.org/packages/4e/05/38cd369a06063af43870f7bfe93e6a94ff34fe55ac2eebeb4cf04985e068/splineax_klujax-0.5.0.post2-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:930331be4153c78fb21f2721dee72b0a60020b97fbd68e423f8e0e6443579b15", size = 2842048, upload-time = "2026-07-23T20:26:42.811Z" },
-    { url = "https://files.pythonhosted.org/packages/21/91/8569984fb5e2d4412fe747168918bdf4ea73cc8db640eaa322ac186d82b2/splineax_klujax-0.5.0.post2-cp313-cp313-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dfde4b3433e3206c707b62b0b0a7e726c93203928fa4fb9d0f719193811fe184", size = 2915462, upload-time = "2026-07-23T20:26:44.652Z" },
-    { url = "https://files.pythonhosted.org/packages/b9/2e/f0353e66935e3d8abe22cff1a8c992df5262045fbbae0d40c8dcb75a4e3e/splineax_klujax-0.5.0.post2-cp313-cp313-win_amd64.whl", hash = "sha256:4bf91274822d1425a973e8589815a24675215613071e0ba171244a6c502ac3f7", size = 184470, upload-time = "2026-07-23T20:26:46.216Z" },
-    { url = "https://files.pythonhosted.org/packages/9e/a1/5fc2ad17c3851015f268ece1cba50ce0fbc4f7090bf9c6c9a94a384aecbe/splineax_klujax-0.5.0.post2-cp313-cp313-win_arm64.whl", hash = "sha256:f6b545402ed5ba6919449151ab30ffd30e74169e70fa75222ecc09fa8c048111", size = 168135, upload-time = "2026-07-23T20:26:47.702Z" },
-    { url = "https://files.pythonhosted.org/packages/dd/96/2a223295b99b033b0a7414489d3c45fa95283f7f24792073efc772dbfe96/splineax_klujax-0.5.0.post2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:f9666b3461c57332c71884f4a2a64ae27edbb23ab4d8070c7adb523a907de1f2", size = 255576, upload-time = "2026-07-23T20:26:49.214Z" },
-    { url = "https://files.pythonhosted.org/packages/15/e8/8e2a2eaf6f82c31d22def0b13026035a0481d9a22ecf61640e7bbb1adc51/splineax_klujax-0.5.0.post2-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a1a587610630f099f0699202f3eb32bf32506701c468379745c3b44ee482f101", size = 2841453, upload-time = "2026-07-23T20:26:50.939Z" },
-    { url = "https://files.pythonhosted.org/packages/dc/fd/330cda78944bd2be5356ef8d93b8a52972f4bbb33e9adf97329bd81e9964/splineax_klujax-0.5.0.post2-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d02ae3908ed4f6e5f8c7d818b817ecef39711e977f9e5e97462c12ec62b71834", size = 2913746, upload-time = "2026-07-23T20:26:52.708Z" },
-    { url = "https://files.pythonhosted.org/packages/c0/f0/46c9457ee94a6624ac5480184820ca1e147c3b581f726136c2fce23a715c/splineax_klujax-0.5.0.post2-cp314-cp314-win_amd64.whl", hash = "sha256:aee94776c1ab4f856989864b83d3687351484ab3000b9ef34db2235983dbb4f7", size = 188735, upload-time = "2026-07-23T20:26:54.313Z" },
-    { url = "https://files.pythonhosted.org/packages/97/47/f9784eaf81ea4d53464d35dff8b6fb73494db9032928bd9281b98129b9ed/splineax_klujax-0.5.0.post2-cp314-cp314-win_arm64.whl", hash = "sha256:ce151841353ad1f875f22bdd0627ff353b5e29fc0b85ef57c00eb37800ac1d80", size = 173896, upload-time = "2026-07-23T20:26:55.707Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/ad/dba349a00731ffb08c0fc05e1159726fa54cfdeb76631009ac90878756d4/splineax_klujax-0.5.0.post4-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:120399807bf8a00926c75eb7c3b1566305d35aef8844ccf446e74d53839344e1", size = 290878, upload-time = "2026-08-26T21:57:21.485Z" },
+    { url = "https://files.pythonhosted.org/packages/99/19/aa2a74f5c23f2564ac748090a9d0cd36fe6d82d1ef8d3107b1b9dbc9596d/splineax_klujax-0.5.0.post4-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:bdaa27e6b1756bbb27b957b1d2694b04511236379433cb85728c71930f7021e2", size = 3419922, upload-time = "2026-08-26T21:57:24.93Z" },
+    { url = "https://files.pythonhosted.org/packages/63/26/2b1131ad27c4784107552dce818674d67b9d952dddd5d7f83d95e0edbc81/splineax_klujax-0.5.0.post4-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2a50bcdd760d8928e2eaf848aa16aeb1fb9e72a8ddc1606101a098a60c2b827c", size = 3514399, upload-time = "2026-08-26T21:57:30.426Z" },
+    { url = "https://files.pythonhosted.org/packages/28/32/89019bfc1f89d7c9e9e88529a14b55abae9a03ff9ab0fae739defc2727e2/splineax_klujax-0.5.0.post4-cp311-cp311-win_amd64.whl", hash = "sha256:d941f4b0d9913e6059cc2db74670b9732bf950b8f12bf171549066bbe90ed6fd", size = 216339, upload-time = "2026-08-26T21:57:32.438Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/a4/6f220840d7f9d8fc2574fb46e8a0c1a7d4115a7d4cba9defa1e413afacf7/splineax_klujax-0.5.0.post4-cp311-cp311-win_arm64.whl", hash = "sha256:c76219e568507f2cac2f04cd835e0c3bc3c1c337f745e4d93694912d6b31ed31", size = 201276, upload-time = "2026-08-26T21:57:34.208Z" },
+    { url = "https://files.pythonhosted.org/packages/81/29/5c530e9730f0526ec14006d3b4bd04f24ffb924c4e5f83b050fb8f2db8fd/splineax_klujax-0.5.0.post4-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:befe5b8eb59d4ce98edbe1b4f636cf7d897ea8e153dcd8687579c2a6c2cb6efd", size = 290349, upload-time = "2026-08-26T21:57:36.04Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/72/ddd3c3ae446f5c8b24ed16f17717c2912cc61381bd22950c4f9e50ecc8f3/splineax_klujax-0.5.0.post4-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c80aa2b11af64625c5d3538e29681ca6f5600f7de05c947e305f65c3824d775f", size = 3438686, upload-time = "2026-08-26T21:57:42.91Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/ed/3a95baa9ef765869cb134d60cb8771d29d93c0bf138ee5bac12b14e03322/splineax_klujax-0.5.0.post4-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:609859e178004506ded06b432f9e0cfb02dab4f38754281fead09a3554a18cd3", size = 3535747, upload-time = "2026-08-26T21:57:49.644Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/71/6a78413bdf1587796b859fb602ab9dfd3afb5f7d30b35aea8116e3954ccc/splineax_klujax-0.5.0.post4-cp312-cp312-win_amd64.whl", hash = "sha256:58f02f612a33b6ebe9bf2f93c6e647a3643c6c25f0a3cfb877042b7069a8ccfd", size = 216680, upload-time = "2026-08-26T21:57:51.435Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/6d/51cb51876dae7e3f40891156c4e9612f5710e7e73c8592a5c19e30dbc319/splineax_klujax-0.5.0.post4-cp312-cp312-win_arm64.whl", hash = "sha256:8a1d842dc65785285bdf7038d6e0698f8960a37454040bfbc36521f9a0c800cf", size = 199979, upload-time = "2026-08-26T21:57:52.967Z" },
+    { url = "https://files.pythonhosted.org/packages/df/35/1509a63d1c030730340f858f6b9b3ae93f4776d985eb140cd96e280d421e/splineax_klujax-0.5.0.post4-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:8ddeb54db2fca108bfb53752d62fae9329463f7087f0405299315e8746a676db", size = 290488, upload-time = "2026-08-26T21:57:54.508Z" },
+    { url = "https://files.pythonhosted.org/packages/68/52/fb0a0488e888b517b4ed0768f61038f90130723123b715de0232e2a5b672/splineax_klujax-0.5.0.post4-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:9d07520b28b587fb42507c8bb2ff23dedd0a50da5dfb07790fa289674b719d5e", size = 3438283, upload-time = "2026-08-26T21:58:01.008Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/c8/6347da0389acc634646d07f3a9dea152ec563228947f460730b116d9a9ba/splineax_klujax-0.5.0.post4-cp313-cp313-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d68b541119f1d2d907921b6ee30f068d41a8afccf9559070bb17ad5142d8941d", size = 3535338, upload-time = "2026-08-26T21:58:09.957Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/7d/32cf851bab1a0b904ad0001c89792a60ae0826c2719c9e4c8421f3d84729/splineax_klujax-0.5.0.post4-cp313-cp313-win_amd64.whl", hash = "sha256:010130fcc7ca3a28c669cf345af9d054d1fbb34544a14afe646cea7b5c8352de", size = 216678, upload-time = "2026-08-26T21:58:11.617Z" },
+    { url = "https://files.pythonhosted.org/packages/22/45/9e0743831da9a3d04cb82ac500d32e6083b267dfdda0fcfb532dd7f2bcab/splineax_klujax-0.5.0.post4-cp313-cp313-win_arm64.whl", hash = "sha256:c793936a696559ffce9e61216ea365d5b2d616db3b6f0ccab753d9958ac5a7ec", size = 200066, upload-time = "2026-08-26T21:58:13.139Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/15/4569912259f706a873195b9b92d26c02d434ff7a4b476826b554e502ced3/splineax_klujax-0.5.0.post4-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:fd6371476bfc8a2458e1b0bb2fef422b015d3e8c59ac00c48f8e3085c562803d", size = 290814, upload-time = "2026-08-26T21:58:14.752Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/30/72d372d5c9a77e1bef85e6b1e8de501c393e4797155af1a76145aed3e278/splineax_klujax-0.5.0.post4-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ddf032bd6b9fba3e5bfda159fd06d1c22ea3382823857adecff85a963fbdf0d4", size = 3437482, upload-time = "2026-08-26T21:58:20.509Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/6a/b2ccd492fc4ea154e078db6b6fe68446395fac2d2d6eb9912793dad5dcef/splineax_klujax-0.5.0.post4-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1accf78387e975d5fb13423a9b5898492ab05defc9726d01697316088252426d", size = 3533932, upload-time = "2026-08-26T21:58:25.857Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/3d/aead37674ebad8f0ad4235f361723a1b5a147a657bec8c7c89dbdaa7cf11/splineax_klujax-0.5.0.post4-cp314-cp314-win_amd64.whl", hash = "sha256:aff454ce4a53fe6e3cec84369098d69d96d9d6c20372a45fffda7762b51fe1ce", size = 221535, upload-time = "2026-08-26T21:58:27.791Z" },
+    { url = "https://files.pythonhosted.org/packages/16/63/b1b2fac325ddb2598e26d492b555801c53075e437c80580a332f9ec92ee2/splineax_klujax-0.5.0.post4-cp314-cp314-win_arm64.whl", hash = "sha256:fd1f827897f1ac2305ff12bb4a712ebc53d8f9ce48e838a8689606cf393e174f", size = 206662, upload-time = "2026-08-26T21:58:29.197Z" },
 ]
 
 [[package]]

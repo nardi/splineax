@@ -48,11 +48,12 @@ from splineax.solvers._sparse import (
 # `indptr`, `indices`, `values`: the matrix in CSR form.
 _CSR = tuple[Integer[Array, " n+1"], Integer[Array, " nse"], Inexact[Array, " nse"]]
 
-# A Pardiso factorization handle: either the raw int64 array
-# `pardiso_mkl_jax.primitive.analyze` returns, or (when created while tracing) a
-# `_HandleToken` wrapping it, see `_handle.py`. Being an ordinary JAX value rather
-# than a Python-side id is what lets XLA order the whole analyze-factor-solve-release
-# lifecycle by data dependency, so it composes inside a jitted function.
+# A Pardiso factorization handle: the raw int64 id from a `FactorizationToken`
+# (`analyze` and `factor` now return `(token, final_iparm)`), or, when created while
+# tracing, a `_HandleToken` wrapping that id, see `_handle.py`. The native calls take a
+# token, rebuilt from the id where needed. splineax carries only the id. Being an
+# ordinary JAX value rather than a Python-side id is what lets XLA order the whole
+# analyze-factor-solve-release lifecycle by data dependency, so it composes inside jit.
 _PardisoHandle = Array | _HandleToken
 
 PyTreeT = TypeVar("PyTreeT", bound=PyTree)
@@ -117,7 +118,10 @@ class _PardisoHandleAllocationScopeManager:
                 # a solve both merely consume handle, so without this they share no
                 # ordering XLA must respect, and could run in either order.
                 value, _ = jax.lax.optimization_barrier((value, deps))
-            primitive.release(value)
+            # `release` now takes a `FactorizationToken`, not a bare id. It only reads
+            # the id, and `value` is already ordered after its solves by the barrier
+            # above, so a plain token wrapping the id is enough.
+            primitive.release(primitive.FactorizationToken(value))
 
         cls._handles_allocated_in_scope.reset(token)
 
@@ -230,17 +234,20 @@ class _PardisoBasicState(NamedTuple):
         indptr, indices, values = self.csr
 
         with _PardisoHandleAllocationScopeManager.begin_scope():
-            value = primitive.analyze(
+            # `analyze` and `factor` now return `(token, final_iparm)`. We only need the
+            # token's id: splineax tracks and frees handles itself (see `_handle.py`), so
+            # the diagnostics iparm is dropped and the counter on the token is unused.
+            token, _ = primitive.analyze(
                 indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
             )
-            value = primitive.factor(
-                value,
+            token, _ = primitive.factor(
+                token,
                 indptr,
                 indices,
                 values,
                 matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
             )
-            handle = _PardisoHandleAllocationScopeManager.register_handle(value)
+            handle = _PardisoHandleAllocationScopeManager.register_handle(token.id)
             yield _PardisoNumericState(
                 self.csr, handle, self.packed_structures, self.shape, self.transposed
             )
@@ -324,15 +331,17 @@ class _PardisoSymbolicState(eqx.Module):
         primitive = _pardiso_mkl_jax().primitive
         pmj = _pardiso_mkl_jax()
         indptr, indices, values = self.csr
-        new_value = primitive.factor(
-            handle_value(self.handle),
+        # `factor` takes a `FactorizationToken` and returns `(token, final_iparm)`. Wrap
+        # the stored id going in, and rebind to the returned token's id.
+        new_token, _ = primitive.factor(
+            primitive.FactorizationToken(handle_value(self.handle)),
             indptr,
             indices,
             values,
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
         handle = _PardisoHandleAllocationScopeManager.rebind_handle(
-            self.handle, new_value
+            self.handle, new_token.id
         )
         yield _PardisoNumericState(
             self.csr, handle, self.packed_structures, self.shape, self.transposed
@@ -576,13 +585,14 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
 
         pmj = _pardiso_mkl_jax()
         with _PardisoHandleAllocationScopeManager.begin_scope():
-            value = pmj.primitive.analyze(
+            # `analyze` returns `(token, final_iparm)`. Only the token's id is kept.
+            token, _ = pmj.primitive.analyze(
                 indptr,
                 indices,
                 analyze_values,
                 matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
             )
-            handle = _PardisoHandleAllocationScopeManager.register_handle(value)
+            handle = _PardisoHandleAllocationScopeManager.register_handle(token.id)
             yield _PardisoSymbolicScope(tuple(shape), handle)
 
     def compute(
@@ -606,8 +616,10 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                 csr=(indptr, indices, values), handle=handle, transposed=transposed
             ):
                 # Numeric factorization already done eagerly; just solve against it.
-                solution = primitive.solve_stateful(
-                    handle_value(handle),
+                # `solve_stateful` takes a `FactorizationToken` and returns
+                # `(solution, final_iparm)`. Wrap the id and drop the diagnostics.
+                solution, _ = primitive.solve_stateful(
+                    primitive.FactorizationToken(handle_value(handle)),
                     indptr,
                     indices,
                     values,
@@ -623,8 +635,9 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                 # Reuse the symbolic analysis, refactor numerically for these values, and
                 # solve in one fused call. Safe under jit: the values are passed
                 # explicitly rather than stored on any native object.
-                solution = primitive.factor_and_solve_stateful(
-                    handle_value(handle),
+                # Same token-and-tuple contract as `solve_stateful` above.
+                solution, _ = primitive.factor_and_solve_stateful(
+                    primitive.FactorizationToken(handle_value(handle)),
                     indptr,
                     indices,
                     values,
