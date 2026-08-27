@@ -40,3 +40,9 @@ from .solvers import (
 from .solvers import (
     linear_solve as linear_solve,
 )
+from .solvers import (
+    sparse_indices_sorted as sparse_indices_sorted,
+)
+from .solvers import (
+    sparsity_pattern_tag as sparsity_pattern_tag,
+)

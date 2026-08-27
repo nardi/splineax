@@ -28,5 +28,13 @@ from ._sparse import (
 from ._sparse import (
     linear_solve as linear_solve,
 )
+from ._sparse import (
+    sparse_indices_sorted as sparse_indices_sorted,
+)
+from ._sparse import (
+    sparsity_pattern_tag as sparsity_pattern_tag,
+)
 from ._spsolve import ReorderingScheme as ReorderingScheme
 from ._spsolve import Spsolve as Spsolve
+from ._stateful import StatefulSolver as StatefulSolver
+from ._stateful import TrackingState as TrackingState
