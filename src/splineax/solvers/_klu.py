@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
-from klujax import KLUHandleManager
+from klujax import NumericToken, SymbolToken
 from lineax import AbstractLinearOperator, materialise
 from lineax._solution import RESULTS
 from lineax._solver.misc import (
@@ -67,7 +67,7 @@ PyTreeT = TypeVar("PyTreeT", bound=PyTree)
 
 class _KLUHandleAllocationScopeManager:
     _handles_allocated_in_scope: ContextVar[
-        list[tuple[_KLUHandleType, KLUHandleManager, _KLUHandle]] | None
+        list[tuple[_KLUHandleType, SymbolToken | NumericToken, _KLUHandle]] | None
     ] = ContextVar("_klu_handles_in_use", default=None)
 
     _handle_dependencies = HandleDependencies()
@@ -93,7 +93,7 @@ class _KLUHandleAllocationScopeManager:
 
     @classmethod
     def register_handle(
-        cls, handle_type: _KLUHandleType, manager: KLUHandleManager
+        cls, handle_type: _KLUHandleType, manager: SymbolToken | NumericToken
     ) -> _KLUHandle:
         handles = cls._handles_allocated_in_scope.get()
         assert handles is not None
@@ -119,12 +119,15 @@ class _KLUBasicState(NamedTuple):
         Ai, Aj, Ax = self.coo
 
         with _KLUHandleAllocationScopeManager.begin_scope():
+            # `factor` needs the real `SymbolToken` (it reads its `n_col`), so keep it
+            # from `analyze`. Only wrapped ids are stored on the state.
+            symbolic_token = klujax.analyze(Ai, Aj, self.shape[1])
             symbolic = _KLUHandleAllocationScopeManager.register_handle(
-                _KLUHandleType.SYMBOLIC, klujax.analyze(Ai, Aj, self.shape[1])
+                _KLUHandleType.SYMBOLIC, symbolic_token
             )
             numeric = _KLUHandleAllocationScopeManager.register_handle(
                 _KLUHandleType.NUMERIC,
-                klujax.factor(Ai, Aj, Ax, handle_value(symbolic)),
+                klujax.factor(Ai, Aj, Ax, symbolic_token),
             )
 
             yield _KLUNumericState(
@@ -148,9 +151,10 @@ class _KLUSymbolicState(NamedTuple):
         with _KLUHandleAllocationScopeManager.begin_scope():
             # Only the numeric handle is registered here. The symbolic handle is
             # owned and freed by the outer factorize_symbolic() scope.
+            symbolic_token = _symbol_token(self.symbolic, Ai, Aj, self.shape[1])
             numeric = _KLUHandleAllocationScopeManager.register_handle(
                 _KLUHandleType.NUMERIC,
-                _klujax().factor(Ai, Aj, Ax, handle_value(self.symbolic)),
+                _klujax().factor(Ai, Aj, Ax, symbolic_token),
             )
             yield _KLUNumericState(
                 self.coo,
@@ -241,6 +245,26 @@ def _klujax():
     import klujax
 
     return klujax
+
+
+def _symbol_token(handle: _KLUHandle, Ai: Array, Aj: Array, n_col: int) -> SymbolToken:
+    """Rebuild the `SymbolToken` that `factor` needs from a wrapped handle plus the
+    pattern splineax already holds. `factor` reads only the id and `n_col` from it.
+
+    The token is rebuilt on the fly rather than carried in the state so its unused
+    solve counter never lands in an `equinox` module as a stray static leaf.
+    """
+    return SymbolToken(handle_value(handle), Ai, Aj, n_col)
+
+
+def _numeric_token(
+    handle: _KLUHandle, Ai: Array, Aj: Array, Ax: Array, n_col: int
+) -> NumericToken:
+    """Rebuild the `NumericToken` that the numeric solves need. They read the id and the
+    factored `(Ai, Aj, Ax)`, all of which the numeric state carries. See `_symbol_token`
+    for why this is rebuilt rather than stored.
+    """
+    return NumericToken(handle_value(handle), Ai, Aj, Ax, n_col)
 
 
 T = TypeVar("T")
@@ -486,15 +510,17 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                 factorization=_KLUFactorization(symbolic=symbolic, numeric=numeric),
                 transposed=transposed,
             ):
-                # `solve_with_numeric` and `tsolve_with_numeric` both expect the
-                # non-swapped Ai/Aj index arrays. The transposed flag is used to
-                # select `tsolve`.
+                # The numeric solves read the factored matrix off a `NumericToken`.
+                # Rebuild it from `state.coo`, which stays the original `(Ai, Aj, Ax)`:
+                # `transpose` leaves it unswapped, and `tsolve` handles A^T itself. KLU
+                # is square, so `shape[1]` is the right `n_col` in either orientation.
+                numeric_token = _numeric_token(numeric, Ai, Aj, Ax, state.shape[1])
                 solve = (
                     klujax.tsolve_with_numeric
                     if transposed
                     else klujax.solve_with_numeric
                 )
-                x = solve(handle_value(numeric), b, handle_value(symbolic))
+                x = solve(numeric_token, b, handle_value(symbolic))
                 _KLUHandleAllocationScopeManager.register_dependency(symbolic, x)
                 _KLUHandleAllocationScopeManager.register_dependency(numeric, x)
             case _KLUSymbolicState(symbolic=symbolic, transposed=transposed):
@@ -525,10 +551,12 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
             case _KLUNumericState(
                 factorization=factorization, transposed=transposed, shape=shape
             ):
-                # Reuse the existing factorization unchanged; `compute` will
-                # `tsolve` against it.
+                # Reuse the existing factorization unchanged, so `compute` can `tsolve`
+                # against it. Keep `coo` as the original `(Ai, Aj, Ax)`: `compute`
+                # rebuilds the `NumericToken` from it, and `tsolve` needs A's own arrays,
+                # not a swapped pattern.
                 return _KLUNumericState(
-                    (Aj, Ai, Ax),
+                    (Ai, Aj, Ax),
                     factorization,
                     packed_structures,
                     shape[::-1],
@@ -573,9 +601,13 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
                 # scope, so that it gets freed eventually.
                 # TODO: should we instead explicitly assign it to the scope of
                 # the previous numeric handle? Does it matter?
+                # `state.coo` is the original matrix (`transpose` does not swap it), so
+                # `factor` needs a `SymbolToken` rebuilt from it. KLU is square, so
+                # `shape[1]` is the right `n_col` in either orientation.
+                symbolic_token = _symbol_token(symbolic, Ai, Aj, shape[1])
                 numeric = _KLUHandleAllocationScopeManager.register_handle(
                     _KLUHandleType.NUMERIC,
-                    _klujax().factor(Ai, Aj, Ax.conj(), handle_value(symbolic)),
+                    _klujax().factor(Ai, Aj, Ax.conj(), symbolic_token),
                 )
                 return _KLUNumericState(
                     (Ai, Aj, Ax.conj()),
