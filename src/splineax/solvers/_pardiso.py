@@ -1,15 +1,14 @@
 import importlib.util
-from contextlib import AbstractContextManager, contextmanager
-from contextvars import ContextVar
-from typing import Any, Iterator, Literal, NamedTuple, TypeVar, overload
+from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jax.experimental.sparse import BCOO, BCSR
+from jax.experimental.sparse import BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from lineax import AbstractLinearOperator, materialise
 from lineax._solution import RESULTS
+from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
     PackedStructures,
     pack_structures,
@@ -21,42 +20,19 @@ from lineax._solver.misc import (
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
-    JacobianColoring,
     SparseJacobianLinearOperator,
-    SparseJacobianLinearOperatorColoring,
 )
-from splineax.solvers._handle import (
-    HandleDependencies,
-    _HandleToken,
-    handle_value,
-    wrap_handle,
-)
-from splineax.solvers._handle import (
-    rebind_handle as _rebind_token,
-)
-from splineax.solvers._klu import COMPLEX_DTYPES
+from splineax.solvers._klu import COMPLEX_DTYPES, _extract_pattern
 from splineax.solvers._sparse import (
-    AbstractSparseLinearSolver,
-    SparseNumericState,
-    SymbolicScopedSparseLinearSolver,
     _Sparsity,
-    as_scoped_solver,
-    factorize_through_init,
+    operator_pattern_tag,
+    sparse_indices_sorted,
+    sparsity_pattern_tag,
     warn_if_unsorted,
 )
 
 # `indptr`, `indices`, `values`: the matrix in CSR form.
 _CSR = tuple[Integer[Array, " n+1"], Integer[Array, " nse"], Inexact[Array, " nse"]]
-
-# A Pardiso factorization handle: the raw int64 id from a `FactorizationToken`
-# (`analyze` and `factor` now return `(token, final_iparm)`), or, when created while
-# tracing, a `_HandleToken` wrapping that id, see `_handle.py`. The native calls take a
-# token, rebuilt from the id where needed. splineax carries only the id. Being an
-# ordinary JAX value rather than a Python-side id is what lets XLA order the whole
-# analyze-factor-solve-release lifecycle by data dependency, so it composes inside jit.
-_PardisoHandle = Array | _HandleToken
-
-PyTreeT = TypeVar("PyTreeT", bound=PyTree)
 
 
 def _pardiso_available() -> bool:
@@ -65,109 +41,29 @@ def _pardiso_available() -> bool:
     Checked with `importlib.util.find_spec` (no execution) rather than a real import.
     That way, probing availability from `Pardiso.__init__` and `AutoSparseLinearSolver`
     never pays for `pardiso_mkl_jax`'s import-time MKL runtime load. Unlike `klujax`,
-    `pardiso-mkl-jax` is an optional dependency, so this check (with no equivalent in
-    `_klu.py`) is what makes `Pardiso` unconstructible, and `AutoSparseLinearSolver`
-    fall back to `KLU`, when it isn't installed.
+    `pardiso-mkl-jax` is an optional dependency, so this check is what makes `Pardiso`
+    unconstructible, and `AutoSparseLinearSolver` fall back to `KLU`, when it is missing.
     """
     return importlib.util.find_spec("pardiso_mkl_jax") is not None
 
 
 def _pardiso_mkl_jax():
-    # Lazy import: deferred until a Pardiso solve actually runs. Importing splineax,
-    # or even constructing a `Pardiso` instance, never loads the MKL runtime unless
-    # the solver is actually used (mirrors `_klu.py`'s `_klujax()`).
+    # Lazy import: deferred until a Pardiso solve actually runs. Importing splineax, or
+    # even constructing a `Pardiso`, never loads the MKL runtime unless the solver is
+    # used (mirrors `_klu.py`'s `_klujax()`).
     import pardiso_mkl_jax
 
     return pardiso_mkl_jax
 
 
-class _PardisoHandleAllocationScopeManager:
-    """Frees Pardiso factorization handles when the scope that allocated them exits.
-
-    Structurally identical to `_klu.py`'s `_KLUHandleAllocationScopeManager`, against
-    `pardiso_mkl_jax.primitive` instead of `klujax`. Unlike KLU, which has genuinely
-    separate symbolic and numeric native handles, Pardiso's `factor` mutates the same
-    registry entry `analyze` allocated and passes the same handle value back through,
-    so there is only ever one handle to free per scope, not two: `register_handle` is
-    called once, when the handle is first allocated, and `rebind_handle` updates that
-    registration in place whenever `factor` advances the handle further, so the scope
-    always frees the latest handle in the chain rather than a stale one a later call
-    still depends on.
-    """
-
-    _handles_allocated_in_scope: ContextVar[list[_PardisoHandle] | None] = ContextVar(
-        "_pardiso_handles_in_use", default=None
-    )
-
-    _handle_dependencies = HandleDependencies()
-
-    @classmethod
-    @contextmanager
-    def begin_scope(cls) -> Iterator[None]:
-        primitive = _pardiso_mkl_jax().primitive
-        handles: list[_PardisoHandle] = []
-        token = cls._handles_allocated_in_scope.set(handles)
-
-        yield
-
-        for handle in reversed(handles):
-            deps = cls._handle_dependencies.pop(handle)
-            value = handle_value(handle)
-            if deps:
-                # Forces release to run after everything that used handle: release and
-                # a solve both merely consume handle, so without this they share no
-                # ordering XLA must respect, and could run in either order.
-                value, _ = jax.lax.optimization_barrier((value, deps))
-            # `release` now takes a `FactorizationToken`, not a bare id. It only reads
-            # the id, and `value` is already ordered after its solves by the barrier
-            # above, so a plain token wrapping the id is enough.
-            primitive.release(primitive.FactorizationToken(value))
-
-        cls._handles_allocated_in_scope.reset(token)
-
-    @classmethod
-    def register_handle(cls, value: Array) -> _PardisoHandle:
-        handles = cls._handles_allocated_in_scope.get()
-        assert handles is not None
-        handle: _PardisoHandle = wrap_handle(value)
-        cls._handle_dependencies.record_allocation(handle)
-        handles.append(handle)
-        return handle
-
-    @classmethod
-    def rebind_handle(
-        cls, old_handle: _PardisoHandle, new_value: Array
-    ) -> _PardisoHandle:
-        """Replace a registered handle with the value `factor` advanced it to.
-
-        Reuses `old_handle`'s token-or-not kind, and its stable id if it is one, so
-        dependencies already registered against it are still found and the scope still
-        frees the right, current resource rather than a stale one.
-        """
-        handles = cls._handles_allocated_in_scope.get()
-        assert handles is not None
-        new_handle: _PardisoHandle = _rebind_token(old_handle, new_value)
-        handles[:] = [
-            new_handle if handle is old_handle else handle for handle in handles
-        ]
-        return new_handle
-
-    @classmethod
-    def register_dependency(
-        cls, handle: _PardisoHandle, dependency: PyTreeT
-    ) -> PyTreeT:
-        cls._handle_dependencies.register(handle, dependency)
-        return dependency
-
-
-T = TypeVar("T")
+T = Any
 
 
 def _ensure_cpu(args: T) -> T:
     """Return `args` unchanged, raising if the current platform is not CPU.
 
-    A local copy of `_klu.py`'s helper of the same name, with a Pardiso-specific
-    message: the two solvers wrap different CPU-only native libraries.
+    A local copy of `_klu.py`'s helper of the same name, with a Pardiso-specific message:
+    the two solvers wrap different CPU-only native libraries.
     """
     on_cpu = jax.lax.platform_dependent(
         args,
@@ -183,12 +79,7 @@ def _ensure_cpu(args: T) -> T:
 
 
 def _reject_complex(dtype: jnp.dtype) -> None:
-    """Raises if `dtype` is complex, since `pardiso_mkl_jax` is real-only.
-
-    Called in `Pardiso.init` before any `BCSR`/`BCOO` conversion, so a complex matrix
-    is rejected without first paying for a round-trip that `AutoSparseLinearSolver`'s
-    `KLU` fallback would then discard anyway.
-    """
+    """Raise if `dtype` is complex, since `pardiso_mkl_jax` is real-only."""
     if dtype in COMPLEX_DTYPES:
         raise TypeError(
             "`Pardiso` only supports real-valued matrices; `pardiso_mkl_jax` does "
@@ -196,179 +87,89 @@ def _reject_complex(dtype: jnp.dtype) -> None:
         )
 
 
-def _csr_from_coo_pattern(
-    rows: Integer[Array, " nse"],
-    cols: Integer[Array, " nse"],
-    shape: tuple[int, ...],
-    values: Inexact[Array, " nse"] | None = None,
-) -> tuple[Integer[Array, " n+1"], Integer[Array, " nse"], Inexact[Array, " nse"]]:
-    """Convert a COO `(row, col)` sparsity pattern to sorted CSR `(indptr, indices, values)`.
+def _extract_csr(
+    operator: AbstractLinearOperator,
+) -> tuple[Array, Array, Array, tuple[int, ...]]:
+    """Read an operator as a sorted CSR triple with int32 indices and float64 values.
 
-    `values` is optional because some `factorize_symbolic` inputs (a bare sparsity
-    pattern, with no associated matrix) carry no numeric data. When omitted, a dummy
-    `1.0` is used instead, exactly as for the pattern-only conversion this replaces:
-    the symbolic analysis this feeds only needs *some* representative values to run,
-    not necessarily meaningful ones, and every later solve refactors with the real
-    values from the operator being solved.
+    A `SparseJacobianLinearOperator` is materialised first. An operator tagged
+    `sparse_indices_sorted` asserts its indices need no sort.
     """
-    if values is None:
-        values = jnp.ones(rows.shape[0], dtype=jnp.float64)
-    else:
-        values = values.astype(jnp.float64)
-    bcsr = BCSR.from_bcoo(
-        BCOO((values, jnp.stack([rows, cols], axis=1)), shape=tuple(shape))
-    )
-    return bcsr.indptr.astype(jnp.int32), bcsr.indices.astype(jnp.int32), bcsr.data
-
-
-class _PardisoBasicState(NamedTuple):
-    csr: _CSR
-    shape: tuple[int, ...]
-    packed_structures: PackedStructures
-    transposed: bool = False
-
-    @contextmanager
-    def factorize(self) -> Iterator["_PardisoNumericState"]:
-        primitive = _pardiso_mkl_jax().primitive
-        pmj = _pardiso_mkl_jax()
-        indptr, indices, values = self.csr
-
-        with _PardisoHandleAllocationScopeManager.begin_scope():
-            # `analyze` and `factor` now return `(token, final_iparm)`. We only need the
-            # token's id: splineax tracks and frees handles itself (see `_handle.py`), so
-            # the diagnostics iparm is dropped and the counter on the token is unused.
-            token, _ = primitive.analyze(
-                indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
-            )
-            token, _ = primitive.factor(
-                token,
-                indptr,
-                indices,
-                values,
-                matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
-            )
-            handle = _PardisoHandleAllocationScopeManager.register_handle(token.id)
-            yield _PardisoNumericState(
-                self.csr, handle, self.packed_structures, self.shape, self.transposed
-            )
-
-
-class _PardisoSymbolicScope(NamedTuple):
-    shape: tuple[int, ...]
-    handle: _PardisoHandle
-
-    def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> "_PardisoSymbolicState":
-        match operator:
-            case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
-                return self.init(materialise(operator), options)
-            case BCSRLinearOperator(matrix):
-                bcoo = matrix.to_bcoo()
-            case BCOOLinearOperator(matrix):
-                bcoo = matrix
-            case _:
-                raise TypeError(
-                    "`Pardiso.factorize_symbolic` scope's `.init` requires a "
-                    "`BCOOLinearOperator`, `BCSRLinearOperator`, or "
-                    "`SparseJacobianLinearOperator`; got "
-                    f"{type(operator).__name__}."
-                )
-
-        if bcoo.data.dtype in COMPLEX_DTYPES:
+    sorted_asserted = sparse_indices_sorted in getattr(operator, "tags", ())
+    match operator:
+        case SparseJacobianLinearOperator():
+            return _extract_csr(materialise(operator))
+        case BCSRLinearOperator(matrix):
+            _reject_complex(matrix.dtype)
+            if matrix.indices_sorted or sorted_asserted:
+                matrix_bcsr = matrix
+            else:
+                warn_if_unsorted(matrix, "Pardiso")
+                matrix_bcsr = BCSR.from_bcoo(matrix.to_bcoo())
+        case BCOOLinearOperator(matrix):
+            _reject_complex(matrix.dtype)
+            if not sorted_asserted:
+                warn_if_unsorted(matrix, "Pardiso")
+            matrix_bcsr = BCSR.from_bcoo(matrix)
+        case _:
             raise TypeError(
-                "`Pardiso` only supports real-valued matrices; `pardiso_mkl_jax` does "
-                f"not support complex matrix types yet. Got dtype {bcoo.data.dtype}."
+                "`Pardiso` requires a sparse operator backed by a `BCOO` or `BCSR` "
+                "matrix (e.g. `splineax.BCOOLinearOperator` or "
+                "`splineax.BCSRLinearOperator`), or a "
+                f"`splineax.SparseJacobianLinearOperator`; "
+                f"got {type(operator).__name__}."
             )
-
-        # `BCSR.from_bcoo` sorts into the same canonical (row, then column) order used
-        # to build the scope's pattern in `Pardiso.factorize_symbolic`, so the reordered
-        # values line up with the indices the stored `handle` was analyzed against.
-        matrix_bcsr = BCSR.from_bcoo(bcoo)
-        indptr = matrix_bcsr.indptr.astype(jnp.int32)
-        indices = matrix_bcsr.indices.astype(jnp.int32)
-        values = matrix_bcsr.data.astype(jnp.float64)
-        packed_structures = pack_structures(operator)
-
-        return _PardisoSymbolicState(
-            (indptr, indices, values), packed_structures, self.handle, self.shape
-        )
-
-    @contextmanager
-    def factorize(
-        self, operator: AbstractLinearOperator
-    ) -> Iterator["_PardisoNumericState"]:
-        with self.init(operator).factorize() as state:
-            yield state
+    indptr = matrix_bcsr.indptr.astype(jnp.int32)
+    indices = matrix_bcsr.indices.astype(jnp.int32)
+    # Stop gradients on the values before they reach `analyze`/`factor`, which have no
+    # differentiation rule. The gradient with respect to the matrix flows through the
+    # operator lineax carries, not through the factorization, which is a constant.
+    values = jax.lax.stop_gradient(matrix_bcsr.data.astype(jnp.float64))
+    return indptr, indices, values, matrix_bcsr.shape
 
 
-class _PardisoSymbolicState(eqx.Module):
-    """A solvable state that reuses a `factorize_symbolic` scope's symbolic analysis.
+class _PardisoState(eqx.Module):
+    """A Pardiso solver state, carrying its factorization token.
 
-    The analysis was run once, when the scope was opened. Each `compute` reuses it and
-    refactors numerically for `csr`'s values in one fused jit-safe call, so `handle` and
-    `csr` are carried as dynamic pytree leaves and may be tracers, which is what lets the
-    whole scope, not just this state, compose inside a jitted function. `.factorize()`
-    promotes this to a `_PardisoNumericState` by running the numeric factorization once,
-    to reuse it across many solves; it does not open its own handle-freeing scope, since
-    the resulting numeric state shares the same handle the outer `factorize_symbolic`
-    scope already owns and will free.
+    A state from `init_symbolic` holds only the shape and tag, with `token` None, since
+    Pardiso defers analysis under weighted matching (see `Pardiso.init_symbolic`). After
+    `init` or `update` it holds the CSR matrix and a factorized token, ready to solve.
     """
 
-    csr: _CSR
-    packed_structures: PackedStructures
-    handle: _PardisoHandle
-    # `shape` and `transposed` are static metadata, not traced leaves: `compute` and
-    # `transpose` branch on `transposed` under AD tracing, where a traced leaf could not
-    # be used in `if`, and `shape` is a tuple of plain Python ints throughout this module.
+    operator: AbstractLinearOperator | None
+    """The operator this state was built on. Compared by identity in `update`."""
+    csr: _CSR | None
+    """The sorted CSR triple, or None for a symbolic-only state."""
+    token: Any
+    """The `pardiso_mkl_jax` FactorizationToken, or None before any analysis."""
+    packed_structures: PackedStructures | None
+    """The lineax structure for ravel and unravel, None for a symbolic-only state."""
     shape: tuple[int, ...] = eqx.field(static=True)
     transposed: bool = eqx.field(static=True, default=False)
+    sparsity_tag: object | None = eqx.field(static=True, default=None)
 
-    @contextmanager
-    def factorize(self) -> Iterator["_PardisoNumericState"]:
-        primitive = _pardiso_mkl_jax().primitive
-        pmj = _pardiso_mkl_jax()
-        indptr, indices, values = self.csr
-        # `factor` takes a `FactorizationToken` and returns `(token, final_iparm)`. Wrap
-        # the stored id going in, and rebind to the returned token's id.
-        new_token, _ = primitive.factor(
-            primitive.FactorizationToken(handle_value(self.handle)),
-            indptr,
-            indices,
-            values,
-            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+    def track(self, solution: Any) -> "_PardisoState":
+        """Return a state whose `release` is ordered after `solution`.
+
+        Accepts the lineax `Solution` or a bare value pytree. A no-op when no analysis
+        has run yet, see `pardiso_mkl_jax` FactorizationToken.track.
+        """
+        if self.token is None:
+            return self
+        value = getattr(solution, "value", solution)
+        leaves = tuple(jax.tree_util.tree_leaves(value))
+        return _PardisoState(
+            self.operator,
+            self.csr,
+            self.token.track(*leaves),
+            self.packed_structures,
+            self.shape,
+            self.transposed,
+            self.sparsity_tag,
         )
-        handle = _PardisoHandleAllocationScopeManager.rebind_handle(
-            self.handle, new_token.id
-        )
-        yield _PardisoNumericState(
-            self.csr, handle, self.packed_structures, self.shape, self.transposed
-        )
-
-    def _register_solve_dependency(self, value: Array) -> None:
-        # Lets `splineax.linear_solve` order this state's handle free after `value`,
-        # picked up by `_sparse.linear_solve` via duck typing, see `_handle.py`.
-        _PardisoHandleAllocationScopeManager.register_dependency(self.handle, value)
 
 
-class _PardisoNumericState(eqx.Module):
-    csr: _CSR
-    handle: _PardisoHandle
-    packed_structures: PackedStructures
-    shape: tuple[int, ...] = eqx.field(static=True)
-    transposed: bool = eqx.field(static=True, default=False)
-
-    def _register_solve_dependency(self, value: Array) -> None:
-        # Same hook as `_PardisoSymbolicState`, see its comment.
-        _PardisoHandleAllocationScopeManager.register_dependency(self.handle, value)
-
-
-_PardisoState = _PardisoBasicState | _PardisoSymbolicState | _PardisoNumericState
-
-
-class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
+class Pardiso(AbstractLinearSolver[_PardisoState]):
     """Sparse direct solver wrapping `pardiso_mkl_jax` (Intel oneMKL Pardiso).
 
     This solver keeps the operator in its native sparse (CSR) storage rather than
@@ -377,14 +178,14 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
 
     `pardiso_mkl_jax` is **CPU, real-valued, and double-precision only**: `float32`
     inputs are upcast to `float64`, and complex operators raise `TypeError` (Pardiso's
-    complex matrix types aren't supported by `pardiso_mkl_jax` yet). It does not enable
+    complex matrix types are not supported by `pardiso_mkl_jax` yet). It does not enable
     JAX's x64 mode or force the CPU platform on import, so `jax_enable_x64` must already
     be on before this solver runs.
 
     This solver can only handle square nonsingular operators.
 
     Requires the optional `pardiso-mkl-jax` dependency (`pip install
-    splineax[pardiso]`). Constructing `Pardiso()` raises `ImportError` if it isn't
+    splineax[pardiso]`). Constructing `Pardiso()` raises `ImportError` if it is not
     installed. `AutoSparseLinearSolver` prefers `Pardiso` over `KLU` on CPU with x64
     enabled, falling back to `KLU` automatically when `pardiso-mkl-jax` is missing.
     """
@@ -401,199 +202,133 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
                 "(or `pip install pardiso-mkl-jax` directly)."
             )
 
+    def _analyze_and_factor(
+        self,
+        operator: AbstractLinearOperator,
+        tag: object | None,
+    ) -> _PardisoState:
+        indptr, indices, values, shape = _extract_csr(operator)
+        pmj = _pardiso_mkl_jax()
+        primitive = pmj.primitive
+        # `analyze` and `factor` return `(token, final_iparm)`. Only the token is kept;
+        # the diagnostics iparm is dropped.
+        token, _ = primitive.analyze(
+            indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
+        )
+        token, _ = primitive.factor(
+            token,
+            indptr,
+            indices,
+            values,
+            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+        )
+        return _PardisoState(
+            operator,
+            (indptr, indices, values),
+            token,
+            pack_structures(operator),
+            shape,
+            False,
+            tag,
+        )
+
     def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any]
-    ) -> _PardisoBasicState:
+        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
+    ) -> _PardisoState:
+        del options
         if operator.in_size() != operator.out_size():
             raise ValueError(
                 "`Pardiso` may only be used for linear solves with square matrices"
             )
+        return self._analyze_and_factor(operator, operator_pattern_tag(operator))
 
-        # `pardiso_mkl_jax` consumes a CSR triple with int32 indptr/indices, sorted
-        # within each row. We assume the matrix is coalesced (no duplicate indices),
-        # matching `KLU`/`Spsolve`.
-        match operator:
-            case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
-                return self.init(materialise(operator), options)
-            case BCSRLinearOperator(matrix):
-                _reject_complex(matrix.dtype)
-                # Round-trip an unsorted `BCSR` through `BCOO`, since
-                # `BCSR.from_bcoo` sorts.
-                if matrix.indices_sorted:
-                    matrix_bcsr = matrix
-                else:
-                    warn_if_unsorted(matrix, "Pardiso")
-                    matrix_bcsr = BCSR.from_bcoo(matrix.to_bcoo())
-            case BCOOLinearOperator(matrix):
-                _reject_complex(matrix.dtype)
-                # `BCSR.from_bcoo` sorts the indices itself when they are not
-                # already sorted.
-                warn_if_unsorted(matrix, "Pardiso")
-                matrix_bcsr = BCSR.from_bcoo(matrix)
-            case _:
-                raise TypeError(
-                    "`Pardiso` requires a sparse operator backed by a `BCOO` or `BCSR` "
-                    "matrix (e.g. `splineax.BCOOLinearOperator` or "
-                    "`splineax.BCSRLinearOperator`), or a "
-                    f"`splineax.SparseJacobianLinearOperator`; "
-                    f"got {type(operator).__name__}."
-                )
+    def init_symbolic(
+        self, sparsity: _Sparsity, options: dict[str, Any] = {}
+    ) -> _PardisoState:
+        """Record the pattern for reuse, deferring analysis to the first `update`.
 
-        indptr = matrix_bcsr.indptr.astype(jnp.int32)
-        indices = matrix_bcsr.indices.astype(jnp.int32)
-        values = matrix_bcsr.data.astype(jnp.float64)
-
-        return _PardisoBasicState(
-            (indptr, indices, values), matrix_bcsr.shape, pack_structures(operator)
-        )
-
-    def factorize(
-        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> AbstractContextManager[SparseNumericState]:
-        """Pre-compute a full (analysis + numeric) factorization for reuse.
-
-        Equivalent to `self.init(operator, options).factorize()`.
+        Under Pardiso's default weighted matching the analysis depends on the matrix
+        values, so a values-independent symbolic phase is not sound. This keeps only the
+        shape and a pattern tag. The first `update` with real values runs analyze and
+        factor.
         """
-        return factorize_through_init(self, operator, options)
-
-    @overload
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
-    ) -> AbstractContextManager[_PardisoSymbolicScope]: ...
-
-    @overload
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: Literal[True]
-    ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
-
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: bool = False
-    ) -> AbstractContextManager[
-        _PardisoSymbolicScope | SymbolicScopedSparseLinearSolver
-    ]:
-        """Open a scope with a pre-computed Pardiso sparsity pattern.
-
-        Yields a `_PardisoSymbolicScope`. Inside the block, call:
-        - `.init(operator)` to create a `_PardisoSymbolicState` for `lx.linear_solve`.
-          Every solve reuses the analysis performed when this scope was opened and only
-          re-runs the numeric phase.
-        - `.init(operator).factorize()` or equivalently `.factorize(operator)` to also
-          pre-compute the numeric factorization.
-
-        The symbolic analysis runs once, as this scope is opened, using representative
-        values from `sparsity` itself where it carries any (a `BCOO`, `BCSR`,
-        `BCOOLinearOperator`, or `BCSRLinearOperator`), or a placeholder otherwise (a
-        bare sparsity pattern from a coloring). Because the resulting handle is an
-        ordinary JAX array value, not a native object, this whole scope, including the
-        analysis, composes inside a jitted function: `with solver.factorize_symbolic(...)
-        as scope:` may be written directly inside `@jax.jit`, or the scope may be built
-        eagerly and passed into one, either way is safe to reuse across solves.
-
-        The handle is released when the `with` block exits, after every solve that used
-        it.
-
-        Args:
-            sparsity: Sparse matrix whose sparsity pattern to pre-analyze. Accepts the
-                      same types as `KLU.factorize_symbolic`: `BCOO`, `BCSR`,
-                      `BCOOLinearOperator`, `BCSRLinearOperator`,
-                      `SparseJacobianLinearOperator`,
-                      `SparseJacobianLinearOperatorColoring`, or `JacobianColoring`.
-            as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
-                       with this solver, instead of the bare scope, so that the two
-                       need not be passed around together.
-        """
-        scope = self._factorize_symbolic(sparsity)
-        return as_scoped_solver(self, scope) if as_solver else scope
-
-    @contextmanager
-    def _factorize_symbolic(
-        self, sparsity: _Sparsity
-    ) -> Iterator[_PardisoSymbolicScope]:
-        # The scope itself, kept separate from `factorize_symbolic` above so that the
-        # public method can be overloaded on `as_solver` (`@contextmanager` and
-        # `@overload` do not compose).
-        values = None
-        match sparsity:
-            case SparseJacobianLinearOperator(transposed=True):
-                # See `KLU.factorize_symbolic`'s matching case for why rows/columns
-                # are swapped here.
-                pattern = sparsity.coloring.sparsity
-                rows = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                cols = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                shape = pattern.shape[::-1]
-            case (
-                SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring()
-            ):
-                pattern = sparsity.coloring.sparsity
-                rows = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                cols = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                shape = pattern.shape
-            case JacobianColoring():
-                pattern = sparsity.sparsity
-                rows = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                cols = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                shape = pattern.shape
-            case BCSRLinearOperator():
-                bcoo = sparsity.matrix.to_bcoo()
-                rows = bcoo.indices[:, 0].astype(jnp.int32)
-                cols = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-                values = bcoo.data
-            case BCOOLinearOperator():
-                bcoo = sparsity.matrix
-                rows = bcoo.indices[:, 0].astype(jnp.int32)
-                cols = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-                values = bcoo.data
-            case BCSR():
-                bcoo = sparsity.to_bcoo()
-                rows = bcoo.indices[:, 0].astype(jnp.int32)
-                cols = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-                values = bcoo.data
-            case BCOO():
-                rows = sparsity.indices[:, 0].astype(jnp.int32)
-                cols = sparsity.indices[:, 1].astype(jnp.int32)
-                shape = sparsity.shape
-                values = sparsity.data
-            case _:
-                raise TypeError(
-                    "`Pardiso.factorize_symbolic` requires a `BCOO`, `BCSR`, "
-                    "`BCOOLinearOperator`, `BCSRLinearOperator`, "
-                    "`SparseJacobianLinearOperator`, "
-                    "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
-                    f"got {type(sparsity).__name__}."
-                )
-
+        del options
+        _, _, shape = _extract_pattern(sparsity)
         if shape[0] != shape[1]:
             raise ValueError(
-                f"`Pardiso.factorize_symbolic` requires a square matrix; got shape "
-                f"{shape}."
+                f"`Pardiso.init_symbolic` requires a square matrix; got shape {shape}."
             )
-
-        if values is not None and values.dtype in COMPLEX_DTYPES:
-            raise TypeError(
-                "`Pardiso` only supports real-valued matrices; `pardiso_mkl_jax` does "
-                f"not support complex matrix types yet. Got dtype {values.dtype}."
-            )
-
-        indptr, indices, analyze_values = _csr_from_coo_pattern(
-            rows, cols, shape, values
+        return _PardisoState(
+            None,
+            None,
+            None,
+            None,
+            shape,
+            False,
+            sparsity_pattern_tag(sparsity),
         )
 
+    def update(
+        self,
+        state: _PardisoState,
+        operator: AbstractLinearOperator,
+        options: dict[str, Any] = {},
+    ) -> _PardisoState:
+        """Fold a new operator into `state`, reusing the analysis where the pattern holds.
+
+        Repeated calls with the same operator object are a no-op. When the operator shares
+        the state's pattern and an analysis already exists, only the numeric factorization
+        is redone. Otherwise the operator is analyzed from scratch.
+        """
+        del options
+        if operator is state.operator:
+            # Nothing changed, so this is a no-op.
+            return state
+        tag = operator_pattern_tag(operator)
+        same_pattern = (
+            state.token is not None
+            and state.sparsity_tag is not None
+            and tag is not None
+            and state.sparsity_tag == tag
+        )
+        if same_pattern:
+            # Same pattern, new values. Refactor against the stored analysis.
+            return self._refactor(state, operator, tag)
+        # New pattern, or no analysis yet, so analyze from scratch.
+        return self._analyze_and_factor(operator, tag)
+
+    def _refactor(
+        self,
+        state: _PardisoState,
+        operator: AbstractLinearOperator,
+        tag: object,
+    ) -> _PardisoState:
+        indptr, indices, values, shape = _extract_csr(operator)
         pmj = _pardiso_mkl_jax()
-        with _PardisoHandleAllocationScopeManager.begin_scope():
-            # `analyze` returns `(token, final_iparm)`. Only the token's id is kept.
-            token, _ = pmj.primitive.analyze(
-                indptr,
-                indices,
-                analyze_values,
-                matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
-            )
-            handle = _PardisoHandleAllocationScopeManager.register_handle(token.id)
-            yield _PardisoSymbolicScope(tuple(shape), handle)
+        # `factor` reuses the analysis stored under the token's id and returns a fresh
+        # token for the new values.
+        token, _ = pmj.primitive.factor(
+            state.token,
+            indptr,
+            indices,
+            values,
+            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+        )
+        return _PardisoState(
+            operator,
+            (indptr, indices, values),
+            token,
+            pack_structures(operator),
+            shape,
+            False,
+            tag,
+        )
+
+    def release(self, state: _PardisoState) -> None:
+        """Free the native factorization, ordered after any tracked solves."""
+        if state.token is None:
+            return
+        _pardiso_mkl_jax().primitive.release(state.token)
 
     def compute(
         self,
@@ -602,100 +337,55 @@ class Pardiso(AbstractSparseLinearSolver[_PardisoState]):
         options: dict[str, Any],
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
         del options
-
+        if state.csr is None or state.token is None or state.packed_structures is None:
+            raise ValueError(
+                "`Pardiso` cannot solve with a symbolic-only state; call `update` with "
+                "an operator first."
+            )
         b = ravel_vector(vector, state.packed_structures)
         b = _ensure_cpu(b)
         b = b.astype(jnp.float64)
-
         pmj = _pardiso_mkl_jax()
         primitive = pmj.primitive
-        stacked_b = b[None, :]
-
-        match state:
-            case _PardisoNumericState(
-                csr=(indptr, indices, values), handle=handle, transposed=transposed
-            ):
-                # Numeric factorization already done eagerly; just solve against it.
-                # `solve_stateful` takes a `FactorizationToken` and returns
-                # `(solution, final_iparm)`. Wrap the id and drop the diagnostics.
-                solution, _ = primitive.solve_stateful(
-                    primitive.FactorizationToken(handle_value(handle)),
-                    indptr,
-                    indices,
-                    values,
-                    stacked_b,
-                    matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
-                    transpose=transposed,
-                )
-                x = solution[0]
-                _PardisoHandleAllocationScopeManager.register_dependency(handle, x)
-            case _PardisoSymbolicState(
-                csr=(indptr, indices, values), handle=handle, transposed=transposed
-            ):
-                # Reuse the symbolic analysis, refactor numerically for these values, and
-                # solve in one fused call. Safe under jit: the values are passed
-                # explicitly rather than stored on any native object.
-                # Same token-and-tuple contract as `solve_stateful` above.
-                solution, _ = primitive.factor_and_solve_stateful(
-                    primitive.FactorizationToken(handle_value(handle)),
-                    indptr,
-                    indices,
-                    values,
-                    stacked_b,
-                    matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
-                    transpose=transposed,
-                )
-                x = solution[0]
-                _PardisoHandleAllocationScopeManager.register_dependency(handle, x)
-            case _PardisoBasicState(
-                csr=(indptr, indices, values), transposed=transposed
-            ):
-                x = pmj.solve(
-                    indptr,
-                    indices,
-                    values,
-                    b,
-                    matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
-                    transpose=transposed,
-                )
-
-        solution = unravel_solution(x, state.packed_structures)
+        indptr, indices, values = state.csr
+        # `solve_stateful` reuses the stored factorization, solving A^T when transposed.
+        solution, _ = primitive.solve_stateful(
+            state.token,
+            indptr,
+            indices,
+            values,
+            b[None, :],
+            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+            transpose=state.transposed,
+        )
+        solution = unravel_solution(solution[0], state.packed_structures)
         return solution, RESULTS.successful, {}
 
     def transpose(
         self, state: _PardisoState, options: dict[str, Any]
     ) -> tuple[_PardisoState, dict[str, Any]]:
         del options
-        # `pardiso_mkl_jax` solves against A^T natively, reusing whatever
-        # factorization was built for A, so unlike `KLU` (which swaps COO row/column
-        # arrays) and `Spsolve` (which rebuilds a transposed CSR matrix), transposing
-        # here is pure metadata: flip `transposed`, transpose the packed structures,
-        # and swap `shape`. Any existing factorization carries over unchanged.
-        packed_structures = transpose_packed_structures(state.packed_structures)
-
-        match state:
-            case _PardisoNumericState(
-                csr=csr, handle=handle, shape=shape, transposed=transposed
-            ):
-                return _PardisoNumericState(
-                    csr, handle, packed_structures, shape[::-1], not transposed
-                ), {}
-            case _PardisoSymbolicState(
-                csr=csr, handle=handle, shape=shape, transposed=transposed
-            ):
-                return _PardisoSymbolicState(
-                    csr, packed_structures, handle, shape[::-1], not transposed
-                ), {}
-            case _PardisoBasicState(csr=csr, shape=shape, transposed=transposed):
-                return _PardisoBasicState(
-                    csr, shape[::-1], packed_structures, not transposed
-                ), {}
+        # `pardiso_mkl_jax` solves against A^T natively with the same factorization, so
+        # transposing is pure metadata: flip `transposed`, transpose the packed
+        # structures, and swap `shape`. The token carries over unchanged.
+        transposed_state = _PardisoState(
+            state.operator,
+            state.csr,
+            state.token,
+            transpose_packed_structures(state.packed_structures)
+            if state.packed_structures is not None
+            else None,
+            state.shape[::-1],
+            not state.transposed,
+            state.sparsity_tag,
+        )
+        return transposed_state, {}
 
     def conj(
         self, state: _PardisoState, options: dict[str, Any]
     ) -> tuple[_PardisoState, dict[str, Any]]:
         del options
-        # Real-only solver (see the class docstring): conjugation is always a no-op.
+        # Real-only solver (see the class docstring), so conjugation is a no-op.
         return state, {}
 
     def assume_full_rank(self) -> bool:

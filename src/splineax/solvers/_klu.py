@@ -1,7 +1,4 @@
-from contextlib import AbstractContextManager, contextmanager
-from contextvars import ContextVar
-from enum import Enum, auto
-from typing import Any, Iterator, Literal, NamedTuple, TypeVar, overload
+from typing import Any, TypeVar
 
 import equinox as eqx
 import jax
@@ -12,6 +9,7 @@ from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import NumericToken, SymbolToken
 from lineax import AbstractLinearOperator, materialise
 from lineax._solution import RESULTS
+from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
     PackedStructures,
     pack_structures,
@@ -27,254 +25,179 @@ from splineax.operators._jacobian import (
     SparseJacobianLinearOperator,
     SparseJacobianLinearOperatorColoring,
 )
-from splineax.solvers._handle import (
-    HandleDependencies,
-    _HandleToken,
-    handle_value,
-    wrap_handle,
-)
 from splineax.solvers._sparse import (
-    AbstractSparseLinearSolver,
-    SparseNumericState,
-    SymbolicScopedSparseLinearSolver,
     _Sparsity,
-    as_scoped_solver,
-    factorize_through_init,
+    operator_pattern_tag,
+    sparsity_pattern_tag,
 )
 
 # `Ai` (row indices), `Aj` (column indices), `Ax` (values): the matrix in COO form.
 _COO = tuple[Integer[Array, " a"], Integer[Array, " b"], Inexact[Array, " nse"]]
 
-# Row and column indices only, without values.
-_COOIndices = tuple[Integer[Array, " a"], Integer[Array, " b"]]
-
-# Either a plain array or a `_HandleToken`, see `_handle.py`.
-_KLUHandle = Array | _HandleToken
-
-
-class _KLUFactorization(NamedTuple):
-    symbolic: _KLUHandle
-    numeric: _KLUHandle
-
-
-class _KLUHandleType(Enum):
-    SYMBOLIC = auto()
-    NUMERIC = auto()
-
-
-PyTreeT = TypeVar("PyTreeT", bound=PyTree)
-
-
-class _KLUHandleAllocationScopeManager:
-    _handles_allocated_in_scope: ContextVar[
-        list[tuple[_KLUHandleType, SymbolToken | NumericToken, _KLUHandle]] | None
-    ] = ContextVar("_klu_handles_in_use", default=None)
-
-    _handle_dependencies = HandleDependencies()
-
-    @classmethod
-    @contextmanager
-    def begin_scope(cls):
-        klujax = _klujax()
-        handles = []
-        token = cls._handles_allocated_in_scope.set(handles)
-
-        yield
-
-        for handle_type, manager, handle in reversed(handles):
-            deps = cls._handle_dependencies.pop(handle)
-            match handle_type:
-                case _KLUHandleType.SYMBOLIC:
-                    klujax.free_symbolic(manager, deps)
-                case _KLUHandleType.NUMERIC:
-                    klujax.free_numeric(manager, deps)
-
-        cls._handles_allocated_in_scope.reset(token)
-
-    @classmethod
-    def register_handle(
-        cls, handle_type: _KLUHandleType, manager: SymbolToken | NumericToken
-    ) -> _KLUHandle:
-        handles = cls._handles_allocated_in_scope.get()
-        assert handles is not None
-        handle: _KLUHandle = wrap_handle(manager.handle)
-        cls._handle_dependencies.record_allocation(handle)
-        handles.append((handle_type, manager, handle))
-        return handle
-
-    @classmethod
-    def register_dependency(cls, handle: _KLUHandle, dependency: PyTreeT) -> PyTreeT:
-        cls._handle_dependencies.register(handle, dependency)
-        return dependency
-
-
-class _KLUBasicState(NamedTuple):
-    coo: _COO
-    shape: tuple[int, ...]
-    packed_structures: PackedStructures
-
-    @contextmanager
-    def factorize(self):
-        klujax = _klujax()
-        Ai, Aj, Ax = self.coo
-
-        with _KLUHandleAllocationScopeManager.begin_scope():
-            # `factor` needs the real `SymbolToken` (it reads its `n_col`), so keep it
-            # from `analyze`. Only wrapped ids are stored on the state.
-            symbolic_token = klujax.analyze(Ai, Aj, self.shape[1])
-            symbolic = _KLUHandleAllocationScopeManager.register_handle(
-                _KLUHandleType.SYMBOLIC, symbolic_token
-            )
-            numeric = _KLUHandleAllocationScopeManager.register_handle(
-                _KLUHandleType.NUMERIC,
-                klujax.factor(Ai, Aj, Ax, symbolic_token),
-            )
-
-            yield _KLUNumericState(
-                self.coo,
-                _KLUFactorization(symbolic, numeric),
-                self.packed_structures,
-                self.shape,
-            )
-
-
-class _KLUSymbolicState(NamedTuple):
-    coo: _COO
-    shape: tuple[int, ...]
-    packed_structures: PackedStructures
-    symbolic: _KLUHandle
-    transposed: bool = False
-
-    @contextmanager
-    def factorize(self):
-        Ai, Aj, Ax = self.coo
-        with _KLUHandleAllocationScopeManager.begin_scope():
-            # Only the numeric handle is registered here. The symbolic handle is
-            # owned and freed by the outer factorize_symbolic() scope.
-            symbolic_token = _symbol_token(self.symbolic, Ai, Aj, self.shape[1])
-            numeric = _KLUHandleAllocationScopeManager.register_handle(
-                _KLUHandleType.NUMERIC,
-                _klujax().factor(Ai, Aj, Ax, symbolic_token),
-            )
-            yield _KLUNumericState(
-                self.coo,
-                _KLUFactorization(self.symbolic, numeric),
-                self.packed_structures,
-                self.shape,
-            )
-
-    def _register_solve_dependency(self, value: Array) -> None:
-        # Lets `splineax.linear_solve` order this state's handle free after `value`,
-        # picked up by `_sparse.linear_solve` via duck typing, see `_handle.py`.
-        _KLUHandleAllocationScopeManager.register_dependency(self.symbolic, value)
-
-
-class _KLUNumericState(eqx.Module):
-    coo: _COO
-    factorization: _KLUFactorization
-    packed_structures: PackedStructures
-    # `shape` and `transposed` are static metadata, not traced leaves: `compute` branches on
-    # `transposed` under AD tracing, where a traced leaf could not be used in `if`.
-    shape: tuple[int, ...] = eqx.field(static=True)
-    transposed: bool = eqx.field(static=True, default=False)
-
-    def _register_solve_dependency(self, value: Array) -> None:
-        # Both handles were used by this solve (see `compute`'s `_KLUNumericState`
-        # case), so both scopes that own them need this registered to order correctly.
-        _KLUHandleAllocationScopeManager.register_dependency(
-            self.factorization.symbolic, value
-        )
-        _KLUHandleAllocationScopeManager.register_dependency(
-            self.factorization.numeric, value
-        )
-
-
-class _KLUSymbolicScope(NamedTuple):
-    indices: _COOIndices
-    """Row and column indices of the analyzed matrix, without values."""
-    shape: tuple[int, ...]
-    symbolic: _KLUHandle
-
-    def init(
-        self,
-        operator: AbstractLinearOperator,
-        options: dict[str, Any] = {},
-    ) -> _KLUSymbolicState:
-        Ai, Aj = self.indices
-        match operator:
-            case SparseJacobianLinearOperator():
-                return self.init(materialise(operator), options)
-            case BCSRLinearOperator(matrix):
-                bcoo = matrix.to_bcoo()
-            case BCOOLinearOperator(matrix):
-                bcoo = matrix
-            case _:
-                raise TypeError(
-                    "`_KLUSymbolicScope.init` requires a `BCOOLinearOperator`, "
-                    "`BCSRLinearOperator`, or `SparseJacobianLinearOperator`; "
-                    f"got {type(operator).__name__}."
-                )
-        Ax = bcoo.data
-
-        _klujax()
-
-        if Ax.dtype in COMPLEX_DTYPES:
-            Ax = Ax.astype(jnp.complex128)
-        else:
-            Ax = Ax.astype(jnp.float64)
-
-        return _KLUSymbolicState(
-            (Ai, Aj, Ax),
-            self.shape,
-            pack_structures(operator),
-            self.symbolic,
-        )
-
-    @contextmanager
-    def factorize(self, operator: AbstractLinearOperator):
-        with self.init(operator).factorize() as state:
-            yield state
-
-
-_KLUState = _KLUBasicState | _KLUSymbolicState | _KLUNumericState
+COMPLEX_DTYPES = (
+    np.complex64,
+    np.complex128,
+    jnp.complex64,
+    jnp.complex128,
+)
 
 
 def _klujax():
-    # Lazy import: deferred until a KLU solve actually runs, so importing splineax
-    # never pays for loading klujax's compiled extension unless the solver is used.
+    # Lazy import: deferred until a KLU solve actually runs, so importing splineax never
+    # pays for loading klujax's compiled extension unless the solver is used.
     import klujax
 
     return klujax
 
 
-def _symbol_token(handle: _KLUHandle, Ai: Array, Aj: Array, n_col: int) -> SymbolToken:
-    """Rebuild the `SymbolToken` that `factor` needs from a wrapped handle plus the
-    pattern splineax already holds. `factor` reads only the id and `n_col` from it.
+def _upcast(values: Array) -> Array:
+    """Upcast values to the double precision klujax needs, complex or real."""
+    if values.dtype in COMPLEX_DTYPES:
+        return values.astype(jnp.complex128)
+    return values.astype(jnp.float64)
 
-    The token is rebuilt on the fly rather than carried in the state so its unused
-    solve counter never lands in an `equinox` module as a stray static leaf.
+
+def _extract_coo(
+    operator: AbstractLinearOperator,
+) -> tuple[Array, Array, Array, tuple[int, ...]]:
+    """Read an operator's COO triple and shape, upcasting the values.
+
+    A `SparseJacobianLinearOperator` is materialised first, then handled like a BCOO.
     """
-    return SymbolToken(handle_value(handle), Ai, Aj, n_col)
+    match operator:
+        case SparseJacobianLinearOperator():
+            return _extract_coo(materialise(operator))
+        case BCSRLinearOperator(matrix):
+            bcoo = matrix.to_bcoo()
+        case BCOOLinearOperator(matrix):
+            bcoo = matrix
+        case _:
+            raise TypeError(
+                "`KLU` requires a sparse operator backed by a `BCOO` or `BCSR` "
+                "matrix (e.g. `splineax.BCOOLinearOperator` or "
+                "`splineax.BCSRLinearOperator`), or a "
+                f"`splineax.SparseJacobianLinearOperator`; "
+                f"got {type(operator).__name__}."
+            )
+    row = bcoo.indices[:, 0].astype(jnp.int32)
+    col = bcoo.indices[:, 1].astype(jnp.int32)
+    # Stop gradients on the values before they reach `analyze`/`factor`, which have no
+    # differentiation rule. The gradient with respect to the matrix flows through the
+    # operator lineax carries, not through the factorization, which is a constant.
+    values = _upcast(jax.lax.stop_gradient(bcoo.data))
+    return row, col, values, bcoo.shape
 
 
-def _numeric_token(
-    handle: _KLUHandle, Ai: Array, Aj: Array, Ax: Array, n_col: int
-) -> NumericToken:
-    """Rebuild the `NumericToken` that the numeric solves need. They read the id and the
-    factored `(Ai, Aj, Ax)`, all of which the numeric state carries. See `_symbol_token`
-    for why this is rebuilt rather than stored.
+def _extract_pattern(sparsity: _Sparsity) -> tuple[Array, Array, tuple[int, ...]]:
+    """Read a sparsity pattern's COO indices and shape, without any values.
+
+    The Jacobian and coloring forms carry the pattern in their precomputed asdex
+    coloring, so the indices are read there rather than materialising the Jacobian.
     """
-    return NumericToken(handle_value(handle), Ai, Aj, Ax, n_col)
+    match sparsity:
+        case SparseJacobianLinearOperator(transposed=True):
+            # The stored pattern describes the forward Jacobian. asdex emits `BCOO`
+            # values in the pattern's index order and `BCOO.T` swaps the index columns
+            # without reordering entries, so swapping rows and columns here keeps the
+            # indices aligned with the values a later solve pairs them with.
+            pattern = sparsity.coloring.sparsity
+            row = jnp.asarray(pattern.cols, dtype=jnp.int32)
+            col = jnp.asarray(pattern.rows, dtype=jnp.int32)
+            shape = pattern.shape[::-1]
+        case SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring():
+            # Both hold the coloring one level in: the operator stores an
+            # `asdex.ColoredPattern` whose `.sparsity` is the pattern, and the operator
+            # coloring stores a `JacobianColoring` whose `.sparsity` property returns it.
+            pattern = sparsity.coloring.sparsity
+            row = jnp.asarray(pattern.rows, dtype=jnp.int32)
+            col = jnp.asarray(pattern.cols, dtype=jnp.int32)
+            shape = pattern.shape
+        case JacobianColoring():
+            pattern = sparsity.sparsity
+            row = jnp.asarray(pattern.rows, dtype=jnp.int32)
+            col = jnp.asarray(pattern.cols, dtype=jnp.int32)
+            shape = pattern.shape
+        case BCSRLinearOperator():
+            bcoo = sparsity.matrix.to_bcoo()
+            row = bcoo.indices[:, 0].astype(jnp.int32)
+            col = bcoo.indices[:, 1].astype(jnp.int32)
+            shape = bcoo.shape
+        case BCOOLinearOperator():
+            bcoo = sparsity.matrix
+            row = bcoo.indices[:, 0].astype(jnp.int32)
+            col = bcoo.indices[:, 1].astype(jnp.int32)
+            shape = bcoo.shape
+        case BCSR():
+            bcoo = sparsity.to_bcoo()
+            row = bcoo.indices[:, 0].astype(jnp.int32)
+            col = bcoo.indices[:, 1].astype(jnp.int32)
+            shape = bcoo.shape
+        case BCOO():
+            row = sparsity.indices[:, 0].astype(jnp.int32)
+            col = sparsity.indices[:, 1].astype(jnp.int32)
+            shape = sparsity.shape
+        case _:
+            raise TypeError(
+                "`KLU.init_symbolic` requires a `BCOO`, `BCSR`, `BCOOLinearOperator`, "
+                "`BCSRLinearOperator`, `SparseJacobianLinearOperator`, "
+                "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
+                f"got {type(sparsity).__name__}."
+            )
+    return row, col, tuple(shape)
+
+
+class _KLUState(eqx.Module):
+    """A KLU solver state, carrying its factorization tokens.
+
+    The state has three shapes. Straight from `init_symbolic` it holds only the symbolic
+    token, with no values yet, so it is not solvable until `update` gives it an operator.
+    After `init` or `update` it also holds the values and a numeric token, ready to solve.
+    """
+
+    operator: AbstractLinearOperator | None
+    """The operator this state was built on. Compared by identity in `update`."""
+    coo: _COO | None
+    """The extracted (Ai, Aj, Ax) triple, or None for a symbolic-only state."""
+    symbol: SymbolToken
+    """The symbolic analysis token, always present."""
+    numeric: NumericToken | None
+    """The numeric factorization token, None before any values are known."""
+    packed_structures: PackedStructures | None
+    """The lineax structure for ravel and unravel, None for a symbolic-only state."""
+    shape: tuple[int, ...] = eqx.field(static=True)
+    transposed: bool = eqx.field(static=True, default=False)
+    sparsity_tag: object | None = eqx.field(static=True, default=None)
+
+    def track(self, solution: Any) -> "_KLUState":
+        """Return a state whose `release` is ordered after `solution`.
+
+        Accepts the lineax `Solution` or a bare value pytree. The solution arrays become
+        ordering dependencies on the tokens, see klujax `SymbolToken.track`.
+        """
+        value = getattr(solution, "value", solution)
+        leaves = tuple(jax.tree_util.tree_leaves(value))
+        symbol = self.symbol.track(*leaves)
+        numeric = None if self.numeric is None else self.numeric.track(*leaves)
+        return _KLUState(
+            self.operator,
+            self.coo,
+            symbol,
+            numeric,
+            self.packed_structures,
+            self.shape,
+            self.transposed,
+            self.sparsity_tag,
+        )
 
 
 T = TypeVar("T")
 
 
 def _ensure_cpu(args: T) -> T:
-    """Return `x` unchanged, raising if the current platform is not CPU.
+    """Return `args` unchanged, raising if the current platform is not CPU.
 
-    Uses `jax.lax.platform_dependent` to produce a traced boolean and
-    `equinox.error_if` to raise.
+    Uses `jax.lax.platform_dependent` to produce a traced boolean and `equinox.error_if`
+    to raise.
     """
     on_cpu = jax.lax.platform_dependent(
         args,
@@ -288,15 +211,7 @@ def _ensure_cpu(args: T) -> T:
     )
 
 
-COMPLEX_DTYPES = (
-    np.complex64,
-    np.complex128,
-    jnp.complex64,
-    jnp.complex128,
-)
-
-
-class KLU(AbstractSparseLinearSolver[_KLUState]):
+class KLU(AbstractLinearSolver[_KLUState]):
     """Sparse direct solver wrapping the `klujax` (SuiteSparse KLU) library.
 
     This solver keeps the operator in its native sparse (COO) storage rather than
@@ -312,177 +227,114 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
     """
 
     def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any]
-    ) -> _KLUBasicState:
+        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
+    ) -> _KLUState:
+        del options
         if operator.in_size() != operator.out_size():
             raise ValueError(
                 "`KLU` may only be used for linear solves with square matrices"
             )
-
-        # `klujax.solve` consumes a COO triple. We assume the matrix is coalesced (no
-        # duplicate indices); KLU builds CSC internally, so the index order is irrelevant.
-        match operator:
-            case SparseJacobianLinearOperator():
-                # Materialise the Jacobian into a `BCOOLinearOperator` and reuse the
-                # BCOO path below.
-                return self.init(materialise(operator), options)
-            case BCSRLinearOperator(matrix):
-                matrix = matrix.to_bcoo()
-            case BCOOLinearOperator(matrix):
-                pass
-            case _:
-                raise TypeError(
-                    "`KLU` requires a sparse operator backed by a `BCOO` or `BCSR` "
-                    "matrix (e.g. `splineax.BCOOLinearOperator` or "
-                    "`splineax.BCSRLinearOperator`), or a "
-                    f"`splineax.SparseJacobianLinearOperator`; "
-                    f"got {type(operator).__name__}."
-                )
-
-        _klujax()
-
-        Ai = matrix.indices[:, 0].astype(jnp.int32)
-        Aj = matrix.indices[:, 1].astype(jnp.int32)
-        Ax = matrix.data
-
-        # Upcast matrix data if necessary.
-        if Ax.dtype in COMPLEX_DTYPES:
-            Ax = Ax.astype(jnp.complex128)
-        else:
-            Ax = Ax.astype(jnp.float64)
-
-        return _KLUBasicState(
-            (Ai, Aj, Ax),
-            matrix.shape,
+        row, col, values, shape = _extract_coo(operator)
+        klujax = _klujax()
+        # `init` analyzes and factorizes right away, so the state is ready to solve and
+        # reusable across right-hand sides. `factor` needs the real `SymbolToken`, which
+        # `analyze` returns and the state then carries.
+        symbol = klujax.analyze(row, col, shape[1])
+        numeric = klujax.factor(row, col, values, symbol)
+        return _KLUState(
+            operator,
+            (row, col, values),
+            symbol,
+            numeric,
             pack_structures(operator),
+            shape,
+            False,
+            operator_pattern_tag(operator),
         )
 
-    def factorize(
-        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> AbstractContextManager[SparseNumericState]:
-        """Pre-compute a full (symbolic + numeric) factorization for reuse.
+    def init_symbolic(
+        self, sparsity: _Sparsity, options: dict[str, Any] = {}
+    ) -> _KLUState:
+        """Analyze a sparsity pattern into a symbolic-only state, no values yet.
 
-        Equivalent to `self.init(operator, options).factorize()`.
+        Accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`,
+        `SparseJacobianLinearOperator`, `SparseJacobianLinearOperatorColoring`, or
+        `JacobianColoring`. `update` then folds in an operator sharing the pattern and
+        reuses this analysis. The pattern must be concrete here, not a traced value.
         """
-        return factorize_through_init(self, operator, options)
-
-    @overload
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
-    ) -> AbstractContextManager["_KLUSymbolicScope"]: ...
-
-    @overload
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: Literal[True]
-    ) -> AbstractContextManager[SymbolicScopedSparseLinearSolver]: ...
-
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: bool = False
-    ) -> AbstractContextManager["_KLUSymbolicScope | SymbolicScopedSparseLinearSolver"]:
-        """Open a scope with a pre-computed KLU symbolic factorization.
-
-        Yields a `_KLUSymbolicScope`. Inside the block, call:
-        - `.init(operator)` to create a `_KLUSymbolicState` for `lx.linear_solve`
-          (uses `solve_with_symbol`: factors numerically on each call, symbolic reused).
-        - `.init(operator).factorize()` or equivalently `.factorize(operator)` to also
-          pre-compute the numeric factorization (uses `solve_with_numeric`).
-
-        The symbolic handle is freed when the `with` block exits, after all
-        registered solve-result dependencies have been consumed.
-
-        Args:
-            sparsity: Sparse matrix whose sparsity pattern to pre-analyze. Accepts
-                      `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`,
-                      `SparseJacobianLinearOperator`,
-                      `SparseJacobianLinearOperatorColoring`, or `JacobianColoring`.
-                      For the latter three, the indices are taken host-side from the
-                      precomputed asdex sparsity pattern, without materialising the
-                      Jacobian numerically. That host-side read means the coloring
-                      must be concrete here, not a traced value inside a jitted
-                      function.
-            as_solver: Yield a `SymbolicScopedSparseLinearSolver` pairing the scope
-                       with this solver, instead of the bare scope, so that the two
-                       need not be passed around together.
-        """
-        scope = self._factorize_symbolic(sparsity)
-        return as_scoped_solver(self, scope) if as_solver else scope
-
-    @contextmanager
-    def _factorize_symbolic(self, sparsity: _Sparsity) -> Iterator["_KLUSymbolicScope"]:
-        # The scope itself, kept separate from `factorize_symbolic` above so that the
-        # public method can be overloaded on `as_solver` (`@contextmanager` and
-        # `@overload` do not compose).
-        match sparsity:
-            case SparseJacobianLinearOperator(transposed=True):
-                # The stored pattern describes the forward Jacobian. asdex emits
-                # `BCOO` values in the pattern's index order and `BCOO.T` swaps the
-                # index columns without reordering entries, so swapping rows and
-                # columns here keeps the indices aligned with the values that
-                # `_KLUSymbolicScope.init` later pairs them with.
-                pattern = sparsity.coloring.sparsity
-                Ai = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                Aj = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                shape = pattern.shape[::-1]
-            case (
-                SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring()
-            ):
-                # Both hold the coloring one level in: the operator stores an
-                # `asdex.ColoredPattern` whose `.sparsity` is the pattern, and the
-                # operator coloring stores a `JacobianColoring` whose `.sparsity`
-                # property returns the same pattern.
-                pattern = sparsity.coloring.sparsity
-                Ai = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                Aj = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                shape = pattern.shape
-            case JacobianColoring():
-                # A bare coloring exposes the pattern directly through its
-                # `.sparsity` property.
-                pattern = sparsity.sparsity
-                Ai = jnp.asarray(pattern.rows, dtype=jnp.int32)
-                Aj = jnp.asarray(pattern.cols, dtype=jnp.int32)
-                shape = pattern.shape
-            case BCSRLinearOperator():
-                bcoo = sparsity.matrix.to_bcoo()
-                Ai = bcoo.indices[:, 0].astype(jnp.int32)
-                Aj = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-            case BCOOLinearOperator():
-                bcoo = sparsity.matrix
-                Ai = bcoo.indices[:, 0].astype(jnp.int32)
-                Aj = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-            case BCSR():
-                bcoo = sparsity.to_bcoo()
-                Ai = bcoo.indices[:, 0].astype(jnp.int32)
-                Aj = bcoo.indices[:, 1].astype(jnp.int32)
-                shape = bcoo.shape
-            case BCOO():
-                Ai = sparsity.indices[:, 0].astype(jnp.int32)
-                Aj = sparsity.indices[:, 1].astype(jnp.int32)
-                shape = sparsity.shape
-            case _:
-                raise TypeError(
-                    "`KLU.factorize_symbolic` requires a `BCOO`, `BCSR`, "
-                    "`BCOOLinearOperator`, `BCSRLinearOperator`, "
-                    "`SparseJacobianLinearOperator`, "
-                    "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
-                    f"got {type(sparsity).__name__}."
-                )
-
+        del options
+        row, col, shape = _extract_pattern(sparsity)
         if shape[0] != shape[1]:
             raise ValueError(
-                f"`KLU.factorize_symbolic` requires a square matrix; got shape {shape}."
+                f"`KLU.init_symbolic` requires a square matrix; got shape {shape}."
             )
+        symbol = _klujax().analyze(row, col, shape[1])
+        return _KLUState(
+            None,
+            None,
+            symbol,
+            None,
+            None,
+            shape,
+            False,
+            sparsity_pattern_tag(sparsity),
+        )
 
-        with _KLUHandleAllocationScopeManager.begin_scope():
-            symbolic = _KLUHandleAllocationScopeManager.register_handle(
-                _KLUHandleType.SYMBOLIC, _klujax().analyze(Ai, Aj, shape[1])
-            )
-            yield _KLUSymbolicScope(
-                (Ai, Aj),
-                tuple(shape),
-                symbolic,
-            )
+    def update(
+        self,
+        state: _KLUState,
+        operator: AbstractLinearOperator,
+        options: dict[str, Any] = {},
+    ) -> _KLUState:
+        """Fold a new operator into `state`, reusing the analysis where the pattern holds.
+
+        Repeated calls with the same operator object are a no-op. When the operator shares
+        the state's sparsity tag, the symbolic analysis is reused and only the numeric
+        factorization is redone. Otherwise the operator is analyzed from scratch.
+        """
+        if operator is state.operator:
+            # Nothing changed, so this is a no-op.
+            return state
+        tag = operator_pattern_tag(operator)
+        if (
+            state.sparsity_tag is not None
+            and tag is not None
+            and state.sparsity_tag == tag
+        ):
+            # Same pattern, new values. Reuse the symbolic analysis.
+            return self._refactor(state, operator, tag, options)
+        # New pattern, so analyze from scratch.
+        return self.init(operator, options)
+
+    def _refactor(
+        self,
+        state: _KLUState,
+        operator: AbstractLinearOperator,
+        tag: object,
+        options: dict[str, Any],
+    ) -> _KLUState:
+        del options
+        row, col, values, shape = _extract_coo(operator)
+        # Reuse the stored symbolic analysis and build a fresh numeric factorization.
+        # The tag asserts the indices match the ones `symbol` was analyzed with.
+        numeric = _klujax().factor(row, col, values, state.symbol)
+        return _KLUState(
+            operator,
+            (row, col, values),
+            state.symbol,
+            numeric,
+            pack_structures(operator),
+            shape,
+            False,
+            tag,
+        )
+
+    def release(self, state: _KLUState) -> None:
+        """Free the state's cache slots, ordered after any tracked solves."""
+        klujax = _klujax()
+        if state.numeric is not None:
+            klujax.free_numeric(state.numeric)
+        klujax.free_symbolic(state.symbol)
 
     def compute(
         self,
@@ -491,52 +343,27 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         options: dict[str, Any],
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
         del options
-
-        Ai, Aj, Ax = state.coo
+        if state.coo is None or state.packed_structures is None:
+            raise ValueError(
+                "`KLU` cannot solve with a symbolic-only state; call `update` with an "
+                "operator first."
+            )
+        row, col, values = state.coo
         b = ravel_vector(vector, state.packed_structures)
-        Ai, Aj, Ax, b = _ensure_cpu((Ai, Aj, Ax, b))
-
-        _klujax()
-
-        # Upcast right-hand side vector if necessary.
-        if b.dtype in COMPLEX_DTYPES:
-            b = b.astype(jnp.complex128)
-        else:
-            b = b.astype(jnp.float64)
-
+        row, col, values, b = _ensure_cpu((row, col, values, b))
         klujax = _klujax()
-        match state:
-            case _KLUNumericState(
-                factorization=_KLUFactorization(symbolic=symbolic, numeric=numeric),
-                transposed=transposed,
-            ):
-                # The numeric solves read the factored matrix off a `NumericToken`.
-                # Rebuild it from `state.coo`, which stays the original `(Ai, Aj, Ax)`:
-                # `transpose` leaves it unswapped, and `tsolve` handles A^T itself. KLU
-                # is square, so `shape[1]` is the right `n_col` in either orientation.
-                numeric_token = _numeric_token(numeric, Ai, Aj, Ax, state.shape[1])
-                solve = (
-                    klujax.tsolve_with_numeric
-                    if transposed
-                    else klujax.solve_with_numeric
-                )
-                x = solve(numeric_token, b, handle_value(symbolic))
-                _KLUHandleAllocationScopeManager.register_dependency(symbolic, x)
-                _KLUHandleAllocationScopeManager.register_dependency(numeric, x)
-            case _KLUSymbolicState(symbolic=symbolic, transposed=transposed):
-                # `solve_with_symbol` and `tsolve_with_symbol` both expect the
-                # non-swapped Ai/Aj index arrays. The transposed flag is used to
-                # select `tsolve`.
-                solve = (
-                    klujax.tsolve_with_symbol
-                    if transposed
-                    else klujax.solve_with_symbol
-                )
-                x = solve(Ai, Aj, Ax, b, handle_value(symbolic))
-                _KLUHandleAllocationScopeManager.register_dependency(symbolic, x)
-            case _KLUBasicState():
-                x = klujax.solve(Ai, Aj, Ax, b)
-
+        b = _upcast(b)
+        # A symbolic-only tier is possible if `update` reused an analysis but the numeric
+        # token was dropped, so factor here as a fallback. Normally `numeric` is present.
+        numeric = state.numeric
+        if numeric is None:
+            numeric = klujax.factor(row, col, values, state.symbol)
+        solve = (
+            klujax.tsolve_with_numeric
+            if state.transposed
+            else klujax.solve_with_numeric
+        )
+        x = solve(numeric, b, state.symbol)
         solution = unravel_solution(x, state.packed_structures)
         return solution, RESULTS.successful, {}
 
@@ -544,96 +371,51 @@ class KLU(AbstractSparseLinearSolver[_KLUState]):
         self, state: _KLUState, options: dict[str, Any]
     ) -> tuple[_KLUState, dict[str, Any]]:
         del options
-        Ai, Aj, Ax = state.coo
-        packed_structures = transpose_packed_structures(state.packed_structures)
-
-        match state:
-            case _KLUNumericState(
-                factorization=factorization, transposed=transposed, shape=shape
-            ):
-                # Reuse the existing factorization unchanged, so `compute` can `tsolve`
-                # against it. Keep `coo` as the original `(Ai, Aj, Ax)`: `compute`
-                # rebuilds the `NumericToken` from it, and `tsolve` needs A's own arrays,
-                # not a swapped pattern.
-                return _KLUNumericState(
-                    (Ai, Aj, Ax),
-                    factorization,
-                    packed_structures,
-                    shape[::-1],
-                    not transposed,
-                ), {}
-            case _KLUSymbolicState(
-                symbolic=symbolic, transposed=transposed, shape=shape
-            ):
-                # Keep original Ai/Aj (not swapped). The transposed flag governs
-                # which solve function is selected; the indices of A remain
-                # unchanged.
-                return _KLUSymbolicState(
-                    (Ai, Aj, Ax),
-                    shape[::-1],
-                    packed_structures,
-                    symbolic,
-                    not transposed,
-                ), {}
-            case _KLUBasicState(shape=shape):
-                return _KLUBasicState((Aj, Ai, Ax), shape[::-1], packed_structures), {}
+        # Reuse the factorization unchanged and let `tsolve` handle the transposed
+        # direction. `coo` stays A's own arrays, which `tsolve` needs.
+        transposed_state = _KLUState(
+            state.operator,
+            state.coo,
+            state.symbol,
+            state.numeric,
+            transpose_packed_structures(state.packed_structures)
+            if state.packed_structures is not None
+            else None,
+            state.shape[::-1],
+            not state.transposed,
+            state.sparsity_tag,
+        )
+        return transposed_state, {}
 
     def conj(
         self, state: _KLUState, options: dict[str, Any]
     ) -> tuple[_KLUState, dict[str, Any]]:
         del options
-        Ai, Aj, Ax = state.coo
-
-        if Ax.dtype not in COMPLEX_DTYPES:
-            # Real: conj is a no-op for all state types.
+        if state.coo is None:
             return state, {}
-
-        match state:
-            case _KLUNumericState(
-                factorization=_KLUFactorization(symbolic=symbolic),
-                packed_structures=packed_structures,
-                shape=shape,
-                transposed=transposed,
-            ):
-                # Complex numeric: re-factor conj(A) reusing the existing symbolic handle.
-                # The sparsity is unchanged, so the symbolic analysis remains valid.
-                # We register the new handle within the current allocation
-                # scope, so that it gets freed eventually.
-                # TODO: should we instead explicitly assign it to the scope of
-                # the previous numeric handle? Does it matter?
-                # `state.coo` is the original matrix (`transpose` does not swap it), so
-                # `factor` needs a `SymbolToken` rebuilt from it. KLU is square, so
-                # `shape[1]` is the right `n_col` in either orientation.
-                symbolic_token = _symbol_token(symbolic, Ai, Aj, shape[1])
-                numeric = _KLUHandleAllocationScopeManager.register_handle(
-                    _KLUHandleType.NUMERIC,
-                    _klujax().factor(Ai, Aj, Ax.conj(), symbolic_token),
-                )
-                return _KLUNumericState(
-                    (Ai, Aj, Ax.conj()),
-                    _KLUFactorization(symbolic, numeric),
-                    packed_structures,
-                    shape,
-                    transposed,
-                ), {}
-            case _KLUSymbolicState(
-                symbolic=symbolic,
-                transposed=transposed,
-                shape=shape,
-                packed_structures=packed_structures,
-            ):
-                # Complex symbolic: `(t)solve_with_symbol` re-factors
-                # numerically per call, so conjugating the values is enough. The
-                # symbolic factorization remains valid.
-                return _KLUSymbolicState(
-                    (Ai, Aj, Ax.conj()),
-                    shape,
-                    packed_structures,
-                    symbolic,
-                    transposed,
-                ), {}
-            case _KLUBasicState(shape=shape, packed_structures=packed_structures):
-                return _KLUBasicState((Ai, Aj, Ax.conj()), shape, packed_structures), {}
+        row, col, values = state.coo
+        if values.dtype not in COMPLEX_DTYPES:
+            # Real values, so conj is a no-op.
+            return state, {}
+        # Complex: conjugate the values and refactor, reusing the symbolic analysis since
+        # the sparsity is unchanged.
+        conjugated = values.conj()
+        numeric = (
+            None
+            if state.numeric is None
+            else _klujax().factor(row, col, conjugated, state.symbol)
+        )
+        conjugated_state = _KLUState(
+            state.operator,
+            (row, col, conjugated),
+            state.symbol,
+            numeric,
+            state.packed_structures,
+            state.shape,
+            state.transposed,
+            state.sparsity_tag,
+        )
+        return conjugated_state, {}
 
     def assume_full_rank(self) -> bool:
         return True

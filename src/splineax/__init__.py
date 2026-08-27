@@ -17,9 +17,6 @@ from .solvers import (
     KLU as KLU,
 )
 from .solvers import (
-    AbstractSparseLinearSolver as AbstractSparseLinearSolver,
-)
-from .solvers import (
     AutoSparseLinearSolver as AutoSparseLinearSolver,
 )
 from .solvers import (
@@ -35,7 +32,10 @@ from .solvers import (
     Spsolve as Spsolve,
 )
 from .solvers import (
-    SymbolicScopedSparseLinearSolver as SymbolicScopedSparseLinearSolver,
+    StatefulSolver as StatefulSolver,
+)
+from .solvers import (
+    TrackingState as TrackingState,
 )
 from .solvers import (
     linear_solve as linear_solve,

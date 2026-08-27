@@ -1,28 +1,21 @@
-import abc
 import secrets
 import warnings
-from contextlib import AbstractContextManager, contextmanager
 from typing import (
     Any,
-    Generic,
-    Iterator,
-    Literal,
     Protocol,
     TypeVar,
-    overload,
     runtime_checkable,
 )
 
-import equinox as eqx
 import jax
 import jax.core
 import numpy as np
 from jax.experimental.sparse import BCOO, BCSR
-from jaxtyping import Array, PyTree
-from lineax import AbstractLinearOperator, AutoLinearSolver
+from jaxtyping import PyTree
+from lineax import AbstractLinearOperator
 from lineax import linear_solve as _lx_linear_solve
-from lineax._solution import RESULTS, Solution
-from lineax._solve import AbstractLinearSolver, sentinel
+from lineax._solution import Solution
+from lineax._solve import sentinel
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
@@ -31,9 +24,9 @@ from splineax.operators._jacobian import (
     SparseJacobianLinearOperator,
     SparseJacobianLinearOperatorColoring,
 )
-from splineax.solvers._handle import mark_via_linear_solve
+from splineax.solvers._stateful import StatefulSolver
 
-# Everything `factorize_symbolic` accepts as a sparsity pattern.
+# Everything `init_symbolic` accepts as a sparsity pattern.
 _Sparsity = (
     BCOO
     | BCSR
@@ -155,9 +148,9 @@ def _pattern_indices(
 ) -> tuple[np.ndarray | None, tuple[int, ...] | None]:
     """Read a pattern's COO index array and shape as concrete numpy data.
 
-    Returns `(None, None)` when the indices are traced or the pattern is a Jacobian form,
-    which sends `sparsity_pattern_tag` to its random-id fallback. The Jacobian forms get
-    their own content tags through the factory integration, see `_jacobian.py`.
+    Returns `(None, None)` when the indices are traced, which sends
+    `sparsity_pattern_tag` to its random-id fallback. The Jacobian and coloring forms read
+    their pattern from the precomputed asdex coloring, whose indices are always concrete.
     """
     match pattern:
         case BCOO():
@@ -170,6 +163,18 @@ def _pattern_indices(
         case BCSRLinearOperator():
             bcoo = pattern.matrix.to_bcoo()
             indices, shape = bcoo.indices, bcoo.shape
+        case SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring():
+            asdex_pattern = pattern.coloring.sparsity
+            indices = np.stack(
+                [np.asarray(asdex_pattern.rows), np.asarray(asdex_pattern.cols)], axis=1
+            )
+            return indices, tuple(asdex_pattern.shape)
+        case JacobianColoring():
+            asdex_pattern = pattern.sparsity
+            indices = np.stack(
+                [np.asarray(asdex_pattern.rows), np.asarray(asdex_pattern.cols)], axis=1
+            )
+            return indices, tuple(asdex_pattern.shape)
         case _:
             return None, None
     if isinstance(indices, jax.core.Tracer):
@@ -197,304 +202,84 @@ def sparsity_pattern_tag(pattern: "_Sparsity | None" = None) -> object:
     return _ContentPatternTag(indices, shape)
 
 
-class SparseNumericState(Protocol):
-    """A fully factorized sparse solver state, ready to pass to `lineax.linear_solve`.
+def operator_pattern_tag(operator: AbstractLinearOperator) -> object | None:
+    """Return the operator's sparsity-pattern tag, or None if it carries none.
 
-    Marker protocol: a terminal state with no further factorization step.
+    Solvers read this in `update` to decide whether an operator shares a state's pattern.
+    A user-attached tag wins. Otherwise a `SparseJacobianLinearOperator` derives one from
+    its coloring, so operators built by one `operator_at` factory reuse a factorization
+    across evaluation points without the caller tagging them. The tag lives only on the
+    solver state, never on the operator, so it does not change the operator's pytree.
     """
+    for tag in getattr(operator, "tags", ()):
+        if isinstance(tag, (_ContentPatternTag, _IdentityPatternTag)):
+            return tag
+    if isinstance(operator, SparseJacobianLinearOperator) and not operator.transposed:
+        return sparsity_pattern_tag(operator)
+    return None
+
+
+_StateT = TypeVar("_StateT")
 
 
 @runtime_checkable
-class SparseBasicState(Protocol):
-    """The state returned by `SparseLinearSolver.init`.
+class SparseLinearSolver(StatefulSolver[_StateT], Protocol[_StateT]):
+    """Structural type for the sparse stateful solvers in this package.
 
-    Can be turned into a numeric factorization for reuse across solves.
+    Extends the solver-agnostic `StatefulSolver` (init, update, release, compute,
+    transpose, conj, assume_full_rank) with `init_symbolic`, which analyzes a known
+    sparsity pattern into a reusable state before any values are available. `KLU`,
+    `Pardiso`, `Spsolve`, and `AutoSparseLinearSolver` all satisfy it structurally.
     """
 
-    def factorize(self) -> AbstractContextManager[SparseNumericState]:
-        """Pre-compute a numeric factorization, yielding a reusable state."""
+    def init_symbolic(
+        self, sparsity: _Sparsity, options: dict[str, Any] = {}
+    ) -> _StateT:
+        """Analyze a sparsity pattern into a state, reused by a later `update`."""
         ...
-
-
-@runtime_checkable
-class SparseSymbolicState(Protocol):
-    """A state that reuses a pre-computed symbolic factorization.
-
-    Returned by `SparseSymbolicScope.init`. Directly solvable, and can additionally
-    be turned into a numeric factorization.
-    """
-
-    def factorize(self) -> AbstractContextManager[SparseNumericState]:
-        """Pre-compute a numeric factorization, reusing the symbolic one."""
-        ...
-
-
-@runtime_checkable
-class SparseSymbolicScope(Protocol):
-    """A pre-analyzed symbolic-factorization scope yielded by
-    `SparseLinearSolver.factorize_symbolic`."""
-
-    def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> SparseSymbolicState:
-        """Build a directly-solvable state reusing the scope's symbolic factorization."""
-        ...
-
-    def factorize(
-        self, operator: AbstractLinearOperator
-    ) -> AbstractContextManager[SparseNumericState]:
-        """Also pre-compute the numeric factorization, reusing the symbolic one."""
-        ...
-
-
-@runtime_checkable
-class SparseLinearSolver(Protocol):
-    """Structural type for sparse direct solvers that expose factorization reuse on
-    top of the lineax `AbstractLinearSolver` interface."""
-
-    def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any]
-    ) -> SparseBasicState: ...
-
-    def factorize(
-        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> AbstractContextManager[SparseNumericState]:
-        """Pre-compute a full factorization for reuse across multiple solves."""
-        ...
-
-    @overload
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
-    ) -> AbstractContextManager[SparseSymbolicScope]: ...
-
-    @overload
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: Literal[True]
-    ) -> AbstractContextManager["SymbolicScopedSparseLinearSolver"]: ...
-
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: bool = False
-    ) -> AbstractContextManager[
-        "SparseSymbolicScope | SymbolicScopedSparseLinearSolver"
-    ]:
-        """Pre-compute a symbolic factorization from a known sparsity pattern.
-
-        Yields a `SparseSymbolicScope`, or a `SymbolicScopedSparseLinearSolver`
-        bundling that scope with this solver when `as_solver=True`.
-        """
-        ...
-
-
-_SolverState = TypeVar("_SolverState")
-
-
-class AbstractSparseLinearSolver(
-    AbstractLinearSolver[_SolverState], Generic[_SolverState]
-):
-    """Abstract base for sparse direct solvers that support factorization reuse.
-
-    Extends the lineax `AbstractLinearSolver` interface with `factorize` and
-    `factorize_symbolic`. Concrete subclasses (`KLU`, `Spsolve`,
-    `AutoSparseLinearSolver`) are therefore usable both with `lineax.linear_solve`
-    (which requires an `AbstractLinearSolver`) and the factorization-reuse API. They
-    also structurally satisfy the `SparseLinearSolver` protocol.
-    """
-
-    @abc.abstractmethod
-    def factorize(
-        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> AbstractContextManager[SparseNumericState]:
-        """Pre-compute a full factorization for reuse across multiple solves."""
-
-    @overload
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: Literal[False] = False
-    ) -> AbstractContextManager[SparseSymbolicScope]: ...
-
-    @overload
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: Literal[True]
-    ) -> AbstractContextManager["SymbolicScopedSparseLinearSolver"]: ...
-
-    @abc.abstractmethod
-    def factorize_symbolic(
-        self, sparsity: _Sparsity, *, as_solver: bool = False
-    ) -> AbstractContextManager[
-        "SparseSymbolicScope | SymbolicScopedSparseLinearSolver"
-    ]:
-        """Pre-compute a symbolic factorization from a known sparsity pattern.
-
-        Yields a `SparseSymbolicScope`, or a `SymbolicScopedSparseLinearSolver`
-        bundling that scope with this solver when `as_solver=True`.
-        """
-
-
-class SymbolicScopedSparseLinearSolver(
-    AbstractLinearSolver["SparseSymbolicState | SparseNumericState"]
-):
-    """A solver bound to one open symbolic-factorization scope.
-
-    Returned by `solver.factorize_symbolic(sparsity, as_solver=True)`, for the common
-    case where a solver and a scope derived from it are used together and would
-    otherwise have to be passed around as a pair:
-
-    ```python
-    with solver.factorize_symbolic(sparsity, as_solver=True) as scoped_solver:
-        x = lx.linear_solve(operator, b, solver=scoped_solver).value
-    ```
-
-    This is an ordinary `lineax.AbstractLinearSolver`, so it can be passed as
-    `solver=` anywhere the solver it came from can. The difference is its `init`,
-    which is the scope's `init`: every solve made through it reuses the scope's
-    symbolic factorization, and it is therefore only valid for operators sharing the
-    sparsity pattern the scope was opened with. Solving happens through the original
-    solver, so the numerical result is exactly that of passing `solver=solver,
-    state=scope.init(operator)` by hand.
-
-    Like the scope it wraps, it is only usable inside the `with` block that yielded
-    it: once that block exits, the underlying factorization is freed.
-    """
-
-    solver: AbstractSparseLinearSolver[Any]
-    """The solver the scope was opened from, which performs every solve."""
-    scope: SparseSymbolicScope
-    """The open symbolic-factorization scope every state is derived from."""
-
-    def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> SparseSymbolicState:
-        """Build a state reusing the scope's symbolic factorization.
-
-        Identical to the scope's own `init`, which is what restricts this solver to
-        operators with the scope's sparsity pattern.
-        """
-        return self.scope.init(operator, options)
-
-    def factorize(
-        self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> AbstractContextManager[SparseNumericState]:
-        """Also pre-compute the numeric factorization, reusing the symbolic one.
-
-        Identical to the scope's own `factorize`. `options` is accepted for parity
-        with `AbstractSparseLinearSolver.factorize` and unused, since a scope's
-        `factorize` takes none.
-        """
-        del options
-        return self.scope.factorize(operator)
-
-    def compute(
-        self,
-        state: SparseSymbolicState | SparseNumericState,
-        vector: PyTree[Array],
-        options: dict[str, Any],
-    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
-        return self.solver.compute(state, vector, options)
-
-    def transpose(
-        self, state: SparseSymbolicState | SparseNumericState, options: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any]]:
-        return self.solver.transpose(state, options)
-
-    def conj(
-        self, state: SparseSymbolicState | SparseNumericState, options: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any]]:
-        return self.solver.conj(state, options)
-
-    def assume_full_rank(self) -> bool:
-        return self.solver.assume_full_rank()
-
-
-SymbolicScopedSparseLinearSolver.__init__.__doc__ = """**Arguments:**
-
-- `solver`: the sparse solver performing the solves.
-- `scope`: an open symbolic-factorization scope, as opened by that solver's
-    `factorize_symbolic`.
-
-Usually not constructed directly: call `solver.factorize_symbolic(sparsity,
-as_solver=True)` instead, which opens the scope and pairs it with the solver.
-"""
-
-
-@contextmanager
-def as_scoped_solver(
-    solver: AbstractSparseLinearSolver[Any],
-    scope_manager: AbstractContextManager[SparseSymbolicScope],
-) -> Iterator[SymbolicScopedSparseLinearSolver]:
-    """Wrap an unopened `factorize_symbolic` scope into a scoped solver.
-
-    Shared implementation of `factorize_symbolic(..., as_solver=True)` for every
-    solver: opening and closing the scoped solver opens and closes the scope itself,
-    so the factorization lives exactly as long as it would have.
-    """
-    with scope_manager as scope:
-        yield SymbolicScopedSparseLinearSolver(solver, scope)
-
-
-@contextmanager
-def factorize_through_init(
-    solver: SparseLinearSolver,
-    operator: AbstractLinearOperator,
-    options: dict[str, Any],
-) -> Iterator[SparseNumericState]:
-    """Shared `factorize` behaviour: run `init`, then numeric-factorize its state.
-
-    Reused by both `KLU.factorize` and `Spsolve.factorize` (behaviour reuse via a
-    function instead of inheritance).
-    """
-    with solver.init(operator, options).factorize() as numeric_state:
-        yield numeric_state
-
-
-@runtime_checkable
-class _HandleOwningState(Protocol):
-    """A state that owns a native handle and must register a solve's result against
-    it, implemented by `KLU`'s and `Pardiso`'s symbolic/numeric state classes."""
-
-    def _register_solve_dependency(self, value: Any) -> None: ...
 
 
 def linear_solve(
     operator: AbstractLinearOperator,
     vector: PyTree[Any],
-    solver: AbstractLinearSolver = AutoLinearSolver(well_posed=True),
+    solver: Any = None,
     *,
     options: dict[str, Any] | None = None,
     state: PyTree[Any] = sentinel,
     throw: bool = True,
-) -> Solution:
-    """Drop-in replacement for `lineax.linear_solve`, needed for a state derived from
-    `KLU`'s or `Pardiso`'s `factorize_symbolic` scope when the scope is opened and
-    closed entirely inside one `jax.jit` call.
+) -> tuple[Solution, Any]:
+    """Solve `operator @ x = vector`, returning the solution and an updated state.
 
-    `lineax.linear_solve` stages the solve into a trace nested inside whichever trace
-    calls it. When the whole scope is traced together with the solve, that leaves the
-    scope's handle-freeing free loop, which runs in the *outer* trace, unable to see
-    the solve's result and unable to order the free after it. This function also
-    registers the result against `state`'s handle(s) itself, from the outer trace,
-    right here, once `lineax.linear_solve` returns.
+    A wrapper over `lineax.linear_solve` for the stateful sparse API. It runs the
+    solver's `init` or `update` to fold the operator into a state, solves, then tracks the
+    solution against the state so a later `solver.release(state)` is ordered after it.
+    Unlike `lineax.linear_solve`, it returns a `(solution, state)` tuple:
 
-    Solving without `state` set, or with a state that owns no handle (`Spsolve`, or a
-    solver's `.init()` state before any factorization), behaves exactly like
-    `lineax.linear_solve`: there is nothing to register.
+    ```python
+    solution, state = splineax.linear_solve(operator, vector, solver, state=state)
+    ```
 
-    A `SymbolicScopedSparseLinearSolver` carries its scope instead of being handed a
-    state, so there `lineax.linear_solve` would build the (handle-owning) state itself
-    and never hand it back in time to be registered. This function runs that `init`
-    first, exactly as `lineax.linear_solve` would have, and then registers against the
-    state it gets, so a scoped solver is safe under one traced scope too.
+    With no `state`, a fresh one is built with `solver.init`. The default solver is
+    `AutoSparseLinearSolver`, which picks a backend for the platform and precision.
     """
-    if state is sentinel and isinstance(solver, SymbolicScopedSparseLinearSolver):
-        # Same stop-gradient treatment `lineax.linear_solve` gives the operator before
-        # its own `init` call, so the state carries no tangents either way.
-        dynamic_operator, static_operator = eqx.partition(operator, eqx.is_array)
-        stopped_operator = eqx.combine(
-            jax.lax.stop_gradient(dynamic_operator), static_operator
-        )
-        state = solver.init(stopped_operator, {} if options is None else options)
-    with mark_via_linear_solve():
-        solution = _lx_linear_solve(
-            operator, vector, solver, options=options, state=state, throw=throw
-        )
-    if isinstance(state, _HandleOwningState):
-        state._register_solve_dependency(solution.value)
-    return solution
+    if solver is None:
+        # Imported here to avoid a cycle: `_auto` imports this module.
+        from splineax.solvers._auto import AutoSparseLinearSolver
+
+        solver = AutoSparseLinearSolver()
+    opts = {} if options is None else options
+    # `init`/`update` build the factorization. The operator is passed through as-is, so
+    # `update` can compare it by identity, and the solvers stop gradients on the values
+    # themselves before handing them to the native analyze and factor.
+    if state is sentinel:
+        state = solver.init(operator, opts)
+    else:
+        state = solver.update(state, operator, opts)
+    solution = _lx_linear_solve(
+        operator, vector, solver, options=options, state=state, throw=throw
+    )
+    # Order any later `release` after this solve. A no-op for solvers whose state owns
+    # nothing, such as `Spsolve`.
+    if hasattr(state, "track"):
+        state = state.track(solution)
+    return solution, state
