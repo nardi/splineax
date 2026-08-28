@@ -53,6 +53,7 @@ from lineax._tags import (
 )
 
 from ._bcoo import BCOOLinearOperator
+from ._tags import sparsity_tag_from_coloring
 
 JacobianMode = Literal["fwd", "rev"]
 
@@ -285,6 +286,12 @@ class SparseJacobianLinearOperator(AbstractLinearOperator):
                     "Pass at most one of `coloring` and `sparsity`, where `coloring` "
                     "must be an `asdex.ColoredPattern` or a `splineax.JacobianColoring`."
                 )
+
+        # A Jacobian follows one fixed pattern, so carry a content tag for it. Operators for
+        # the same pattern, and any BCOO materialised from them, then reuse a factorization.
+        # The transpose has a swapped pattern, so it carries none.
+        if not transposed:
+            self.tags = self.tags | {sparsity_tag_from_coloring(self.coloring)}
 
         forward_in_structure = strip_weak_dtype(jax.eval_shape(lambda: self.x))
         forward_out_structure = strip_weak_dtype(
