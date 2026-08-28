@@ -30,6 +30,7 @@ from splineax import (
     SparseJacobianLinearOperator,
     SparseJacobianLinearOperatorColoring,
     Spsolve,
+    sparsity_pattern_tag,
 )
 
 
@@ -110,6 +111,43 @@ def test_structures_swap_under_transpose() -> None:
     assert operator.out_structure() == jax.ShapeDtypeStruct((5,), dtype)
     assert transposed.in_structure() == jax.ShapeDtypeStruct((5,), dtype)
     assert transposed.out_structure() == jax.ShapeDtypeStruct((6,), dtype)
+
+
+def test_carries_a_pattern_tag_from_its_coloring() -> None:
+    """A Jacobian operator carries a `sparsity_pattern_tag` for the fixed pattern its
+    coloring describes, so solvers reuse a factorization without the caller tagging it."""
+    operator = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
+    assert sparsity_pattern_tag(operator) in operator.tags
+
+
+def test_operator_at_points_share_a_pattern_tag() -> None:
+    """Two operators from one `operator_at` factory carry equal tags, since their content
+    tags come from the same coloring, so they reuse each other's factorization."""
+    factory = SparseJacobianLinearOperatorColoring.detect(
+        banded_function, EVALUATION_POINT
+    )
+    first = factory.operator_at(EVALUATION_POINT)
+    second = factory.operator_at(EVALUATION_POINT + 3.0)
+    assert sparsity_pattern_tag(first) in second.tags
+
+
+def test_materialised_bcoo_inherits_the_pattern_tag() -> None:
+    """The BCOO from `lineax.materialise` carries the operator's pattern tag, so a solver
+    recognises it as sharing the Jacobian's pattern."""
+    operator = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
+    materialised = lx.materialise(operator)
+    assert sparsity_pattern_tag(operator) in materialised.tags
+
+
+def test_transpose_carries_no_forward_pattern_tag() -> None:
+    """The transpose has a swapped pattern, so it does not carry the forward tag, and in
+    fact carries no content pattern tag at all."""
+    from splineax.operators._tags import _ContentPatternTag
+
+    operator = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
+    transposed = operator.transpose()
+    assert sparsity_pattern_tag(operator) not in transposed.tags
+    assert not any(isinstance(tag, _ContentPatternTag) for tag in transposed.tags)
 
 
 def test_construction_paths_agree() -> None:

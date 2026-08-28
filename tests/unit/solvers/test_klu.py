@@ -88,6 +88,36 @@ def test_update_same_pattern_reuses_symbol_and_refactors() -> None:
     assert refactor_calls, "update did not attempt a pivot-reusing refactor"
 
 
+def _square_jacobian_function(x: jnp.ndarray, args: object) -> jnp.ndarray:
+    """A square nonlinear map with an invertible banded Jacobian."""
+    del args
+    return 3.0 * x + x**2 + 0.5 * jnp.roll(x, 1) * x
+
+
+def test_update_across_jacobian_points_reuses_analysis() -> None:
+    """Operators from one `operator_at` factory carry a pattern tag from their shared
+    coloring, so `update` across evaluation points reuses the analysis, and a BCOO
+    materialised from such an operator does too, so `analyze` runs once each."""
+    point = jnp.linspace(0.5, 1.5, 5)
+    factory = splx.SparseJacobianLinearOperatorColoring.detect(
+        _square_jacobian_function, point
+    )
+    first = factory.operator_at(point)
+    second = factory.operator_at(point + 0.3)
+    solver = KLU()
+    with _spy("analyze") as analyze_calls:
+        state = solver.init(first, {})
+        across_points = solver.update(state, second)
+        across_materialised = solver.update(state, lx.materialise(second))
+    assert across_points.symbol is state.symbol, "update re-analyzed another point"
+    assert across_materialised.symbol is state.symbol, (
+        "update re-analyzed a materialised operator"
+    )
+    assert len(analyze_calls) == 1, (
+        "the shared Jacobian pattern was analyzed more than once"
+    )
+
+
 def test_update_falls_back_when_reused_pivots_go_bad() -> None:
     """When new values leave the reused pivots badly scaled, the guarded refactor falls
     back to a fresh factor, so the solve stays accurate. The second matrix zeros out a
