@@ -40,6 +40,12 @@ class StatefulSolver(Protocol[_StateT]):
     `update` and `release`. A solver satisfies it structurally, so no base class is
     needed. `update` folds new information about the operator into an existing state, and
     `release` says the state is done and its memory may go.
+
+    The states a solver produces from `init`, `update`, and a state's `track` should share
+    one pytree structure, so a state can be carried through a `scan` or `while_loop`, whose
+    carry has a fixed structure. The sparse `init_symbolic` state may differ, since it holds
+    only a symbolic analysis. Such a state must be `update`d before it is carried through a
+    loop, which `stateful_solve_transform` does for you by unrolling the first iteration.
     """
 
     def init(
