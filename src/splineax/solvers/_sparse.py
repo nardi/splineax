@@ -25,6 +25,7 @@ from splineax.operators._jacobian import (
     SparseJacobianLinearOperator,
     SparseJacobianLinearOperatorColoring,
 )
+from splineax.operators._tags import sparse_indices_sorted as sparse_indices_sorted
 from splineax.solvers._stateful import StatefulSolver
 
 # Everything `init_symbolic` accepts as a sparsity pattern.
@@ -67,21 +68,6 @@ def warn_if_unsorted(matrix: BCOO | BCSR, solver_name: str) -> None:
             PerformanceWarning,
             stacklevel=2,
         )
-
-
-class _HasRepr:
-    """A tag object whose only content is its repr, matching lineax's own tags."""
-
-    def __init__(self, string: str) -> None:
-        self.string = string
-
-    def __repr__(self) -> str:
-        return self.string
-
-
-sparse_indices_sorted = _HasRepr("sparse_indices_sorted")
-"""One global assertion that an operator's indices are already row-major sorted, so
-`Pardiso` and `Spsolve` may skip the sort they would otherwise do in `init`."""
 
 
 class _ContentPatternTag:
