@@ -6,7 +6,8 @@ stateful API (`init`, `update`, `release`, and a state's `track`).
 
 A solve inside a `lax.cond`, `lax.scan`, or `lax.while_loop` is threaded too, by carrying
 the state through the branches or the loop. This needs a solve before the region to create
-the state to thread. A solve reached only inside such a region, with no state yet, raises.
+the state to thread. A solve reached only inside such a region, with no state yet, raises. A
+solve inside a `jax.checkpoint` (`remat`) is threaded as well, keeping the checkpointing.
 """
 
 from collections.abc import Callable, Mapping
@@ -60,6 +61,14 @@ _SolveResult = tuple[PyTree[Array], RESULTS, dict[str, Any]]
 """What binding `linear_solve_p` returns: the solution, the result code, and the stats.
 
 The stats values are solver-defined, so they stay `Any`.
+"""
+
+_CUSTOM_DIFF_PRIMITIVES = frozenset({"custom_jvp_call", "custom_vjp_call"})
+"""The custom-differentiation primitives whose solves can pass through unthreaded.
+
+Their differentiation rule lives in an opaque callable, so the primal cannot be rewritten
+to thread the state without desyncing that rule. With the pass-through option the solve runs
+without reuse rather than raising.
 """
 
 _INLINE_PRIMITIVES = frozenset({"pjit", "jit", "closed_call", "core_call"})
@@ -182,10 +191,19 @@ class _StateThreadingInterpreter(Generic[_StateT]):
     solver: StatefulSolver[_StateT] | None
     """The last solver threaded, used by the caller to release the state."""
 
-    def __init__(self, filter_solver: _FilterSolver, state: _StateT | None) -> None:
+    pass_through_custom_diff: bool
+    """Whether a solve inside a `custom_jvp` or `custom_vjp` passes through instead of raising."""
+
+    def __init__(
+        self,
+        filter_solver: _FilterSolver,
+        state: _StateT | None,
+        pass_through_custom_diff: bool = False,
+    ) -> None:
         self.filter_solver = filter_solver
         self.state = state
         self.solver = None
+        self.pass_through_custom_diff = pass_through_custom_diff
 
     def interpret(self, jaxpr: Jaxpr, consts: list[Any], args: list[Any]) -> list[Any]:
         """Evaluate the jaxpr against these argument values, returning its output values."""
@@ -238,11 +256,20 @@ class _StateThreadingInterpreter(Generic[_StateT]):
                 return self._thread_scan(eqn, operands)
             if primitive.name == "while":
                 return self._thread_while(eqn, operands)
-            raise NotImplementedError(
-                "`stateful_solve_transform` cannot thread a solver state through a solve "
-                f"inside `{primitive.name}`. Move the solve out of it, or drop the "
-                "transform for this function."
+            if primitive.name == "remat2":
+                return self._thread_remat(eqn, operands)
+            passes_through = (
+                self.pass_through_custom_diff
+                and primitive.name in _CUSTOM_DIFF_PRIMITIVES
             )
+            if not passes_through:
+                raise NotImplementedError(
+                    "`stateful_solve_transform` cannot thread a solver state through a "
+                    f"solve inside `{primitive.name}`. Move the solve out of it, or drop "
+                    "the transform for this function."
+                )
+            # Pass the custom-diff primitive through unchanged. Its solve runs but does not
+            # reuse a factorization, since the state cannot cross its opaque rule.
 
         bind_params = primitive.get_bind_params(eqn.params)
         result = primitive.bind(*operands, **bind_params)
@@ -302,7 +329,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         """
         incoming = jax.tree_util.tree_unflatten(state_treedef, state_leaves)
         inner: _StateThreadingInterpreter[_StateT] = _StateThreadingInterpreter(
-            self.filter_solver, incoming
+            self.filter_solver, incoming, self.pass_through_custom_diff
         )
         outputs = inner.interpret(jaxpr, consts, operands)
         if inner.solver is not None:
@@ -507,6 +534,48 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         )
         return list(results[:num_carry])
 
+    def _thread_remat(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
+        """Thread the state through a `remat` whose body holds a matched solve.
+
+        `remat` is not inlined, since that would drop the rematerialisation it exists for.
+        Its body instead takes the state's leaves as extra operands and returns the threaded
+        state's leaves as extra outputs, and the wrapper is rebound so the checkpointing is
+        kept. Unlike a loop, a `remat` runs once and imposes no fixed carry, so a first solve
+        inside it may create the state, and the incoming and outgoing states may differ in
+        structure.
+        """
+        body = cast(Jaxpr, eqn.params["jaxpr"])
+        state_leaves, state_treedef = jax.tree_util.tree_flatten(self.state)
+        num_operands = len(operands)
+        output_state_treedef = state_treedef
+
+        def new_body(*args: Any) -> list[Any]:
+            """Run the checkpointed body, threading the state alongside its operands."""
+            nonlocal output_state_treedef
+            incoming = jax.tree_util.tree_unflatten(
+                state_treedef, list(args[num_operands:])
+            )
+            inner: _StateThreadingInterpreter[_StateT] = _StateThreadingInterpreter(
+                self.filter_solver, incoming, self.pass_through_custom_diff
+            )
+            outputs = inner.interpret(body, [], list(args[:num_operands]))
+            if inner.solver is not None:
+                self.solver = inner.solver
+            out_leaves, output_state_treedef = jax.tree_util.tree_flatten(inner.state)
+            return [*outputs, *out_leaves]
+
+        traced = self._prune_dead(make_jaxpr(new_body)(*operands, *state_leaves))
+        bind_params = eqn.primitive.get_bind_params(eqn.params)
+        bind_params["jaxpr"] = convert_constvars_jaxpr(traced.jaxpr)
+        results = eqn.primitive.bind(
+            *traced.consts, *operands, *state_leaves, **bind_params
+        )
+        num_outputs = len(eqn.outvars)
+        self.state = jax.tree_util.tree_unflatten(
+            output_state_treedef, list(results[num_outputs:])
+        )
+        return list(results[:num_outputs])
+
 
 class _StagedComputation(NamedTuple, Generic[_StateT]):
     """The pruned jaxpr and metadata cached for one call signature."""
@@ -553,6 +622,7 @@ def stateful_solve_transform(
     *,
     filter_solver: _FilterSolver = StatefulSolver,
     return_final_state: bool | None = None,
+    pass_through_custom_diff: bool = False,
 ) -> _WrappedFunction[_OutputT]:
     """Thread a solver state through a function's `lineax.linear_solve` calls.
 
@@ -570,6 +640,9 @@ def stateful_solve_transform(
     - `return_final_state`: when true the wrapped function returns `(output, final_state)`,
         when false it returns the output alone and releases the threaded state. The default is
         true when an initial `state` is passed at call time, false otherwise.
+    - `pass_through_custom_diff`: by default a matched solve inside a `custom_jvp` or
+        `custom_vjp` raises, since the state cannot cross the custom rule. Set this true to let
+        such a solve run without threading, so it works but does not reuse a factorization.
 
     **Returns:**
 
@@ -619,7 +692,7 @@ def stateful_solve_transform(
                 *call_flat_leaves
             )
             interpreter: _StateThreadingInterpreter[Any] = _StateThreadingInterpreter(
-                filter_solver, initial_state
+                filter_solver, initial_state, pass_through_custom_diff
             )
             outputs = interpreter.interpret(
                 closed.jaxpr, closed.consts, call_flat_leaves

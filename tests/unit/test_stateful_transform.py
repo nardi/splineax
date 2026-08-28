@@ -4,7 +4,8 @@ The transform is checked against the untransformed function on hand-written algo
 the benchmark is exact: same output, plus a threaded state that reuses a factorization. It
 covers correctness, factorization reuse, composition with `jit`/`vmap`/`jacfwd`/`jacrev`,
 per-signature caching, the filter-primitive round-trip, threading through a `cond`, `scan`,
-and `while_loop`, the `remat` guard, the lifecycle paths, and the solver filter.
+`while_loop`, and `remat`, the opt-in custom-diff pass-through, the lifecycle paths, and the
+solver filter.
 """
 
 from __future__ import annotations
@@ -427,8 +428,39 @@ def test_remat_without_a_solve_passes_through() -> None:
     assert _count_primitive(threaded.jaxpr, "remat") == 1
 
 
-def test_solve_inside_remat_raises() -> None:
-    """A matched solve inside `remat` is not threaded and raises, naming the primitive."""
+def _remat_fn(tag: object):
+    """A function that solves once, then solves again inside a `jax.checkpoint`."""
+    indices = _indices()
+
+    def fn(data: jax.Array, b: jax.Array):
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=(3, 3)), tags=tag
+        )
+        first = lx.linear_solve(operator, b, splx.KLU()).value
+
+        def solve(v):
+            return lx.linear_solve(operator, v, splx.KLU()).value
+
+        return first + jax.checkpoint(solve)(b * 2.0)
+
+    return fn
+
+
+def test_threads_a_solve_inside_remat() -> None:
+    """A solve inside a `jax.checkpoint` is threaded, so the output matches, the shared
+    pattern analyzes once, and the rematerialisation boundary survives."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _remat_fn(tag)
+    run = splx.stateful_solve_transform(fn)
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+    threaded = make_jaxpr(lambda d: run(d, _b1()))(_data())
+    assert _count_primitive(threaded.jaxpr, "analyze") == 1
+    assert _count_primitive(threaded.jaxpr, "remat2") == 1
+
+
+def test_remat_threads_a_first_solve_without_prior_state() -> None:
+    """A `remat` runs once, so a first solve inside it may create the state, unlike a loop.
+    With no prior solve the output still matches the untransformed function."""
     indices = _indices()
 
     def fn(data, b):
@@ -438,8 +470,22 @@ def test_solve_inside_remat_raises() -> None:
 
         return jax.checkpoint(solve)(b)
 
-    with pytest.raises(NotImplementedError, match="remat"):
-        splx.stateful_solve_transform(fn)(_data(), _b1())
+    run = splx.stateful_solve_transform(fn)
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+
+
+def test_remat_composes_with_grad() -> None:
+    """`grad` of a function whose `remat` threads a solve matches the plain one, so the
+    rewrite keeps working under the rematerialising backward pass."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _remat_fn(tag)
+    run = splx.stateful_solve_transform(fn)
+    data = _data()
+    assert jnp.allclose(
+        jax.grad(lambda b: jnp.sum(run(data, b) ** 2))(_b1()),
+        jax.grad(lambda b: jnp.sum(fn(data, b) ** 2))(_b1()),
+        atol=1e-6,
+    )
 
 
 def test_return_final_state_paths() -> None:
@@ -480,6 +526,70 @@ def test_return_final_state_paths() -> None:
     )
     assert isinstance(out_false, jax.Array)
     assert jnp.allclose(out_false, expected, atol=1e-8)
+
+
+def test_custom_jvp_solve_raises_by_default() -> None:
+    """A matched solve inside a `custom_jvp` raises by default, since the state cannot cross
+    the custom rule."""
+    indices = _indices()
+
+    @jax.custom_jvp
+    def solve(data, b):
+        operator = splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)))
+        return lx.linear_solve(operator, b, splx.KLU()).value
+
+    @solve.defjvp
+    def _solve_jvp(primals, tangents):
+        (data, b), (_, b_dot) = primals, tangents
+        return solve(data, b), b_dot
+
+    with pytest.raises(NotImplementedError, match="custom_jvp"):
+        splx.stateful_solve_transform(solve)(_data(), _b1())
+
+
+def test_custom_jvp_solve_passes_through_when_opted_in() -> None:
+    """With `pass_through_custom_diff`, a solve inside a `custom_jvp` runs unthreaded, so the
+    output matches and the primitive is left in the jaxpr rather than rewritten."""
+    indices = _indices()
+
+    @jax.custom_jvp
+    def solve(data, b):
+        operator = splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)))
+        return lx.linear_solve(operator, b, splx.KLU()).value
+
+    @solve.defjvp
+    def _solve_jvp(primals, tangents):
+        (data, b), (_, b_dot) = primals, tangents
+        return solve(data, b), b_dot
+
+    run = splx.stateful_solve_transform(solve, pass_through_custom_diff=True)
+    assert jnp.allclose(run(_data(), _b1()), solve(_data(), _b1()), atol=1e-8)
+    threaded = make_jaxpr(lambda d: run(d, _b1()))(_data())
+    assert _count_primitive(threaded.jaxpr, "custom_jvp_call") >= 1
+
+
+def test_custom_vjp_solve_passes_through_when_opted_in() -> None:
+    """The pass-through covers `custom_vjp` too, so a solve inside one runs unthreaded and
+    the primitive is left in the jaxpr."""
+    indices = _indices()
+
+    @jax.custom_vjp
+    def solve(data, b):
+        operator = splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)))
+        return lx.linear_solve(operator, b, splx.KLU()).value
+
+    def solve_fwd(data, b):
+        return solve(data, b), None
+
+    def solve_bwd(_, cotangent):
+        return None, cotangent
+
+    solve.defvjp(solve_fwd, solve_bwd)
+
+    run = splx.stateful_solve_transform(solve, pass_through_custom_diff=True)
+    assert jnp.allclose(run(_data(), _b1()), solve(_data(), _b1()), atol=1e-8)
+    threaded = make_jaxpr(lambda d: run(d, _b1()))(_data())
+    assert _count_primitive(threaded.jaxpr, "custom_vjp_call") >= 1
 
 
 def test_filter_solver_skips_a_dense_solve() -> None:
