@@ -3,8 +3,8 @@
 The transform is checked against the untransformed function on hand-written algorithms, so
 the benchmark is exact: same output, plus a threaded state that reuses a factorization. It
 covers correctness, factorization reuse, composition with `jit`/`vmap`/`jacfwd`/`jacrev`,
-per-signature caching, the filter-primitive round-trip, threading through a `cond`, the
-`while` and `remat` guards, the lifecycle paths, and the solver filter.
+per-signature caching, the filter-primitive round-trip, threading through a `cond`, `scan`,
+and `while_loop`, the `remat` guard, the lifecycle paths, and the solver filter.
 """
 
 from __future__ import annotations
@@ -309,8 +309,88 @@ def test_cond_without_prior_state_raises() -> None:
         splx.stateful_solve_transform(fn)(_data(), _b1(), jnp.array(1.0))
 
 
-def test_solve_inside_lax_while_raises() -> None:
-    """A solve inside a `while_loop` is not threaded yet and raises, naming the primitive."""
+def _scan_fn(tag: object):
+    """A function that solves once, then solves each step of a `scan` over right-hand sides."""
+    indices = _indices()
+
+    def fn(data: jax.Array, b: jax.Array):
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=(3, 3)), tags=tag
+        )
+        start = lx.linear_solve(operator, b, splx.KLU()).value
+
+        def body(carry: jax.Array, rhs: jax.Array):
+            solution = lx.linear_solve(operator, carry + rhs, splx.KLU()).value
+            return solution, solution
+
+        final, _ = jax.lax.scan(body, start, jnp.stack([b, b * 2.0, b * 3.0]))
+        return final
+
+    return fn
+
+
+def _while_fn(tag: object):
+    """A function that solves once, then solves each step of a fixed-count `while_loop`."""
+    indices = _indices()
+
+    def fn(data: jax.Array, b: jax.Array):
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=(3, 3)), tags=tag
+        )
+        start = lx.linear_solve(operator, b, splx.KLU()).value
+
+        def body(carry):
+            i, x = carry
+            return i + 1, lx.linear_solve(operator, x + b, splx.KLU()).value
+
+        _, final = jax.lax.while_loop(lambda c: c[0] < 3, body, (0, start))
+        return final
+
+    return fn
+
+
+def test_threads_a_solve_inside_scan() -> None:
+    """A solve in a `scan` body is threaded, so the output matches and the shared pattern
+    analyzes once across the prior solve and every iteration."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _scan_fn(tag)
+    run = splx.stateful_solve_transform(fn)
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+    threaded = make_jaxpr(lambda d: run(d, _b1()))(_data())
+    assert _count_primitive(threaded.jaxpr, "analyze") == 1
+
+
+def test_threads_a_solve_inside_while() -> None:
+    """A solve in a `while_loop` body is threaded, so the output matches and the shared
+    pattern analyzes once across the prior solve and every iteration."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _while_fn(tag)
+    run = splx.stateful_solve_transform(fn)
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+    threaded = make_jaxpr(lambda d: run(d, _b1()))(_data())
+    assert _count_primitive(threaded.jaxpr, "analyze") == 1
+
+
+def test_scan_composes_with_jit_and_grad() -> None:
+    """`jit` and `grad` of a function whose `scan` threads a solve match the plain one, so
+    the loop-carry rewrite composes with the outer transforms."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _scan_fn(tag)
+    run = splx.stateful_solve_transform(fn)
+    data = _data()
+    assert jnp.allclose(
+        jax.jit(lambda b: run(data, b))(_b1()), fn(data, _b1()), atol=1e-8
+    )
+    assert jnp.allclose(
+        jax.grad(lambda b: jnp.sum(run(data, b) ** 2))(_b1()),
+        jax.grad(lambda b: jnp.sum(fn(data, b) ** 2))(_b1()),
+        atol=1e-6,
+    )
+
+
+def test_loop_without_prior_state_raises() -> None:
+    """Threading into a loop needs a state already, so a first solve inside a `while_loop`
+    body with no prior solve raises a clear error naming the region."""
     indices = _indices()
 
     def fn(data, b):
@@ -323,7 +403,7 @@ def test_solve_inside_lax_while_raises() -> None:
         _, result = jax.lax.while_loop(lambda c: c[0] < 2, body, (0, b))
         return result
 
-    with pytest.raises(NotImplementedError, match="while"):
+    with pytest.raises(NotImplementedError, match="while_loop"):
         splx.stateful_solve_transform(fn)(_data(), _b1())
 
 
