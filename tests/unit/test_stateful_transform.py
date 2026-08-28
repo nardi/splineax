@@ -389,23 +389,96 @@ def test_scan_composes_with_jit_and_grad() -> None:
     )
 
 
-def test_loop_without_prior_state_raises() -> None:
-    """Threading into a loop needs a state already, so a first solve inside a `while_loop`
-    body with no prior solve raises a clear error naming the region."""
+def _loop_only_scan_fn(tag: object):
+    """A function whose only solves are inside a `scan`, with no solve before it."""
     indices = _indices()
 
-    def fn(data, b):
-        operator = splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)))
+    def fn(data: jax.Array, b: jax.Array):
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=(3, 3)), tags=tag
+        )
+
+        def body(carry: jax.Array, rhs: jax.Array):
+            solution = lx.linear_solve(operator, carry + rhs, splx.KLU()).value
+            return solution, solution
+
+        final, _ = jax.lax.scan(body, b, jnp.stack([b, b * 2.0, b * 3.0]))
+        return final
+
+    return fn
+
+
+def _loop_only_while_fn(tag: object):
+    """A function whose only solves are inside a `while_loop`, with no solve before it."""
+    indices = _indices()
+
+    def fn(data: jax.Array, b: jax.Array):
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=(3, 3)), tags=tag
+        )
 
         def body(carry):
             i, x = carry
-            return i + 1, lx.linear_solve(operator, x, splx.KLU()).value
+            return i + 1, lx.linear_solve(operator, x + b, splx.KLU()).value
 
-        _, result = jax.lax.while_loop(lambda c: c[0] < 2, body, (0, b))
-        return result
+        _, final = jax.lax.while_loop(lambda c: c[0] < 3, body, (0, b))
+        return final
 
-    with pytest.raises(NotImplementedError, match="while_loop"):
-        splx.stateful_solve_transform(fn)(_data(), _b1())
+    return fn
+
+
+def test_scan_without_prior_state_threads() -> None:
+    """A `scan` whose only solves are inside it has its first iteration unrolled to create the
+    state, so the output matches and the shared pattern analyzes once."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _loop_only_scan_fn(tag)
+    run = splx.stateful_solve_transform(fn)
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+    threaded = make_jaxpr(lambda d: run(d, _b1()))(_data())
+    assert _count_primitive(threaded.jaxpr, "analyze") == 1
+
+
+def test_while_without_prior_state_threads() -> None:
+    """A `while_loop` whose only solves are inside it unrolls its first iteration behind a
+    guard, so the output matches and the shared pattern analyzes once."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _loop_only_while_fn(tag)
+    run = splx.stateful_solve_transform(fn)
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+    threaded = make_jaxpr(lambda d: run(d, _b1()))(_data())
+    assert _count_primitive(threaded.jaxpr, "analyze") == 1
+
+
+def test_while_that_runs_zero_times_keeps_its_carry() -> None:
+    """When the loop condition is false at once, the unrolled solve is discarded and the
+    original carry is returned, matching the untransformed function."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    indices = _indices()
+
+    def fn(data, b):
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=(3, 3)), tags=tag
+        )
+
+        def body(carry):
+            i, x = carry
+            return i + 1, lx.linear_solve(operator, x + b, splx.KLU()).value
+
+        _, final = jax.lax.while_loop(lambda c: c[0] < 0, body, (0, b))
+        return final
+
+    run = splx.stateful_solve_transform(fn)
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+
+
+def test_incompatible_seed_state_raises_a_clear_error() -> None:
+    """A state whose structure differs from the loop-carry structure, such as one from
+    `init_symbolic`, cannot be carried, so threading it into a loop raises a clear error."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    run = splx.stateful_solve_transform(_loop_only_scan_fn(tag))
+    symbolic_state = splx.KLU().init_symbolic(BCOO.fromdense(_dense()))
+    with pytest.raises(ValueError, match="pytree structure"):
+        run(_data(), _b1(), state=symbolic_state)
 
 
 def test_remat_without_a_solve_passes_through() -> None:

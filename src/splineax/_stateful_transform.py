@@ -4,10 +4,11 @@
 solver state through its solves, so they reuse a factorization, using only the generic
 stateful API (`init`, `update`, `release`, and a state's `track`).
 
-A solve inside a `lax.cond`, `lax.scan`, or `lax.while_loop` is threaded too, by carrying
-the state through the branches or the loop. This needs a solve before the region to create
-the state to thread. A solve reached only inside such a region, with no state yet, raises. A
-solve inside a `jax.checkpoint` (`remat`) is threaded as well, keeping the checkpointing.
+A solve inside a `lax.scan` or `lax.while_loop` is threaded by carrying the state through
+the loop, and the first iteration is unrolled to create the state when there is none yet.
+A solve inside a `lax.cond` is threaded through the branches, and needs a state from an
+earlier solve. A solve inside a `jax.checkpoint` (`remat`) is threaded too, keeping the
+checkpointing.
 """
 
 from collections.abc import Callable, Mapping
@@ -17,6 +18,7 @@ import equinox as eqx
 import equinox.internal as eqxi
 import jax
 import jax.core
+import jax.numpy as jnp
 from jax import make_jaxpr
 from jax._src.interpreters.partial_eval import convert_constvars_jaxpr, dce_jaxpr
 from jax.extend.core import ClosedJaxpr, Jaxpr, JaxprEqn, Literal, Primitive, Var
@@ -320,12 +322,14 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         operands: list[Any],
         state_leaves: list[Any],
         state_treedef: jax.tree_util.PyTreeDef,
-    ) -> tuple[list[Any], list[Any]]:
+    ) -> tuple[list[Any], list[Any], jax.tree_util.PyTreeDef]:
         """Interpret a nested body seeded with the carried state, returning its outputs.
 
         Runs a fresh interpreter over the body, threading the state rebuilt from
-        `state_leaves`, and returns the body's own outputs together with the threaded state's
-        leaves. Records the solver on this interpreter so the caller can release the state.
+        `state_leaves`, and returns the body's own outputs, the threaded state's leaves, and
+        that state's structure. Records the solver on this interpreter so the caller can
+        release the state. The outgoing structure may differ from the incoming one when a
+        first solve creates the state, which is why it is returned rather than assumed.
         """
         incoming = jax.tree_util.tree_unflatten(state_treedef, state_leaves)
         inner: _StateThreadingInterpreter[_StateT] = _StateThreadingInterpreter(
@@ -334,8 +338,8 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         outputs = inner.interpret(jaxpr, consts, operands)
         if inner.solver is not None:
             self.solver = inner.solver
-        out_leaves, _ = jax.tree_util.tree_flatten(inner.state)
-        return outputs, out_leaves
+        out_leaves, out_treedef = jax.tree_util.tree_flatten(inner.state)
+        return outputs, out_leaves, out_treedef
 
     @staticmethod
     def _prune_dead(traced: ClosedJaxpr) -> ClosedJaxpr:
@@ -380,7 +384,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             """Trace one branch into a jaxpr that also threads the state."""
 
             def threaded(*args: Any) -> list[Any]:
-                outputs, out_leaves = self._thread_nested_body(
+                outputs, out_leaves, _ = self._thread_nested_body(
                     branch.jaxpr,
                     branch.consts,
                     list(args[:num_operands]),
@@ -405,26 +409,55 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         )
         return list(results[:num_outputs])
 
-    def _thread_scan(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
-        """Thread the state through a `scan` whose body holds a matched solve.
+    def _rebind_unchanged(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
+        """Rebind a primitive with its operands unchanged, threading no state."""
+        bind_params = eqn.primitive.get_bind_params(eqn.params)
+        result = eqn.primitive.bind(*operands, **bind_params)
+        return list(result) if eqn.primitive.multiple_results else [result]
 
-        The state's leaves become extra carries, placed after the existing carries. The body
-        is rewritten to thread them, so each iteration reuses the factorization from the last,
-        and the final carry holds the state after the loop.
+    def _check_loop_state_structure(
+        self,
+        region: str,
+        seed_treedef: jax.tree_util.PyTreeDef,
+        body_out_treedef: jax.tree_util.PyTreeDef,
+    ) -> None:
+        """Raise if the body returns a state whose structure differs from the carried one.
+
+        A loop carry has one fixed structure, so a solver whose `update` changes the state's
+        pytree cannot be carried. This turns the raw carry-mismatch into a clear message.
         """
-        self._require_prior_state("scan")
+        if seed_treedef != body_out_treedef:
+            raise ValueError(
+                f"A solve threaded through `{region}` produced a state whose structure "
+                "changed between iterations. A solver's states must share one pytree "
+                "structure across `init`, `update`, and `track` to be carried through a "
+                "loop. A state from `init_symbolic` differs, so `update` it before the loop."
+            )
+
+    def _augmented_scan(
+        self,
+        eqn: JaxprEqn,
+        num_consts: int,
+        num_carry: int,
+        length: int,
+        consts_values: list[Any],
+        carry_values: list[Any],
+        stacked_xs: list[Any],
+    ) -> tuple[list[Any], list[Any]]:
+        """Rebind a `scan` that also carries `self.state`, seeded from it.
+
+        Requires `self.state` to already hold a loop-carry-shaped state. Returns the final
+        carry leaves and the stacked per-iteration output leaves, and updates `self.state`.
+        """
         body = cast(ClosedJaxpr, eqn.params["jaxpr"])
-        num_consts = eqn.params["num_consts"]
-        num_carry = eqn.params["num_carry"]
-        consts_values = operands[:num_consts]
-        carry_values = operands[num_consts : num_consts + num_carry]
-        stacked_xs = operands[num_consts + num_carry :]
         per_iteration_xs = [leaf[0] for leaf in stacked_xs]
         state_leaves, state_treedef = jax.tree_util.tree_flatten(self.state)
         num_state = len(state_leaves)
+        body_out_treedef = state_treedef
 
         def new_body(*args: Any) -> list[Any]:
             """Run one scan step, threading the state carried alongside the loop carry."""
+            nonlocal body_out_treedef
             offset = num_consts
             consts = list(args[:offset])
             carry = list(args[offset : offset + num_carry])
@@ -432,7 +465,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             carried_state = list(args[offset : offset + num_state])
             offset += num_state
             per_iteration = list(args[offset:])
-            outputs, out_leaves = self._thread_nested_body(
+            outputs, out_leaves, body_out_treedef = self._thread_nested_body(
                 body.jaxpr,
                 body.consts,
                 [*consts, *carry, *per_iteration],
@@ -446,11 +479,13 @@ class _StateThreadingInterpreter(Generic[_StateT]):
                 *consts_values, *carry_values, *state_leaves, *per_iteration_xs
             )
         )
+        self._check_loop_state_structure("scan", state_treedef, body_out_treedef)
         hoisted_body, hoisted_consts = self._hoist_consts(traced)
         bind_params = eqn.primitive.get_bind_params(eqn.params)
         bind_params["jaxpr"] = hoisted_body
         bind_params["num_consts"] = num_consts + len(hoisted_consts)
         bind_params["num_carry"] = num_carry + num_state
+        bind_params["length"] = length
         results = eqn.primitive.bind(
             *hoisted_consts,
             *consts_values,
@@ -462,26 +497,90 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         self.state = jax.tree_util.tree_unflatten(
             state_treedef, list(results[num_carry : num_carry + num_state])
         )
-        return [*results[:num_carry], *results[num_carry + num_state :]]
+        carry_final = list(results[:num_carry])
+        stacked_ys = list(results[num_carry + num_state :])
+        return carry_final, stacked_ys
 
-    def _thread_while(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
-        """Thread the state through a `while_loop` whose body holds a matched solve.
+    def _thread_scan(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
+        """Thread the state through a `scan` whose body holds a matched solve.
 
-        The state's leaves become extra carries. The condition takes them and ignores them,
-        the body threads them, so the loop reuses the factorization across iterations and the
-        final carry holds the state after the loop.
+        The state's leaves become extra carries, placed after the existing carries, so each
+        iteration reuses the factorization from the last and the final carry holds the state
+        after the loop. With no prior state the first iteration is unrolled to
+        create it, since `None` cannot be threaded as a carry.
         """
-        self._require_prior_state("while_loop")
+        num_consts = eqn.params["num_consts"]
+        num_carry = eqn.params["num_carry"]
+        length = eqn.params["length"]
+        consts_values = operands[:num_consts]
+        carry_values = operands[num_consts : num_consts + num_carry]
+        stacked_xs = operands[num_consts + num_carry :]
+
+        if length == 0:
+            # The body never runs, so no solve happens and there is nothing to thread.
+            return self._rebind_unchanged(eqn, operands)
+
+        if self.state is not None:
+            carry_final, stacked_ys = self._augmented_scan(
+                eqn,
+                num_consts,
+                num_carry,
+                length,
+                consts_values,
+                carry_values,
+                stacked_xs,
+            )
+            return [*carry_final, *stacked_ys]
+
+        # Unroll iteration zero to create the state, then scan the remaining iterations.
+        body = cast(ClosedJaxpr, eqn.params["jaxpr"])
+        first_xs = [leaf[0] for leaf in stacked_xs]
+        _, none_treedef = jax.tree_util.tree_flatten(None)
+        outputs, first_state_leaves, first_state_treedef = self._thread_nested_body(
+            body.jaxpr,
+            body.consts,
+            [*consts_values, *carry_values, *first_xs],
+            [],
+            none_treedef,
+        )
+        first_carry = list(outputs[:num_carry])
+        first_ys = list(outputs[num_carry:])
+        self.state = jax.tree_util.tree_unflatten(
+            first_state_treedef, first_state_leaves
+        )
+        if length == 1:
+            return [*first_carry, *[leaf[None] for leaf in first_ys]]
+        tail_xs = [leaf[1:] for leaf in stacked_xs]
+        carry_final, tail_ys = self._augmented_scan(
+            eqn, num_consts, num_carry, length - 1, consts_values, first_carry, tail_xs
+        )
+        stacked_ys = [
+            jnp.concatenate([first[None], rest], axis=0)
+            for first, rest in zip(first_ys, tail_ys)
+        ]
+        return [*carry_final, *stacked_ys]
+
+    def _augmented_while(
+        self,
+        eqn: JaxprEqn,
+        cond_consts: list[Any],
+        body_consts: list[Any],
+        carry_values: list[Any],
+        seed_leaves: list[Any],
+        seed_treedef: jax.tree_util.PyTreeDef,
+    ) -> tuple[list[Any], list[Any]]:
+        """Rebind a `while` that also carries a state, seeded from `seed_leaves`.
+
+        The condition takes the state leaves and ignores them, the body threads them. Returns
+        the final carry leaves and the final state leaves.
+        """
         cond_jaxpr = cast(ClosedJaxpr, eqn.params["cond_jaxpr"])
         body_jaxpr = cast(ClosedJaxpr, eqn.params["body_jaxpr"])
         cond_nconsts = eqn.params["cond_nconsts"]
         body_nconsts = eqn.params["body_nconsts"]
-        cond_consts = operands[:cond_nconsts]
-        body_consts = operands[cond_nconsts : cond_nconsts + body_nconsts]
-        carry_values = operands[cond_nconsts + body_nconsts :]
         num_carry = len(carry_values)
-        state_leaves, state_treedef = jax.tree_util.tree_flatten(self.state)
-        num_state = len(state_leaves)
+        num_state = len(seed_leaves)
+        body_out_treedef = seed_treedef
 
         def new_cond(*args: Any) -> list[Any]:
             """Evaluate the loop condition, ignoring the extra state carry."""
@@ -493,26 +592,28 @@ class _StateThreadingInterpreter(Generic[_StateT]):
 
         def new_body(*args: Any) -> list[Any]:
             """Run one loop step, threading the state carried alongside the loop carry."""
+            nonlocal body_out_treedef
             offset = body_nconsts
             consts = list(args[:offset])
             carry = list(args[offset : offset + num_carry])
             offset += num_carry
             carried_state = list(args[offset : offset + num_state])
-            outputs, out_leaves = self._thread_nested_body(
+            outputs, out_leaves, body_out_treedef = self._thread_nested_body(
                 body_jaxpr.jaxpr,
                 body_jaxpr.consts,
                 [*consts, *carry],
                 carried_state,
-                state_treedef,
+                seed_treedef,
             )
             return [*outputs, *out_leaves]
 
         traced_cond = self._prune_dead(
-            make_jaxpr(new_cond)(*cond_consts, *carry_values, *state_leaves)
+            make_jaxpr(new_cond)(*cond_consts, *carry_values, *seed_leaves)
         )
         traced_body = self._prune_dead(
-            make_jaxpr(new_body)(*body_consts, *carry_values, *state_leaves)
+            make_jaxpr(new_body)(*body_consts, *carry_values, *seed_leaves)
         )
+        self._check_loop_state_structure("while_loop", seed_treedef, body_out_treedef)
         cond_closed, cond_hoisted = self._hoist_consts(traced_cond)
         body_closed, body_hoisted = self._hoist_consts(traced_body)
         bind_params = eqn.primitive.get_bind_params(eqn.params)
@@ -526,13 +627,72 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             *body_hoisted,
             *body_consts,
             *carry_values,
-            *state_leaves,
+            *seed_leaves,
             **bind_params,
         )
-        self.state = jax.tree_util.tree_unflatten(
-            state_treedef, list(results[num_carry : num_carry + num_state])
+        carry_final = list(results[:num_carry])
+        state_final = list(results[num_carry : num_carry + num_state])
+        return carry_final, state_final
+
+    def _thread_while(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
+        """Thread the state through a `while_loop` whose body holds a matched solve.
+
+        The state's leaves become extra carries. With a prior state the loop is rebound to
+        carry it. With no prior state the first iteration is unrolled and run once to create
+        the state, guarded by the loop condition so a loop that would run zero times keeps its
+        original carry.
+        """
+        cond_nconsts = eqn.params["cond_nconsts"]
+        body_nconsts = eqn.params["body_nconsts"]
+        cond_consts = operands[:cond_nconsts]
+        body_consts = operands[cond_nconsts : cond_nconsts + body_nconsts]
+        carry_values = operands[cond_nconsts + body_nconsts :]
+
+        if self.state is not None:
+            seed_leaves, seed_treedef = jax.tree_util.tree_flatten(self.state)
+            carry_final, state_final = self._augmented_while(
+                eqn, cond_consts, body_consts, carry_values, seed_leaves, seed_treedef
+            )
+            self.state = jax.tree_util.tree_unflatten(seed_treedef, state_final)
+            return carry_final
+
+        cond_jaxpr = cast(ClosedJaxpr, eqn.params["cond_jaxpr"])
+        body_jaxpr = cast(ClosedJaxpr, eqn.params["body_jaxpr"])
+        num_carry = len(carry_values)
+        _, none_treedef = jax.tree_util.tree_flatten(None)
+        first_carry, first_state_leaves, first_state_treedef = self._thread_nested_body(
+            body_jaxpr.jaxpr,
+            body_jaxpr.consts,
+            [*body_consts, *carry_values],
+            [],
+            none_treedef,
         )
-        return list(results[:num_carry])
+        num_state = len(first_state_leaves)
+        predicate = jax.core.eval_jaxpr(
+            cond_jaxpr.jaxpr, cond_jaxpr.consts, *cond_consts, *carry_values
+        )[0]
+
+        def run_rest() -> list[Any]:
+            """Continue the loop from the unrolled carry and state."""
+            carry_final, state_final = self._augmented_while(
+                eqn,
+                cond_consts,
+                body_consts,
+                list(first_carry),
+                first_state_leaves,
+                first_state_treedef,
+            )
+            return [*carry_final, *state_final]
+
+        def skip() -> list[Any]:
+            """Keep the original carry when the loop would run zero times."""
+            return [*carry_values, *first_state_leaves]
+
+        combined = jax.lax.cond(predicate, run_rest, skip)
+        self.state = jax.tree_util.tree_unflatten(
+            first_state_treedef, list(combined[num_carry : num_carry + num_state])
+        )
+        return list(combined[:num_carry])
 
     def _thread_remat(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
         """Thread the state through a `remat` whose body holds a matched solve.
