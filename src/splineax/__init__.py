@@ -1,3 +1,6 @@
+from ._stateful_transform import (
+    stateful_solve_transform as stateful_solve_transform,
+)
 from .operators import (
     BCOOLinearOperator as BCOOLinearOperator,
 )
