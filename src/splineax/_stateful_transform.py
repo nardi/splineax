@@ -4,8 +4,8 @@
 solver state through its solves, so they reuse a factorization, using only the generic
 stateful API (`init`, `update`, `release`, and a state's `track`).
 
-A solve inside a `lax.scan`, `lax.while_loop`, or `lax.cond` is not threaded, and raises
-rather than silently missing the reuse.
+A solve inside a `lax.cond` is threaded through every branch. A solve inside a `lax.scan`
+or `lax.while_loop` is not threaded yet, and raises rather than silently missing the reuse.
 """
 
 from collections.abc import Callable, Mapping
@@ -231,6 +231,8 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         if any(
             _jaxpr_has_selected_solve(inner, self.filter_solver) for inner in nested
         ):
+            if primitive.name == "cond":
+                return self._thread_cond(eqn, operands)
             raise NotImplementedError(
                 "`stateful_solve_transform` cannot thread a solver state through a solve "
                 f"inside `{primitive.name}`. Move the solve out of it, or drop the "
@@ -269,6 +271,63 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         tracking_state = cast(TrackingState, self.state)
         self.state = cast(_StateT, tracking_state.track(solution))
         return _runtime_value_leaves((solution, result_code, stats))
+
+    def _thread_cond(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
+        """Thread the state through a `cond` whose branches hold a matched solve.
+
+        Each branch is rewritten to take the state's leaves as extra operands and return the
+        threaded state's leaves as extra outputs, so every branch has the same signature no
+        matter how many times it solves. The `cond` is rebound with the state leaves added to
+        its operands, and the trailing outputs become the new state. Requires a state to
+        already exist, since a branch cannot build one the untaken branch would not match.
+        """
+        if self.state is None:
+            raise NotImplementedError(
+                "`stateful_solve_transform` cannot thread a solver state into a `cond` "
+                "before a solve has created one. Solve once before the `cond`, or pass an "
+                "initial state."
+            )
+        branches = cast(tuple[ClosedJaxpr, ...], eqn.params["branches"])
+        index, branch_operands = operands[0], operands[1:]
+        num_operands = len(branch_operands)
+        state_leaves, state_treedef = jax.tree_util.tree_flatten(self.state)
+
+        threaded_solver: StatefulSolver[_StateT] | None = None
+
+        def rewrite_branch(branch: ClosedJaxpr) -> ClosedJaxpr:
+            """Trace one branch into a jaxpr that also threads the state."""
+
+            def threaded(*args: Any) -> list[Any]:
+                incoming = jax.tree_util.tree_unflatten(
+                    state_treedef, list(args[num_operands:])
+                )
+                branch_interpreter: _StateThreadingInterpreter[_StateT] = (
+                    _StateThreadingInterpreter(self.filter_solver, incoming)
+                )
+                outputs = branch_interpreter.interpret(
+                    branch.jaxpr, branch.consts, list(args[:num_operands])
+                )
+                nonlocal threaded_solver
+                if branch_interpreter.solver is not None:
+                    threaded_solver = branch_interpreter.solver
+                out_leaves, _ = jax.tree_util.tree_flatten(branch_interpreter.state)
+                return [*outputs, *out_leaves]
+
+            return make_jaxpr(threaded)(*branch_operands, *state_leaves)
+
+        new_branches = tuple(rewrite_branch(branch) for branch in branches)
+        bind_params = eqn.primitive.get_bind_params(eqn.params)
+        bind_params["branches"] = new_branches
+        results = eqn.primitive.bind(
+            index, *branch_operands, *state_leaves, **bind_params
+        )
+        num_outputs = len(eqn.outvars)
+        self.state = jax.tree_util.tree_unflatten(
+            state_treedef, list(results[num_outputs:])
+        )
+        if threaded_solver is not None:
+            self.solver = threaded_solver
+        return list(results[:num_outputs])
 
 
 class _StagedComputation(NamedTuple, Generic[_StateT]):
