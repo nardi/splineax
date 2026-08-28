@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from jax.experimental.sparse import BCOO, BCSR
 
-from splineax import BCOOLinearOperator, BCSRLinearOperator
+from splineax import BCOOLinearOperator, BCSRLinearOperator, sparse_indices_sorted
 
 
 class OperatorFactory(Protocol):
@@ -154,6 +154,49 @@ def test_tags_drive_property_predicates(make_operator: OperatorFactory) -> None:
     by which a caller asserts known structure)."""
     operator = make_operator(SQUARE_MATRIX, tags=lx.symmetric_tag)
     assert lx.is_symmetric(operator) is True
+
+
+def test_sorted_bcoo_gets_the_sorted_tag() -> None:
+    """A `BCOO` from `fromdense` is sorted, so the operator carries the
+    `sparse_indices_sorted` tag automatically, which lets a solver skip its sort."""
+    matrix = BCOO.fromdense(SQUARE_MATRIX)
+    assert matrix.indices_sorted is True
+    assert sparse_indices_sorted in BCOOLinearOperator(matrix).tags
+
+
+def test_sorted_bcsr_gets_the_sorted_tag() -> None:
+    """A `BCSR` flagged `indices_sorted` propagates the tag too. `fromdense` leaves the
+    flag unset, so the matrix is rebuilt with it here."""
+    plain = BCSR.fromdense(SQUARE_MATRIX)
+    matrix = BCSR(
+        (plain.data, plain.indices, plain.indptr),
+        shape=plain.shape,
+        indices_sorted=True,
+    )
+    assert sparse_indices_sorted in BCSRLinearOperator(matrix).tags
+
+
+def test_unsorted_matrix_omits_the_sorted_tag() -> None:
+    """A `BCOO` whose entries are not row-major sorted reports `indices_sorted` as
+    `False`, so the operator must not claim the sort was already done."""
+    sorted_matrix = BCOO.fromdense(SQUARE_MATRIX)
+    reversed_matrix = BCOO(
+        (sorted_matrix.data[::-1], sorted_matrix.indices[::-1]),
+        shape=sorted_matrix.shape,
+    )
+    assert reversed_matrix.indices_sorted is False
+    operator = BCOOLinearOperator(reversed_matrix)
+    assert sparse_indices_sorted not in operator.tags
+
+
+def test_integer_promotion_keeps_the_sorted_tag() -> None:
+    """Promoting an integer matrix to floating rebuilds the array, so the rebuild must
+    carry `indices_sorted` forward, keeping the tag."""
+    integer_matrix = BCOO.fromdense(jnp.array([[1, 2], [3, 4]], dtype=jnp.int32))
+    assert integer_matrix.indices_sorted is True
+    operator = BCOOLinearOperator(integer_matrix)
+    assert jnp.issubdtype(operator.as_matrix().dtype, jnp.floating)
+    assert sparse_indices_sorted in operator.tags
 
 
 def test_diagonal_extraction_matches_dense(make_operator: OperatorFactory) -> None:

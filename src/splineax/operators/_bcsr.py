@@ -13,6 +13,7 @@ from ._operations import (
     sparse_mv,
     sparse_out_structure,
 )
+from ._tags import sparse_indices_sorted
 
 
 class BCSRLinearOperator(AbstractLinearOperator):
@@ -37,7 +38,8 @@ class BCSRLinearOperator(AbstractLinearOperator):
         - `tags`: any tags indicating whether this matrix has any particular properties,
             like symmetry or positive-definite-ness. Note that these properties are
             unchecked and you may get incorrect values elsewhere if these tags are
-            wrong.
+            wrong. A matrix carrying `indices_sorted` adds the `sparse_indices_sorted`
+            tag automatically, so a solver can skip its sort.
         """
         if matrix.ndim != 2:
             raise ValueError(
@@ -47,9 +49,14 @@ class BCSRLinearOperator(AbstractLinearOperator):
             matrix = BCSR(
                 (matrix.data.astype(jnp.float32), matrix.indices, matrix.indptr),
                 shape=matrix.shape,
+                indices_sorted=matrix.indices_sorted,
             )
         self.matrix = matrix
-        self.tags = tags if isinstance(tags, frozenset) else frozenset([tags])
+        tags = tags if isinstance(tags, frozenset) else frozenset([tags])
+        # A sorted matrix lets a solver skip its sort, so record that through the tag.
+        if matrix.indices_sorted:
+            tags = tags | {sparse_indices_sorted}
+        self.tags = tags
 
     def mv(self, vector: Inexact[Array, " b"]) -> Inexact[Array, " a"]:
         return sparse_mv(self.matrix, vector)
