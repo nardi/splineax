@@ -307,23 +307,29 @@ def test_linear_solve_matches_numpy(solver, enable_x64: None) -> None:
 
 def test_init_symbolic_round_trip(enable_x64: None) -> None:
     """`KLU.init_symbolic` must accept the operator, a bound
-    `SparseJacobianLinearOperatorColoring`, and a bare `JacobianColoring`, deriving
-    the indices from the stored sparsity pattern in each case. Updating that state with
-    the operator and solving must match the dense solve, which fails if the pattern's
-    index order ever disagrees with the order `asdex` emits when the Jacobian is later
-    materialised."""
+    `SparseJacobianLinearOperatorColoring`, a bare `JacobianColoring`, and a bare
+    `asdex.ColoredPattern`, deriving the indices from the stored sparsity pattern in each
+    case. Updating that state with the operator and solving must match the dense solve,
+    which fails if the pattern's index order ever disagrees with the order `asdex` emits
+    when the Jacobian is later materialised."""
     solver = KLU()
     operator_coloring = SparseJacobianLinearOperatorColoring.detect(
         square_function, SQUARE_POINT
     )
     operator = operator_coloring.operator_at(SQUARE_POINT)
     bare_coloring = JacobianColoring.detect(square_function, SQUARE_POINT)
+    colored_pattern = bare_coloring.coloring
     expected = np.linalg.solve(
         np.asarray(dense_jacobian(square_function, SQUARE_POINT), dtype=np.float64),
         np.asarray(RIGHT_HAND_SIDE, dtype=np.float64),
     )
 
-    for sparsity_source in (operator, operator_coloring, bare_coloring):
+    for sparsity_source in (
+        operator,
+        operator_coloring,
+        bare_coloring,
+        colored_pattern,
+    ):
         state = solver.init_symbolic(sparsity_source)
         state = solver.update(state, operator)
         solution = lx.linear_solve(
@@ -373,6 +379,22 @@ def test_from_jacobian_coloring_matches_direct_construction() -> None:
     direct = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
     assert jnp.allclose(
         bound.operator_at(EVALUATION_POINT).as_matrix(), direct.as_matrix()
+    )
+
+
+def test_from_jacobian_coloring_accepts_a_colored_pattern() -> None:
+    """`from_jacobian_coloring` accepts a bare `asdex.ColoredPattern`, wrapping it, so it
+    builds the same operator as passing the equivalent `JacobianColoring`."""
+    jacobian_coloring = JacobianColoring.detect(banded_function, EVALUATION_POINT)
+    from_wrapper = SparseJacobianLinearOperatorColoring.from_jacobian_coloring(
+        jacobian_coloring, banded_function, EVALUATION_POINT
+    )
+    from_bare = SparseJacobianLinearOperatorColoring.from_jacobian_coloring(
+        jacobian_coloring.coloring, banded_function, EVALUATION_POINT
+    )
+    assert jnp.allclose(
+        from_bare.operator_at(EVALUATION_POINT).as_matrix(),
+        from_wrapper.operator_at(EVALUATION_POINT).as_matrix(),
     )
 
 
