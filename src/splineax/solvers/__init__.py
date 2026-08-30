@@ -1,4 +1,6 @@
 from ._auto import AutoSparseLinearSolver as AutoSparseLinearSolver
+from ._iterative import IterativeRefinement as IterativeRefinement
+from ._iterative import IterativeRefinementSettings as IterativeRefinementSettings
 from ._klu import KLU as KLU
 from ._pardiso import Pardiso as Pardiso
 from ._sparse import (

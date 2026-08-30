@@ -16,13 +16,16 @@ It provides:
   [`SparseJacobianLinearOperator`][splineax.SparseJacobianLinearOperator] represents the
   Jacobian of a function sparsely, detecting its sparsity pattern and constructing a coloring automatically (via
   [asdex](https://github.com/adrhill/asdex)), which allows for efficient materialization into a sparse matrix by the solvers.
-- **Solvers**: [`Spsolve`][splineax.Spsolve] (any backend, wraps
+- **Stateful solver protocols**: [`StatefulSolver`][splineax.StatefulSolver] and [`SparseLinearSolver`][splineax.SparseLinearSolver] allow for writing solver-agnostic code that reuses factorizations over multiple solves with multiple operators.
+- **Solver library bindings**: [`Spsolve`][splineax.Spsolve] (any backend, wraps
   `jax.experimental.sparse.linalg.spsolve`), [`KLU`][splineax.KLU] (CPU-only, wraps the
-  SuiteSparse KLU library via `klujax`, with factorization reuse), and
-  [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] which picks one based on the
-  platform.
-- A [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol for separating
-  factorization from solving.
+  SuiteSparse KLU library), and
+  [`Pardiso`][splineax.Pardiso] (CPU-only, wraps Intel oneMKL Pardiso, installed as extra).
+  `KLU` and `Pardiso` reuse their factorization across solves.
+- **Higher-level solvers**: [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver],
+  which picks an appropriate solver based on platform and settings, and
+  [`IterativeRefinement`][splineax.IterativeRefinement], which wraps any solver and refines
+  its solution to a target residual.
 
 ## Installation
 
