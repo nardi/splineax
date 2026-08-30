@@ -190,6 +190,13 @@ class _KLUState(eqx.Module):
             self.sparsity_tag,
         )
 
+    def release(self) -> None:
+        """Free the cache slots this state owns, ordered after any tracked solves."""
+        klujax = _klujax()
+        if self.numeric is not None:
+            klujax.free_numeric(self.numeric)
+        klujax.free_symbolic(self.symbol)
+
 
 T = TypeVar("T")
 
@@ -385,13 +392,6 @@ class KLU(AbstractLinearSolver[_KLUState]):
             False,
             tag,
         )
-
-    def release(self, state: _KLUState) -> None:
-        """Free the state's cache slots, ordered after any tracked solves."""
-        klujax = _klujax()
-        if state.numeric is not None:
-            klujax.free_numeric(state.numeric)
-        klujax.free_symbolic(state.symbol)
 
     def compute(
         self,

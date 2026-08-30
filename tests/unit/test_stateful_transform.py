@@ -591,7 +591,7 @@ def test_return_final_state_paths() -> None:
     # Default with an initial state passed at call time: the pair again.
     out_seed, seeded = splx.stateful_solve_transform(fn)(_data(), _b1(), state=state)
     assert jnp.allclose(out_seed, expected, atol=1e-8)
-    splx.KLU().release(seeded)
+    seeded.release()
 
     # Explicit false: the output alone even though a state was threaded.
     out_false = splx.stateful_solve_transform(fn, return_final_state=False)(

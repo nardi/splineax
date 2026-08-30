@@ -148,8 +148,8 @@ _StateT = TypeVar("_StateT")
 class SparseLinearSolver(StatefulSolver[_StateT], Protocol[_StateT]):
     """Structural type for the sparse stateful solvers in this package.
 
-    Extends the solver-agnostic `StatefulSolver` (init, update, release, compute,
-    transpose, conj, assume_full_rank) with `init_symbolic`, which analyzes a known
+    Extends the solver-agnostic `StatefulSolver` (init, update, compute, transpose, conj,
+    assume_full_rank) with `init_symbolic`, which analyzes a known
     sparsity pattern into a reusable state before any values are available. `KLU`,
     `Pardiso`, `Spsolve`, and `AutoSparseLinearSolver` all satisfy it structurally.
     """
@@ -174,7 +174,7 @@ def linear_solve(
 
     A wrapper over `lineax.linear_solve` for the stateful sparse API. It runs the
     solver's `init` or `update` to fold the operator into a state, solves, then tracks the
-    solution against the state so a later `solver.release(state)` is ordered after it.
+    solution against the state so a later release is ordered after it.
     Unlike `lineax.linear_solve`, it returns a `(solution, state)` tuple:
 
     ```python

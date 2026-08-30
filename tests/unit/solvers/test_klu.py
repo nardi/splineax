@@ -134,7 +134,7 @@ def test_update_falls_back_when_reused_pivots_go_bad() -> None:
     solution = lx.linear_solve(
         second, RIGHT_HAND_SIDE, solver=solver, state=state
     ).value
-    solver.release(state)
+    state.release()
     expected = jnp.linalg.solve(np.asarray(second_dense), np.asarray(RIGHT_HAND_SIDE))
     assert jnp.allclose(solution, expected, atol=1e-6)
 
@@ -186,7 +186,7 @@ def test_release_frees_both_handles() -> None:
     solver = KLU()
     with _spy("free_symbolic") as symbolic_frees, _spy("free_numeric") as numeric_frees:
         state = solver.init(operator, {})
-        solver.release(state)
+        state.release()
     assert len(symbolic_frees) == 1
     assert len(numeric_frees) == 1
 

@@ -109,7 +109,7 @@ def test_update_same_pattern_reuses_analysis() -> None:
     solution = lx.linear_solve(
         second, RIGHT_HAND_SIDE, solver=solver, state=updated
     ).value
-    solver.release(updated)
+    updated.release()
     expected = jnp.linalg.solve(np.asarray(second_matrix), np.asarray(RIGHT_HAND_SIDE))
     assert jnp.allclose(solution, expected, atol=1e-5)
 
@@ -161,7 +161,7 @@ def test_release_frees_the_handle() -> None:
     solver = Pardiso()
     with _spy("release") as release_calls:
         state = solver.init(operator, {})
-        solver.release(state)
+        state.release()
     assert len(release_calls) == 1
 
 
@@ -187,14 +187,14 @@ def test_zero_diagonal_matrix_solves_accurately() -> None:
     assert residual(lx.linear_solve(operator, vector, solver=KLU()).value) < 1e-10
 
     direct, state = splx.linear_solve(operator, vector, solver)
-    solver.release(state)
+    state.release()
     assert residual(direct.value) < 1e-10, "init path perturbed its pivots"
 
     symbolic_state = solver.update(solver.init_symbolic(operator), operator)
     symbolic = lx.linear_solve(
         operator, vector, solver=solver, state=symbolic_state
     ).value
-    solver.release(symbolic_state)
+    symbolic_state.release()
     assert residual(symbolic) < 1e-10, "deferred symbolic path perturbed its pivots"
 
 
@@ -221,7 +221,7 @@ def test_update_reuse_stays_accurate_on_matching_sensitive_values() -> None:
     state = solver.init(first, {})
     state = solver.update(state, second)
     solution = lx.linear_solve(second, vector, solver=solver, state=state).value
-    solver.release(state)
+    state.release()
 
     residual = float(jnp.abs(second_bcoo.todense() @ solution - vector).max())
     assert residual < 1e-8

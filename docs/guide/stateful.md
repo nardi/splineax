@@ -11,7 +11,7 @@ hand. You hand it an operator, and it reuses whatever it still can, depending on
 
 If you have a function that already calls `lineax.linear_solve` and you would rather not
 thread the state by hand, there is a `stateful_solve_transform` function transformation that does the threading for
-you, described in [Transforming lineax code](transform.md).
+you, described in [Transforming existing Lineax code](transform.md).
 
 ## The stateful solve API
 
@@ -20,10 +20,10 @@ Every solver in this package exposes the same small API.
 - `state = solver.init(operator)` builds a state for an operator.
 - `state = solver.update(state, operator)` folds a new operator into an existing state,
   reusing prior work where the two operators allow it.
-- `solver.release(state)` says you are done with the state, so any memory it holds may go.
+- `state.release()` says you are done with the state, so any memory it holds may go. It is
+  optional, and a no-op for solvers whose state holds nothing.
 - `state = state.track(solution)` records that a solution depends on the state, so a later
-  `release` is ordered after that solve. It is optional, and a no-op for solvers whose
-  state holds nothing.
+  `release` is ordered after that solve.
 
 `lineax.linear_solve` does not return an updated state, so on its own these steps read as:
 
@@ -65,7 +65,7 @@ solution, state = splx.linear_solve(operator, b1, solver)
 solution, state = splx.linear_solve(operator, b2, solver, state=state)
 
 # Release it once you are done solving.
-solver.release(state)
+state.release()
 ```
 
 With no `state`, `splineax.linear_solve` builds one with `init`. With a `state`, it calls
@@ -89,7 +89,7 @@ sparsity = BCOO.fromdense(dense)
 state = solver.init_symbolic(sparsity)
 state = solver.update(state, operator)
 solution = lx.linear_solve(operator, b1, solver=solver, state=state).value
-solver.release(state)
+state.release()
 ```
 
 `init_symbolic` accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`,
@@ -113,7 +113,7 @@ state = solver.init(first)
 # The shared tag lets update reuse the analysis.
 state = solver.update(state, second)
 solution = lx.linear_solve(second, b1, solver=solver, state=state).value
-solver.release(state)
+state.release()
 ```
 
 Two operators carrying the same tag are asserted to have exactly the same index arrays,
@@ -141,7 +141,7 @@ def solve_under_jit(values, b):
         BCOO((values, sparsity.indices), shape=sparsity.shape, indices_sorted=True)
     )
     solution, state = splx.linear_solve(operator, b, solver)
-    solver.release(state)
+    state.release()
     return solution.value
 
 
@@ -187,7 +187,7 @@ def solve_many(
     for b in right_hand_sides[1:]:
         solution, state = splx.linear_solve(operator, b, solver, state=state)
         results.append(solution.value)
-    solver.release(state)
+    state.release()
     return results
 
 

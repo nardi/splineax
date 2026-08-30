@@ -77,7 +77,7 @@ solution, state = splx.linear_solve(operator, vectors[1], solver, state=state)
 assert jnp.allclose(matrix @ solution.value, vectors[1], atol=1e-4)
 
 # Free the factorization when you are done with it.
-solver.release(state)
+state.release()
 ```
 
 ## Where to next

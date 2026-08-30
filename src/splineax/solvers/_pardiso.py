@@ -207,6 +207,12 @@ class _PardisoState(eqx.Module):
             self.sparsity_tag,
         )
 
+    def release(self) -> None:
+        """Free the native factorization, ordered after any tracked solves."""
+        if self.token is None:
+            return
+        _pardiso_mkl_jax().primitive.release(self.token)
+
 
 class Pardiso(AbstractLinearSolver[_PardisoState]):
     """Sparse direct solver wrapping `pardiso_mkl_jax` (Intel oneMKL Pardiso).
@@ -364,12 +370,6 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             False,
             tag,
         )
-
-    def release(self, state: _PardisoState) -> None:
-        """Free the native factorization, ordered after any tracked solves."""
-        if state.token is None:
-            return
-        _pardiso_mkl_jax().primitive.release(state.token)
 
     def compute(
         self,

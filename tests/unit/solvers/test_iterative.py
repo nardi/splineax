@@ -38,6 +38,9 @@ class _JacobiState(eqx.Module):
     diagonal: Array
     operator: AbstractLinearOperator
 
+    def release(self) -> None:
+        """No-op, since a Jacobi state owns nothing to free."""
+
 
 class _JacobiSolver(lx.AbstractLinearSolver[_JacobiState]):
     """A weak stateful solver: one Jacobi sweep, `x = b / diag(A)`.
@@ -68,9 +71,6 @@ class _JacobiSolver(lx.AbstractLinearSolver[_JacobiState]):
         options: dict[str, Any] = {},
     ) -> _JacobiState:
         return self.init(operator, options)
-
-    def release(self, state: _JacobiState) -> None:
-        del state
 
     def compute(
         self, state: _JacobiState, vector: PyTree[Array], options: dict[str, Any]
@@ -188,7 +188,7 @@ def test_symbolic_state_cannot_solve(
     solution = lx.linear_solve(
         operator, RIGHT_HAND_SIDE, solver=solver, state=updated
     ).value
-    solver.release(updated)
+    updated.release()
     assert jnp.allclose(solution, _EXPECTED, atol=1e-8)
 
 
@@ -205,7 +205,7 @@ def test_transpose_solves_transposed_system(
     state = solver.init(operator, {})
     transposed, _ = solver.transpose(state, {})
     solution = np.asarray(solver.compute(transposed, RIGHT_HAND_SIDE, {})[0])
-    solver.release(state)
+    state.release()
     assert jnp.allclose(solution, expected, atol=1e-8)
 
 
@@ -219,7 +219,7 @@ def test_update_no_op_returns_same_state(
     state = solver.init(operator, {})
     again = solver.update(state, operator)
     assert again is state
-    solver.release(state)
+    state.release()
 
 
 def test_solve_under_jit(make_operator: OperatorFactory, enable_x64: None) -> None:
@@ -265,7 +265,7 @@ def test_stateful_linear_solve_returns_tuple(
     solution, state = splx.linear_solve(operator, RIGHT_HAND_SIDE, solver)
     assert isinstance(state, _IterativeRefinementState)
     solution, state = splx.linear_solve(operator, RIGHT_HAND_SIDE, solver, state=state)
-    solver.release(state)
+    state.release()
     assert jnp.allclose(solution.value, _EXPECTED, atol=1e-8)
 
 
@@ -310,7 +310,7 @@ def test_refinement_fixes_a_stale_factorization(
 
     # Refinement uses the same stale factorization as its correction step and converges.
     refined_solution, result, _ = solver.compute(stale_state, right_hand_side, {})
-    solver.release(base_state)
+    base_state.release()
     assert result == RESULTS.successful
     assert (
         _relative_residual(perturbed_operator, refined_solution, right_hand_side)

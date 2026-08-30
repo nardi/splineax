@@ -19,33 +19,37 @@ _StateT = TypeVar("_StateT")
 
 @runtime_checkable
 class TrackingState(Protocol):
-    """A solver state that can record a solve depending on it.
+    """A solver state that records solves depending on it and frees its own memory.
 
     A state may own memory that must outlive every solve made with it. `track` marks a
-    solution as a dependency, so a later `release` is ordered after that solve. It is
-    optional to use, and a solver whose state owns nothing implements it as a no-op that
-    returns `self`.
+    solution as a dependency, so a later `release` is ordered after that solve, and
+    `release` frees that memory once the state is done. Both live on the state, so a caller
+    releases without a reference to the solver. A state that owns nothing implements `track`
+    as a no-op returning `self`, and `release` as a no-op.
     """
 
     def track(self, solution: PyTree[Array]) -> Self:
         """Return a new state whose eventual `release` is ordered after `solution`."""
         ...
 
+    def release(self) -> None:
+        """Free any memory this state owns, ordered after its tracked solves."""
+        ...
+
 
 @runtime_checkable
 class StatefulSolver(Protocol[_StateT]):
-    """A solver that creates, updates, and releases a reusable state.
+    """A solver that creates and updates a reusable state.
 
     This is the part of the lineax `AbstractLinearSolver` interface we rely on, plus
-    `update` and `release`. A solver satisfies it structurally, so no base class is
-    needed. `update` folds new information about the operator into an existing state, and
-    `release` says the state is done and its memory may go.
+    `update`. A solver satisfies it structurally, so no base class is needed. `update` folds
+    new information about the operator into an existing state.
 
     The states a solver produces from `init`, `update`, and a state's `track` should share
     one pytree structure, so a state can be carried through a `scan` or `while_loop`, whose
     carry has a fixed structure. The sparse `init_symbolic` state may differ, since it holds
     only a symbolic analysis. Such a state must be `update`d before it is carried through a
-    loop, which `stateful_solve_transform` does for you by unrolling the first iteration.
+    loop, for example by unrolling the first iteration.
     """
 
     def init(
@@ -59,10 +63,6 @@ class StatefulSolver(Protocol[_StateT]):
         options: dict[str, Any] = {},
     ) -> _StateT:
         """Fold a new operator into `state`, reusing prior work where possible."""
-        ...
-
-    def release(self, state: _StateT) -> None:
-        """Signal that `state` is done, so any memory it owns may be freed."""
         ...
 
     def compute(

@@ -49,6 +49,9 @@ class _SpsolveState(eqx.Module):
         del solution
         return self
 
+    def release(self) -> None:
+        """No-op, since a Spsolve state owns nothing to free."""
+
 
 class ReorderingScheme(IntEnum):
     NO_REORDERING = 0
@@ -96,7 +99,8 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
     `scipy.sparse.linalg.spsolve`).
 
     It has no separate factorization phase, so the stateful reuse API (`init_symbolic`,
-    `update`, `release`) is a set of no-ops here, for parity with `KLU` and `Pardiso`.
+    `update`, and the state's `release`) is a set of no-ops here, for parity with `KLU` and
+    `Pardiso`.
 
     This solver can only handle square nonsingular operators.
     """
@@ -169,10 +173,6 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         if operator is state.operator:
             return state
         return self.init(operator, options)
-
-    def release(self, state: _SpsolveState) -> None:
-        """No-op, since a Spsolve state owns nothing to free."""
-        del state
 
     def compute(
         self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]

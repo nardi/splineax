@@ -373,7 +373,7 @@ def test_init_symbolic_round_trip(enable_x64: None) -> None:
         solution = lx.linear_solve(
             operator, RIGHT_HAND_SIDE, solver=solver, state=state
         ).value
-        solver.release(state)
+        state.release()
         assert np.allclose(np.asarray(solution), expected, atol=1e-5)
 
 
