@@ -10,6 +10,7 @@ from typing import (
 import jax
 import jax.core
 import numpy as np
+from asdex import ColoredPattern
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import PyTree
 from lineax import AbstractLinearOperator
@@ -35,6 +36,7 @@ _Sparsity = (
     | SparseJacobianLinearOperator
     | SparseJacobianLinearOperatorColoring
     | JacobianColoring
+    | ColoredPattern
 )
 
 
@@ -169,7 +171,7 @@ def _pattern_indices(
                 [np.asarray(asdex_pattern.rows), np.asarray(asdex_pattern.cols)], axis=1
             )
             return indices, tuple(asdex_pattern.shape)
-        case JacobianColoring():
+        case JacobianColoring() | ColoredPattern():
             asdex_pattern = pattern.sparsity
             indices = np.stack(
                 [np.asarray(asdex_pattern.rows), np.asarray(asdex_pattern.cols)], axis=1

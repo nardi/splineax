@@ -4,6 +4,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from asdex import ColoredPattern
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import NumericToken, SymbolToken
@@ -112,7 +113,7 @@ def _extract_pattern(sparsity: _Sparsity) -> tuple[Array, Array, tuple[int, ...]
             row = jnp.asarray(pattern.rows, dtype=jnp.int32)
             col = jnp.asarray(pattern.cols, dtype=jnp.int32)
             shape = pattern.shape
-        case JacobianColoring():
+        case JacobianColoring() | ColoredPattern():
             pattern = sparsity.sparsity
             row = jnp.asarray(pattern.rows, dtype=jnp.int32)
             col = jnp.asarray(pattern.cols, dtype=jnp.int32)
@@ -140,8 +141,8 @@ def _extract_pattern(sparsity: _Sparsity) -> tuple[Array, Array, tuple[int, ...]
             raise TypeError(
                 "`KLU.init_symbolic` requires a `BCOO`, `BCSR`, `BCOOLinearOperator`, "
                 "`BCSRLinearOperator`, `SparseJacobianLinearOperator`, "
-                "`SparseJacobianLinearOperatorColoring`, or `JacobianColoring`; "
-                f"got {type(sparsity).__name__}."
+                "`SparseJacobianLinearOperatorColoring`, `JacobianColoring`, or "
+                f"`asdex.ColoredPattern`; got {type(sparsity).__name__}."
             )
     return row, col, tuple(shape)
 

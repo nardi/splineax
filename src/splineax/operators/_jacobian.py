@@ -392,12 +392,12 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
     @classmethod
     def from_jacobian_coloring(
         cls,
-        coloring: JacobianColoring,
+        coloring: JacobianColoring | ColoredPattern,
         fn: Callable,
         x: Inexact[ArrayLike, " n"] | jax.ShapeDtypeStruct,
         args: PyTree[Any] = None,
     ) -> "SparseJacobianLinearOperatorColoring":
-        """Binds an existing [`splineax.JacobianColoring`][] to a function.
+        """Binds an existing coloring to a function.
 
         This is the bridge from a bare coloring to an operator factory. The coloring
         may have come from [`splineax.JacobianColoring.detect`][] on this same
@@ -407,7 +407,8 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
 
         **Arguments:**
 
-        - `coloring`: the coloring to bind, as a [`splineax.JacobianColoring`][].
+        - `coloring`: the coloring to bind, as a [`splineax.JacobianColoring`][] or a
+            bare `asdex.ColoredPattern`.
         - `fn`: a function `(x, args) -> y`, where both `x` and `y` are
             one-dimensional arrays of real dtype. Its Jacobian must have the sparsity
             the coloring describes.
@@ -415,6 +416,8 @@ class SparseJacobianLinearOperatorColoring(eqx.Module):
             Only its shape and dtype matter here, used to closure-convert `fn`.
         - `args`: extra arguments to `fn` that are not differentiated.
         """
+        if isinstance(coloring, ColoredPattern):
+            coloring = JacobianColoring(coloring)
         example_point = _example_point(x)
         converted_fn = eqx.filter_closure_convert(fn, example_point, args)
         return cls(converted_fn, coloring)
