@@ -1,13 +1,17 @@
-# Advanced usage: reusing work across solves
+# Stateful solves
 
-A sparse direct solve does expensive work that does not change between right-hand sides,
+A sparse direct solver generally does some expensive work (like reordering or constructing a factorization) that does not change between right-hand sides,
 or between matrices that share a structure. `splineax` lets you do that work once and
 reuse it, through an explicit solver state that you create, update, and thread through
 your solves.
 
-The idea is to tell the solver about the operators it will solve, as soon as you know
-them, and let it decide what to recompute. You never ask it to factor or refactor by
-hand. You hand it an operator, and it reuses whatever it still can.
+The idea is to give the solver information about the operators it will solve, as soon as you have it
+them, and then let it decide what to recompute. You never ask it to factor or refactor by
+hand. You hand it an operator, and it reuses whatever it still can, depending on the numerical properties of the operator and solver implementation details.
+
+If you have a function that already calls `lineax.linear_solve` and you would rather not
+thread the state by hand, there is a `stateful_solve_transform` function transformation that does the threading for
+you, described in [Transforming lineax code](transform.md).
 
 ## The stateful solve API
 
@@ -72,7 +76,7 @@ returning, so the state you get back is safe to release after the loop.
 The default solver is `AutoSparseLinearSolver`, which picks a backend for the platform and
 precision. Any splineax solver works in its place.
 
-## Reusing an analysis across changing values
+## Reuse across changing values
 
 Often you know the sparsity pattern before the values, or you solve a family of matrices
 that share a pattern. Analyze the pattern once with `init_symbolic`, then `update` folds
@@ -94,7 +98,7 @@ solver.release(state)
 forms, the pattern comes from the precomputed coloring, without materialising the Jacobian
 numerically.
 
-### Telling the solver two operators share a pattern
+### Shared patterns between operators
 
 For `update` to reuse an analysis, it has to know the new operator has the same structure
 as the last one. You assert that with a tag from
@@ -124,7 +128,7 @@ There is also a `sparse_indices_sorted` tag. Attaching it to an operator asserts
 indices are already row-major sorted, so `Pardiso` and `Spsolve` skip the sort they would
 otherwise do.
 
-## Solving inside `jax.jit`
+## Solves inside `jax.jit`
 
 A factorization handle is an ordinary JAX value, not a native object tied to the Python
 side, so the whole lifecycle composes inside a jitted function. Build the state, solve,
@@ -167,7 +171,7 @@ parity. `update` rebuilds the state, `release` frees nothing, and `track` return
 state unchanged. Code written against the API runs unchanged on any backend, and
 `AutoSparseLinearSolver` forwards to whichever it picked.
 
-## Writing backend-agnostic code
+## Backend-agnostic code
 
 Type a routine against the [`splineax.SparseLinearSolver`][] protocol and let the caller
 pick the solver:

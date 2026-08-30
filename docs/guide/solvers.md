@@ -4,7 +4,7 @@
 [`IterativeRefinement`][splineax.IterativeRefinement], which wraps any of them to sharpen
 a solution. All implement Lineax's `AbstractLinearSolver` interface (so they work with
 `lineax.linear_solve`) and the [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol
-(factorization reuse, see [Advanced usage](advanced.md)). All handle **square,
+(factorization reuse, see [Stateful solves](stateful.md)). All handle **square,
 nonsingular** operators only.
 
 | Solver | Backend | Precision | Factorization reuse |
@@ -38,7 +38,7 @@ this means `jax.vmap`, `jax.jacfwd`, and `jax.jacrev` work, looping over the bat
 
 Wraps [`klujax`](https://github.com/flaport/klujax), bindings for the SuiteSparse KLU
 sparse LU solver. It keeps the operator in coordinate form and supports reusing a symbolic
-and/or numeric factorization across many solves (see [Advanced usage](advanced.md)).
+and/or numeric factorization across many solves (see [Stateful solves](stateful.md)).
 
 ```{.python continuation}
 solver = splx.KLU()
@@ -57,7 +57,7 @@ solver = splx.KLU()
 Wraps [`pardiso-mkl-jax`](https://github.com/nardi/pardiso-mkl-jax), bindings for Intel
 oneMKL's Pardiso direct sparse solver. Like `KLU`, it keeps the operator in its native
 sparse storage and supports reusing a symbolic and/or numeric factorization across many
-solves (see [Advanced usage](advanced.md)).
+solves (see [Stateful solves](stateful.md)).
 
 `Pardiso` is an **optional dependency**: install it with
 
@@ -155,5 +155,5 @@ The threshold is floored at machine precision, so a tolerance tighter than the w
 precision can reach still reports success rather than returning NaN. A single-precision
 solve, for instance, cannot push the relative residual much below `1e-6`, and refinement
 will not demand it. The wrapper exposes the same stateful API as the solver it wraps (see
-[Advanced usage](advanced.md)), so it reuses factorizations across right-hand sides the
+[Stateful solves](stateful.md)), so it reuses factorizations across right-hand sides the
 same way.

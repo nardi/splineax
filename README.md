@@ -16,6 +16,8 @@ plugs straight into `lineax.linear_solve`. It also interfaces with [asdex](https
 - **Higher-level solvers**: `AutoSparseLinearSolver`, which picks an appropriate solver
   based on platform and settings, and `IterativeRefinement`, which wraps any solver and
   refines its solution to a target residual.
+- **Lineax code interop**: `stateful_solve_transform` rewrites a function that calls
+  `lineax.linear_solve` so its solves thread a solver state and reuse a factorization.
 
 ## Installation
 
