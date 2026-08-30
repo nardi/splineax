@@ -128,6 +128,45 @@ def _extract_csr(
     return indptr, indices, values, matrix_bcsr.shape
 
 
+def _reanalyze_if_unstable(
+    pmj: Any,
+    token: Any,
+    iparm: Array,
+    indptr: Array,
+    indices: Array,
+    values: Array,
+) -> Any:
+    """Redo the analysis for these values if the reused matching factored badly.
+
+    A `factor` that reuses a matching tuned for older values can perturb tiny pivots or
+    hit a zero pivot, which the returned iparm records (`perturbed_pivot_count` at index
+    13, `zero_or_negative_pivot_position` at index 29). When it does, `reanalyze` rebuilds
+    the analysis and matching for these values in place, then factor again. Falling back is
+    always correct, only slower, and equivalent to a fresh `init`.
+    """
+    primitive = pmj.primitive
+    unstable = (iparm[13] > 0) | (iparm[29] != 0)
+
+    def refresh() -> Any:
+        reanalyzed, _ = primitive.reanalyze(
+            token,
+            indptr,
+            indices,
+            values,
+            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+        )
+        refactored, _ = primitive.factor(
+            reanalyzed,
+            indptr,
+            indices,
+            values,
+            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+        )
+        return refactored
+
+    return jax.lax.cond(unstable, refresh, lambda: token)
+
+
 class _PardisoState(eqx.Module):
     """A Pardiso solver state, carrying its factorization token.
 
@@ -305,15 +344,17 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
     ) -> _PardisoState:
         indptr, indices, values, shape = _extract_csr(operator)
         pmj = _pardiso_mkl_jax()
-        # `factor` reuses the analysis stored under the token's id and returns a fresh
-        # token for the new values.
-        token, _ = pmj.primitive.factor(
+        # `factor` reuses the analysis stored under the token's id, including the weighted
+        # matching, and returns a fresh token for the new values. That matching was tuned
+        # for the previous values, so it can be a poor fit for these ones.
+        token, iparm = pmj.primitive.factor(
             state.token,
             indptr,
             indices,
             values,
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
+        token = _reanalyze_if_unstable(pmj, token, iparm, indptr, indices, values)
         return _PardisoState(
             operator,
             (indptr, indices, values),

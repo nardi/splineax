@@ -211,6 +211,55 @@ def _ensure_cpu(args: T) -> T:
     )
 
 
+_REFACTOR_RCOND_FLOOR = 1e-8
+"""Reciprocal condition estimate below which a reused factorization is refreshed.
+
+`klujax.rcond` returns `min|Uii| / max|Uii|`, the ratio of the smallest to
+largest diagonal entry of `U` (`klu_rcond`). It is a cheap lower bound on the
+reciprocal condition number of `U`. `refactor` keeps the pivots the previous
+`factor` chose, so shifted values can leave `U` badly scaled, which shows up as
+a small ratio here. The floor is roughly the square root of double-precision
+machine epsilon. A solve loses about `-log10(rcond)` decimal digits, so `1e-8`
+means about 8/16 digits for a double-precision solve are meaningful. Below this
+rcond value we factor afresh, which is always correct, just slower.
+
+The estimate only reads the diagonal of `U`, so it can miss growth in the
+off-diagonal entries, and an ill-conditioned matrix gives a large residual even
+from a fresh factor. This floor is a conservative guard against reused-pivot
+degradation, not a residual guarantee. A caller that needs a tight residual
+should check it rather than rely on this floor alone."""
+
+
+def _reuse_or_refresh_numeric(
+    klujax: Any,
+    row: Array,
+    col: Array,
+    values: Array,
+    symbol: SymbolToken,
+    numeric: NumericToken,
+) -> NumericToken:
+    """Refactor reusing the previous pivot order, falling back to a fresh factor.
+
+    `refactor` is cheaper than `factor` because it reuses the pivots the last
+    factorization chose, but those pivots can be a poor fit for new values.
+    `refactor_with_status` catches an outright failure without raising, and `rcond` catches
+    pivots that survived but left `U` close to singular (see `_REFACTOR_RCOND_FLOOR`). On
+    either, `factor` from the symbolic analysis instead. Falling back is always correct,
+    only slower.
+    """
+    refreshed, status = klujax.refactor_with_status(row, col, values, numeric, symbol)
+    dtype = jnp.complex128 if values.dtype in COMPLEX_DTYPES else jnp.float64
+    reciprocal_condition = klujax.rcond(symbol, refreshed, dtype=dtype)
+    reuse_is_safe = jnp.all(status == klujax.KLUStatus.OK) & jnp.all(
+        reciprocal_condition > _REFACTOR_RCOND_FLOOR
+    )
+    return jax.lax.cond(
+        reuse_is_safe,
+        lambda: refreshed,
+        lambda: klujax.factor(row, col, values, symbol),
+    )
+
+
 class KLU(AbstractLinearSolver[_KLUState]):
     """Sparse direct solver wrapping the `klujax` (SuiteSparse KLU) library.
 
@@ -315,9 +364,16 @@ class KLU(AbstractLinearSolver[_KLUState]):
     ) -> _KLUState:
         del options
         row, col, values, shape = _extract_coo(operator)
-        # Reuse the stored symbolic analysis and build a fresh numeric factorization.
-        # The tag asserts the indices match the ones `symbol` was analyzed with.
-        numeric = _klujax().factor(row, col, values, state.symbol)
+        klujax = _klujax()
+        # Reuse the stored symbolic analysis. The tag asserts the indices match the ones
+        # `symbol` was analyzed with.
+        if state.numeric is None:
+            # No previous numeric factorization to reuse, so build one fresh.
+            numeric = klujax.factor(row, col, values, state.symbol)
+        else:
+            numeric = _reuse_or_refresh_numeric(
+                klujax, row, col, values, state.symbol, state.numeric
+            )
         return _KLUState(
             operator,
             (row, col, values),

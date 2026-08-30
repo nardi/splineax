@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from typing import Generator
 
 import jax.numpy as jnp
+import lineax as lx
 import numpy as np
 import pytest
 from jax.experimental.sparse import BCOO
@@ -70,17 +71,42 @@ def test_init_computes_with_solve_with_numeric(
 
 def test_update_same_pattern_reuses_symbol_and_refactors() -> None:
     """`update` on an operator sharing the sparsity tag reuses the symbolic token and
-    only refactors, so `analyze` runs once but `factor` runs per matrix."""
+    the previous numeric factorization, so `analyze` runs once and the pivot-reusing
+    `refactor_with_status` is used rather than a fresh analysis."""
     tag = splx.sparsity_pattern_tag(BCOO.fromdense(SQUARE_MATRIX))
     first = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX), tags=tag)
     second = BCOOLinearOperator(BCOO.fromdense(2.0 * SQUARE_MATRIX), tags=tag)
     solver = KLU()
-    with _spy("analyze") as analyze_calls, _spy("factor") as factor_calls:
+    with (
+        _spy("analyze") as analyze_calls,
+        _spy("refactor_with_status") as refactor_calls,
+    ):
         state = solver.init(first, {})
         updated = solver.update(state, second)
     assert updated.symbol is state.symbol, "update did not reuse the symbolic token"
     assert len(analyze_calls) == 1, "update re-analyzed a matching pattern"
-    assert len(factor_calls) == 2, "update did not refactor for the new values"
+    assert refactor_calls, "update did not attempt a pivot-reusing refactor"
+
+
+def test_update_falls_back_when_reused_pivots_go_bad() -> None:
+    """When new values leave the reused pivots badly scaled, the guarded refactor falls
+    back to a fresh factor, so the solve stays accurate. The second matrix zeros out a
+    diagonal entry the first factorization pivoted on, which a plain in-place refactor
+    would handle poorly."""
+    first_dense = SQUARE_MATRIX
+    second_dense = SQUARE_MATRIX.at[0, 0].set(1e-9)
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(first_dense))
+    first = BCOOLinearOperator(BCOO.fromdense(first_dense), tags=tag)
+    second = BCOOLinearOperator(BCOO.fromdense(second_dense), tags=tag)
+    solver = KLU()
+    state = solver.init(first, {})
+    state = solver.update(state, second)
+    solution = lx.linear_solve(
+        second, RIGHT_HAND_SIDE, solver=solver, state=state
+    ).value
+    solver.release(state)
+    expected = jnp.linalg.solve(np.asarray(second_dense), np.asarray(RIGHT_HAND_SIDE))
+    assert jnp.allclose(solution, expected, atol=1e-6)
 
 
 def test_transpose_reuses_factorization_via_tsolve() -> None:

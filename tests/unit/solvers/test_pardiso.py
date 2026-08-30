@@ -99,11 +99,12 @@ def test_update_same_pattern_reuses_analysis() -> None:
     second_matrix = 2.0 * SQUARE_MATRIX
     second = BCOOLinearOperator(BCOO.fromdense(second_matrix), tags=tag)
     solver = Pardiso()
-    with _spy("analyze") as analyze_calls, _spy("factor") as factor_calls:
+    with _spy("analyze") as analyze_calls:
         state = solver.init(first, {})
         updated = solver.update(state, second)
-    assert len(analyze_calls) == 1
-    assert len(factor_calls) == 2
+    assert len(analyze_calls) == 1, "update re-ran the analysis for a matching pattern"
+    # The native analysis count stays at one, so the well-conditioned refactor reused the
+    # analysis rather than falling back to a reanalyze.
     assert _ffi.analysis_count(updated.token.id) == 1
     solution = lx.linear_solve(
         second, RIGHT_HAND_SIDE, solver=solver, state=updated
@@ -195,3 +196,32 @@ def test_zero_diagonal_matrix_solves_accurately() -> None:
     ).value
     solver.release(symbolic_state)
     assert residual(symbolic) < 1e-10, "deferred symbolic path perturbed its pivots"
+
+
+def test_update_reuse_stays_accurate_on_matching_sensitive_values() -> None:
+    """Reusing the analysis for values that break the previous weighted matching must
+    still solve accurately, because `update` reanalyzes when the reused factorization
+    perturbs its pivots. The zero-diagonal matrix needs weighted matching, so scrambling
+    its values makes the first analysis a poor fit for the second."""
+    matrix = jnp.asarray(ZERO_DIAGONAL_MATRIX)
+    vector = jnp.asarray(ZERO_DIAGONAL_RIGHT_HAND_SIDE)
+    indices = BCOO.fromdense(matrix).indices
+    data = BCOO.fromdense(matrix).data
+    scrambled = data * jnp.asarray(
+        np.random.default_rng(2).uniform(-3.0, 3.0, size=data.shape)
+    )
+    tag = splx.sparsity_pattern_tag(BCOO((data, indices), shape=matrix.shape))
+    first = BCOOLinearOperator(
+        BCOO((data, indices), shape=matrix.shape, indices_sorted=True), tags=tag
+    )
+    second_bcoo = BCOO((scrambled, indices), shape=matrix.shape, indices_sorted=True)
+    second = BCOOLinearOperator(second_bcoo, tags=tag)
+
+    solver = Pardiso()
+    state = solver.init(first, {})
+    state = solver.update(state, second)
+    solution = lx.linear_solve(second, vector, solver=solver, state=state).value
+    solver.release(state)
+
+    residual = float(jnp.abs(second_bcoo.todense() @ solution - vector).max())
+    assert residual < 1e-8
