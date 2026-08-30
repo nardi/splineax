@@ -124,6 +124,12 @@ class _IterativeRefinementState(eqx.Module, Generic[_StateT]):
         tracked = inner.track(solution) if isinstance(inner, TrackingState) else inner
         return _IterativeRefinementState(tracked, self.operator)
 
+    def release(self) -> None:
+        """Release the wrapped inner state, which owns any memory this state holds."""
+        inner = self.inner_state
+        if isinstance(inner, TrackingState):
+            inner.release()
+
 
 class IterativeRefinementSettings(eqx.Module):
     """The `tol` and `max_steps` of an iterative refinement, without a solver bound yet.
@@ -146,8 +152,8 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
     runs the refinement loop (see `iterative_refinement`), reusing that factorization for
     both the initial solve and every correction. Every other method delegates to the
     wrapped solver, so `IterativeRefinement` exposes the same stateful API (`init`,
-    `init_symbolic`, `update`, `release`, `transpose`, `conj`) and can stand in for the
-    solver it wraps.
+    `init_symbolic`, `update`, `transpose`, `conj`) and can stand in for the solver it
+    wraps. Its state releases through the inner state, so `state.release()` still frees it.
 
     The wrapped solver must be square and nonsingular, since refinement assumes the
     correction solve returns a genuine approximate inverse.
@@ -188,9 +194,6 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
         if inner is state.inner_state:
             return state
         return _IterativeRefinementState(inner, operator)
-
-    def release(self, state: _IterativeRefinementState) -> None:
-        self.solver.release(state.inner_state)
 
     def compute(
         self,

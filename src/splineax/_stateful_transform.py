@@ -2,7 +2,7 @@
 
 `stateful_solve_transform` wraps a function that calls `lineax.linear_solve` and threads a
 solver state through its solves, so they reuse a factorization, using only the generic
-stateful API (`init`, `update`, `release`, and a state's `track`).
+stateful API (the solver's `init` and `update`, and a state's `track` and `release`).
 
 A solve inside a `lax.scan` or `lax.while_loop` is threaded by carrying the state through
 the loop, and the first iteration is unrolled to create the state when there is none yet.
@@ -178,20 +178,13 @@ def _jaxpr_has_selected_solve(jaxpr: Jaxpr, filter_solver: _FilterSolver) -> boo
 
 
 class _StateThreadingInterpreter(Generic[_StateT]):
-    """Walks a jaxpr like `eval_jaxpr`, threading one solver state through the solves.
-
-    An instance carries the state as it goes and remembers the last solver it threaded, so
-    the caller can release the state when it is not handed back.
-    """
+    """Walks a jaxpr like `eval_jaxpr`, threading one solver state through the solves."""
 
     filter_solver: _FilterSolver
     """Chooses which solves to thread, as a solver class or a predicate."""
 
     state: _StateT | None
     """The state threaded so far, or `None` before the first matched solve."""
-
-    solver: StatefulSolver[_StateT] | None
-    """The last solver threaded, used by the caller to release the state."""
 
     pass_through_custom_diff: bool
     """Whether a solve inside a `custom_jvp` or `custom_vjp` passes through instead of raising."""
@@ -204,7 +197,6 @@ class _StateThreadingInterpreter(Generic[_StateT]):
     ) -> None:
         self.filter_solver = filter_solver
         self.state = state
-        self.solver = None
         self.pass_through_custom_diff = pass_through_custom_diff
 
     def interpret(self, jaxpr: Jaxpr, consts: list[Any], args: list[Any]) -> list[Any]:
@@ -291,7 +283,6 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             self.state = solver.init(stopped_operator, {})
         else:
             self.state = solver.update(self.state, stopped_operator, {})
-        self.solver = solver
         solution, result_code, stats = _rebind_solve(
             (
                 operator,
@@ -327,8 +318,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
 
         Runs a fresh interpreter over the body, threading the state rebuilt from
         `state_leaves`, and returns the body's own outputs, the threaded state's leaves, and
-        that state's structure. Records the solver on this interpreter so the caller can
-        release the state. The outgoing structure may differ from the incoming one when a
+        that state's structure. The outgoing structure may differ from the incoming one when a
         first solve creates the state, which is why it is returned rather than assumed.
         """
         incoming = jax.tree_util.tree_unflatten(state_treedef, state_leaves)
@@ -336,9 +326,9 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             self.filter_solver, incoming, self.pass_through_custom_diff
         )
         outputs = inner.interpret(jaxpr, consts, operands)
-        if inner.solver is not None:
-            self.solver = inner.solver
-        out_leaves, out_treedef = jax.tree_util.tree_flatten(inner.state)
+        if inner.state is not None:
+            self.state = inner.state
+        out_leaves, out_treedef = jax.tree_util.tree_flatten(self.state)
         return outputs, out_leaves, out_treedef
 
     @staticmethod
@@ -719,9 +709,9 @@ class _StateThreadingInterpreter(Generic[_StateT]):
                 self.filter_solver, incoming, self.pass_through_custom_diff
             )
             outputs = inner.interpret(body, [], list(args[:num_operands]))
-            if inner.solver is not None:
-                self.solver = inner.solver
-            out_leaves, output_state_treedef = jax.tree_util.tree_flatten(inner.state)
+            if inner.state is not None:
+                self.state = inner.state
+            out_leaves, output_state_treedef = jax.tree_util.tree_flatten(self.state)
             return [*outputs, *out_leaves]
 
         traced = self._prune_dead(make_jaxpr(new_body)(*operands, *state_leaves))
@@ -754,9 +744,6 @@ class _StagedComputation(NamedTuple, Generic[_StateT]):
 
     num_output_leaves: int
     """How many leading result leaves belong to the output, the rest being the state."""
-
-    solver: StatefulSolver[_StateT] | None
-    """The solver whose `release` frees the state when it is not handed back."""
 
 
 class _WrappedFunction(Protocol[_OutputT]):
@@ -827,7 +814,6 @@ def stateful_solve_transform(
         output_treedef: jax.tree_util.PyTreeDef | None = None
         state_out_treedef: jax.tree_util.PyTreeDef | None = None
         num_output_leaves = 0
-        threaded_solver: StatefulSolver[Any] | None = None
 
         def call_flat(*flat: Any) -> _OutputT:
             """Call `fn` from a flat list of the call's argument leaves."""
@@ -839,11 +825,11 @@ def stateful_solve_transform(
         def stage_body(*flat: Any) -> list[Any]:
             """Trace and interpret `fn`, returning the output leaves then the state leaves.
 
-            Records the output structure, the final state structure, the output leaf count,
-            and the threaded solver in the enclosing scope, so `stage` can read them after.
+            Records the output structure, the final state structure, and the output leaf
+            count in the enclosing scope, so `stage` can read them after.
             """
             nonlocal output_treedef, state_out_treedef
-            nonlocal num_output_leaves, threaded_solver
+            nonlocal num_output_leaves
             call_flat_leaves = list(flat[:num_call_leaves])
             state_flat_leaves = list(flat[num_call_leaves:])
             initial_state = jax.tree_util.tree_unflatten(
@@ -863,7 +849,6 @@ def stateful_solve_transform(
             )
             output_treedef = jax.tree_util.tree_structure(output_shapes)
             num_output_leaves = len(outputs)
-            threaded_solver = interpreter.solver
             return [*outputs, *final_leaves]
 
         staged = make_jaxpr(stage_body)(*call_leaves, *state_leaves)
@@ -880,7 +865,6 @@ def stateful_solve_transform(
             output_treedef=output_treedef,
             state_treedef=state_out_treedef,
             num_output_leaves=num_output_leaves,
-            solver=threaded_solver,
         )
 
     def stateful_function(*args: Any, state: Any = None, **kwargs: Any) -> Any:
@@ -916,8 +900,8 @@ def stateful_solve_transform(
 
         if keep_state:
             return output, final_state
-        if computation.solver is not None:
-            computation.solver.release(final_state)
+        if final_state is not None:
+            final_state.release()
         return output
 
     return cast(_WrappedFunction[_OutputT], stateful_function)

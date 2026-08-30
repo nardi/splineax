@@ -89,9 +89,6 @@ class _AutoDispatch(AbstractLinearSolver[_State]):
     ) -> _State:
         return self._solver_for_state(state).update(state, operator, options)
 
-    def release(self, state: Any) -> None:
-        self._solver_for_state(state).release(state)
-
     def compute(
         self, state: Any, vector: PyTree[Array], options: dict[str, Any]
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
@@ -118,9 +115,9 @@ class AutoSparseLinearSolver(AbstractLinearSolver[Any]):
     (SuiteSparse, factorization reuse). Both are double precision only, hence the x64
     requirement. On any other backend, or on CPU when x64 is disabled, it dispatches to
     `Spsolve`, which works in single or double precision and on any backend. It exposes
-    the same stateful API as `Pardiso` and `KLU` (`update`, `release`, `init_symbolic`),
-    so it can be substituted for either. When it dispatches to `Spsolve`, the reuse calls
-    degrade to no-ops.
+    the same stateful API as `Pardiso` and `KLU` (`update`, `init_symbolic`), so it can
+    be substituted for either. When it dispatches to `Spsolve`, the reuse calls degrade
+    to no-ops.
 
     `pardiso_mkl_jax` does not support complex matrices (see `Pardiso`'s docstring), so
     `init` falls back to `KLU` for a complex operator even when `Pardiso` was otherwise
@@ -189,9 +186,6 @@ class AutoSparseLinearSolver(AbstractLinearSolver[Any]):
         options: dict[str, Any] = {},
     ) -> Any:
         return self._solver.update(state, operator, options)
-
-    def release(self, state: Any) -> None:
-        self._solver.release(state)
 
     def compute(
         self, state: Any, vector: PyTree[Array], options: dict[str, Any]

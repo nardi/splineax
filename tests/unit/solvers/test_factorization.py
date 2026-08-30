@@ -37,7 +37,7 @@ def test_linear_solve_returns_solution_and_state(
     building a fresh state through `init` when none is passed."""
     operator = make_operator(SQUARE_MATRIX)
     solution, state = splx.linear_solve(operator, RIGHT_HAND_SIDE, solver)
-    solver.release(state)
+    state.release()
     assert jnp.allclose(solution.value, _EXPECTED, atol=1e-5)
 
 
@@ -53,7 +53,7 @@ def test_reuse_across_vectors_via_update(
         solution, state = splx.linear_solve(operator, rhs, solver, state=state)
         expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(rhs))
         assert jnp.allclose(solution.value, expected, atol=1e-5)
-    solver.release(state)
+    state.release()
 
 
 def test_init_update_solve(
@@ -66,7 +66,7 @@ def test_init_update_solve(
     solution = lx.linear_solve(
         operator, RIGHT_HAND_SIDE, solver=solver, state=state
     ).value
-    solver.release(state)
+    state.release()
     assert jnp.allclose(solution, _EXPECTED, atol=1e-5)
 
 
@@ -81,7 +81,7 @@ def test_init_symbolic_then_update_solves(
     solution = lx.linear_solve(
         operator, RIGHT_HAND_SIDE, solver=solver, state=state
     ).value
-    solver.release(state)
+    state.release()
     assert jnp.allclose(solution, _EXPECTED, atol=1e-5)
 
 
@@ -97,7 +97,7 @@ def test_transpose_of_state_solves_transposed(
     state = solver.init(operator, {})
     transposed_state, _ = solver.transpose(state, {})
     solution = np.asarray(solver.compute(transposed_state, RIGHT_HAND_SIDE, {})[0])
-    solver.release(state)
+    state.release()
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 
@@ -112,7 +112,7 @@ def test_repeated_update_is_a_no_op(
     twice = solver.update(again, operator)
     assert again is state
     assert twice is state
-    solver.release(state)
+    state.release()
 
 
 def test_state_solve_under_jit(
@@ -128,7 +128,7 @@ def test_state_solve_under_jit(
 
     state = solver.init(operator, {})
     solution = np.asarray(run(state, RIGHT_HAND_SIDE))
-    solver.release(state)
+    state.release()
     assert jnp.allclose(solution, _EXPECTED, atol=1e-5)
 
 
@@ -144,7 +144,7 @@ def test_release_ordered_under_jit(solver: splx.SparseLinearSolver) -> None:
             BCOO((data, indices), shape=shape, indices_sorted=True)
         )
         solution, state = splx.linear_solve(operator, b, solver)
-        solver.release(state)
+        state.release()
         return solution.value
 
     solution = np.asarray(run(sparsity.data, RIGHT_HAND_SIDE))
@@ -174,7 +174,7 @@ def test_release_ordered_in_while_loop(solver: splx.SparseLinearSolver) -> None:
         state, total = jax.lax.fori_loop(
             0, iterations, body, (state, jnp.zeros_like(b))
         )
-        solver.release(state)
+        state.release()
         return total
 
     total = np.asarray(run(sparsity.data, RIGHT_HAND_SIDE))
@@ -197,7 +197,7 @@ def test_sparsity_tag_reuse_solves_new_values(
     solution = lx.linear_solve(
         second, RIGHT_HAND_SIDE, solver=solver, state=state
     ).value
-    solver.release(state)
+    state.release()
 
     expected = jnp.linalg.solve(np.asarray(second_matrix), np.asarray(RIGHT_HAND_SIDE))
     assert jnp.allclose(solution, expected, atol=1e-5)

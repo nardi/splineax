@@ -135,7 +135,7 @@ def test_auto_stateful_api_solves_and_releases(
 
     solution, state = splx.linear_solve(operator, RIGHT_HAND_SIDE, solver)
     assert jnp.allclose(solution.value, expected, atol=1e-5)
-    solver.release(state)
+    state.release()
 
     symbolic_state = solver.update(
         solver.init_symbolic(BCOO.fromdense(SQUARE_MATRIX)), operator
@@ -143,7 +143,7 @@ def test_auto_stateful_api_solves_and_releases(
     reused = lx.linear_solve(
         operator, RIGHT_HAND_SIDE, solver=solver, state=symbolic_state
     ).value
-    solver.release(symbolic_state)
+    symbolic_state.release()
     assert jnp.allclose(reused, expected, atol=1e-5)
 
 
@@ -182,7 +182,7 @@ def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
         reused = lx.linear_solve(
             operator, right_hand_side, solver=solver, state=updated
         ).value
-        solver.release(updated)
+        updated.release()
         assert jnp.allclose(reused, expected, atol=1e-5)
 
 

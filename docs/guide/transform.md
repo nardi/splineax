@@ -83,7 +83,7 @@ def solve_twice_stateful_explicit(values, first, second):
     )
     x1, state = splx.linear_solve(operator, first, splx.KLU()).value
     x2, state = splx.linear_solve(operator, second, splx.KLU(), state=state).value
-    splx.KLU().release(state)
+    state.release()
     return x1 + x2
 ```
 
@@ -131,7 +131,7 @@ back and release it yourself.
 ```{.python continuation}
 keep = splx.stateful_solve_transform(solve_twice, return_final_state=True)
 output, state = keep(values, b1, b2)
-splx.KLU().release(state)
+state.release()
 ```
 
 You can also seed a call with a state through the `state` keyword, which lets you thread one
