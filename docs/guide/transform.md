@@ -6,13 +6,13 @@ differential equation solvers and statistical model fitting procedures built on
 top of them. If such algorithms are written using Lineax, they might be able to
 accept a splineax solver, but will not be able to make use of the stateful API,
 since this requires changing how the solver is used. This means that they have
-to be rewritten to benefit of any factorization reuse.
+to be rewritten to be able to reuse factorizations over multiple solves.
 
-To make this process easier and more adaptable,
+To make this process easier and adaptable to code from third-party libraries,
 `splineax.stateful_solve_transform` provides a function transformation that
 takes a "naive" function calling `lineax.linear_solve` multiple times and
-threads a solver state through it. The internal solves then reuse a
-factorization, without having to change algorithm code.
+threads a solver state through it. The internal solves then reuse
+factorizations, without having to change algorithm code.
 
 This builds on the explicit stateful solve API from
 [Stateful solves](stateful.md). It is recommended to become familiar with that
@@ -23,10 +23,10 @@ function.
 
 Start with a function that calls `lineax.linear_solve`. When you give this to
 the transform it runs the function, and each time it encounters a
-`lineax.linear_solve` it surrounds it `init`/`update` and `track` calls,
+`lineax.linear_solve` it surrounds it with `init`/`update` and `track` calls,
 equivalent to `splx.linear_solve`. The first solve builds the state with `init`,
-and every later solve folds the operator in with `update`, so a matrix that
-shares the pattern reuses the analysis.
+and every later solve folds the operator in with `update`, so a new matrix that
+shares the same pattern as the previous one will reuse the previous analysis.
 
 ```python
 import jax
@@ -74,17 +74,24 @@ result = solve_twice_stateful(values, b1, b2)
 assert jnp.allclose(result, solve_twice(values, b1, b2))
 ```
 
-The wrapped `solve_twice_stateful` returns the same answer as `solve_twice`. The difference is in how the underlying solver is called the second solve refactors the shared analysis instead of building a new one, roughly equivalent to the following:
+The wrapped `solve_twice_stateful` returns the same answer as `solve_twice`. The
+difference is in how the underlying solver is called. The factorization from the
+first solve is passed to the second one and reused. The result is roughly
+equivalent to the following:
 
 ```{.python continuation}
 def solve_twice_stateful_explicit(values, first, second):
     operator = splx.BCOOLinearOperator(
         BCOO((values, indices), shape=(4, 4)), tags=tag
     )
-    x1, state = splx.linear_solve(operator, first, splx.KLU()).value
-    x2, state = splx.linear_solve(operator, second, splx.KLU(), state=state).value
+    sol1, state = splx.linear_solve(operator, first, splx.KLU())
+    x1 = sol1.value
+    sol2, state = splx.linear_solve(operator, second, splx.KLU(), state=state)
+    x2 = sol2.value
     state.release()
     return x1 + x2
+
+assert jnp.allclose(solve_twice_stateful_explicit(values, b1, b2), solve_twice(values, b1, b2))
 ```
 
 Reuse depends on the solver recognising that the two operators share a pattern. That is what
@@ -128,15 +135,17 @@ By default the wrapped function returns the output alone, and the transform rele
 state it built once the function returns. Pass `return_final_state=True` to get the state
 back and release it yourself.
 
+You can also seed a call with an initial state via the `state` keyword argument,
+which lets you thread a state across successive calls of the transformed
+function. Passing a state makes the wrapped function return the pair by default.
+
 ```{.python continuation}
 keep = splx.stateful_solve_transform(solve_twice, return_final_state=True)
 output, state = keep(values, b1, b2)
+# Pass the state back into another call to `keep`.
+output, state = keep(values, b1, b2, state=state)
 state.release()
 ```
-
-You can also seed a call with a state through the `state` keyword, which lets you thread one
-state across successive calls. Passing a state makes the wrapped function return the pair by
-default, the same as `return_final_state=True`.
 
 ## Transforming only specific solve calls
 
@@ -178,7 +187,9 @@ listed here.
 
 - **Reuse needs a shared pattern.** Threading a state does not by itself reuse a
   factorization. The solver reuses one only when it can tell two operators share a pattern,
-  which comes from a [`splineax.sparsity_pattern_tag`][]. You have to make sure the operators get this tag, either by passing it through yourself or because the operators are generated from a sparse Jacobian calculation.
+  which comes from a [`splineax.sparsity_pattern_tag`][]. You have to make sure the operators
+  get this tag, either by passing it through yourself or because the operators are generated
+  from a sparse Jacobian calculation.
 - **`lax.cond` needs an initial state.** A solve inside a `cond` branch is threaded only when
   a solve before the `cond` has already created the state, since the untaken branch has to
   return a matching state. A first solve reached only inside a `cond` raises.
@@ -187,10 +198,12 @@ listed here.
   `pass_through_custom_diff=True` to let such a solve run without threading, so it works but
   does not reuse a factorization.
 - **Multiple solve families may not work.** The transform threads one state, so a single loop that
-  interleaves two different solvers or patterns may not work, or perform poorly because factorizations are never reused. You might be able to use `filter_solver` and to separate them and apply the transform multiple times.
-- **An explicit `state` argument to `linear_solve` is overridden.** If the wrapped function passes its own
-  `state` to a threaded `lineax.linear_solve`, the transform ignores it and substitutes the
-  state it threads. A solve the filter skips keeps its explicit state.
+  interleaves two different solvers or patterns may not work, or perform poorly because factorizations
+  are never reused. You might be able to use `filter_solver` and to separate them and apply the
+  transform multiple times.
+- **An explicit `state` argument to `linear_solve` is overridden.** If the wrapped function
+  passes its own `state` to a threaded `lineax.linear_solve`, the transform ignores it and
+  substitutes the state it threads. A solve skipped by the filter keeps its explicit state.
 - **Loop states share one structure.** A loop carry has a fixed structure, so a state carried
   through a `scan` or `while_loop` must keep one pytree shape. A state from `init_symbolic`
   differs, and the transform normalizes it by unrolling. A solver whose `update` changes the
