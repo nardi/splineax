@@ -806,7 +806,8 @@ def stateful_solve_transform(
 
     **Returns:**
 
-    A function with `fn`'s arguments plus a `state` keyword, see `_WrappedFunction`.
+    A function taking `fn`'s arguments plus a `state` keyword for an initial state. It returns
+    `fn`'s output, or the output paired with the final state when a state is kept.
     """
     staged_by_signature: dict[Any, _StagedComputation[Any]] = {}
 

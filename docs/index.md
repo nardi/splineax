@@ -26,6 +26,10 @@ It provides:
   which picks an appropriate solver based on platform and settings, and
   [`IterativeRefinement`][splineax.IterativeRefinement], which wraps any solver and refines
   its solution to a target residual.
+- **Lineax code interop**:
+  [`stateful_solve_transform`][splineax.stateful_solve_transform] rewrites a function that
+  calls `lineax.linear_solve` so its solves thread a solver state and reuse a
+  factorization.
 
 ## Installation
 
@@ -82,11 +86,7 @@ solver.release(state)
 - [Operators](guide/operators.md): `BCOO` vs `BCSR`, how to construct them, and details on sparse
   Jacobian operators.
 - [Solvers](guide/solvers.md): what each solver does and when to use it.
-- [Advanced usage](guide/advanced.md): reuse a factorization across many solves with the
-  `SparseLinearSolver` protocol.
-
-!!! note
-
-    The solvers handle **square, nonsingular** operators only. `KLU` additionally runs on
-    **CPU in double precision** only (see [Solvers](guide/solvers.md)); `Spsolve` runs on
-    any backend.
+- [Stateful solves](guide/stateful.md): reuse a factorization across many solves with the
+  explicit stateful solve API.
+- [Transforming existing Lineax code](guide/transform.md): thread solver state through a function's
+  `lineax.linear_solve` calls automatically.

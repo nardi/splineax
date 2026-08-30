@@ -80,4 +80,4 @@ x2 = lx.linear_solve(operator, b[::-1], solver=solver, state=state).value
 ```
 
 For `KLU` this avoids redoing the matrix bookkeeping on each solve. To go further and reuse
-an actual matrix *factorization* across solves, see [Advanced usage](advanced.md).
+an actual matrix *factorization* across solves, see [Stateful solves](stateful.md).
