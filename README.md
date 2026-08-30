@@ -8,9 +8,14 @@ Sparse linear operators and direct solvers for
 plugs straight into `lineax.linear_solve`. It also interfaces with [asdex](https://github.com/adrhill/asdex) for calculating sparse Jacobians and using them as operators.
 
 - **Operators**: `BCOOLinearOperator`, `BCSRLinearOperator`, `SparseJacobianLinearOperator`.
-- **Solvers**: `Spsolve` (any backend), `KLU` (CPU-only, SuiteSparse, factorization reuse),
-  and `AutoSparseLinearSolver` (picks one based on the platform).
-- A `SparseLinearSolver` protocol for separating factorization from solving.
+- **Stateful solver protocols**: `StatefulSolver` and `SparseLinearSolver` for writing
+  solver-agnostic code that reuses factorizations over many solves and operators.
+- **Solver library bindings**: `Spsolve` (any backend), `KLU` (CPU-only, SuiteSparse KLU),
+  and `Pardiso` (CPU-only, Intel oneMKL Pardiso, installed as extra). `KLU` and `Pardiso`
+  reuse their factorization across solves.
+- **Higher-level solvers**: `AutoSparseLinearSolver`, which picks an appropriate solver
+  based on platform and settings, and `IterativeRefinement`, which wraps any solver and
+  refines its solution to a target residual.
 
 ## Installation
 

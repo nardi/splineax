@@ -26,67 +26,90 @@ import splineax.solvers._auto as _auto_module
 from splineax import (
     KLU,
     AutoSparseLinearSolver,
+    IterativeRefinement,
+    IterativeRefinementSettings,
     Pardiso,
     Spsolve,
 )
 from splineax.solvers import SparseLinearSolver
+from splineax.solvers._auto import _AutoDispatch
+from splineax.solvers._iterative import _IterativeRefinementState
 from splineax.solvers._klu import _KLUState
 from splineax.solvers._pardiso import _pardiso_available
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
 
-def test_select_solver_prefers_pardiso_on_cpu_with_x64(
+def test_dispatch_prefers_pardiso_on_cpu_with_x64(
     make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no override, `AutoSparseLinearSolver` selects `Pardiso` on CPU when x64 is
+    """With no override, the platform dispatch selects `Pardiso` on CPU when x64 is
     enabled and `pardiso-mkl-jax` is installed."""
     monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
     operator = make_operator(SQUARE_MATRIX)
     with jax.enable_x64(True):
-        assert isinstance(AutoSparseLinearSolver().select_solver(operator), Pardiso)
+        assert isinstance(_AutoDispatch().select_solver(operator), Pardiso)
 
 
-def test_select_solver_falls_back_to_klu_when_pardiso_unavailable(
+def test_dispatch_falls_back_to_klu_when_pardiso_unavailable(
     make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When `pardiso-mkl-jax` is not installed, `AutoSparseLinearSolver` falls back to
-    `KLU` on CPU when x64 is enabled."""
+    """When `pardiso-mkl-jax` is not installed, the dispatch falls back to `KLU` on CPU
+    when x64 is enabled."""
     monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: False)
     operator = make_operator(SQUARE_MATRIX)
     with jax.enable_x64(True):
-        assert isinstance(AutoSparseLinearSolver().select_solver(operator), KLU)
+        assert isinstance(_AutoDispatch().select_solver(operator), KLU)
 
 
-def test_select_solver_falls_back_to_spsolve_on_cpu_without_x64(
+def test_dispatch_falls_back_to_spsolve_on_cpu_without_x64(
     make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """On CPU with x64 disabled, `AutoSparseLinearSolver` falls back to `Spsolve`, since
-    both `Pardiso` and `KLU` are double precision only."""
+    """On CPU with x64 disabled, the dispatch falls back to `Spsolve`, since both
+    `Pardiso` and `KLU` are double precision only."""
     monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
     operator = make_operator(SQUARE_MATRIX)
     with jax.enable_x64(False):
-        assert isinstance(AutoSparseLinearSolver().select_solver(operator), Spsolve)
+        assert isinstance(_AutoDispatch().select_solver(operator), Spsolve)
 
 
-def test_select_solver_platform_override(
+def test_dispatch_platform_override(
     make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An explicit `platform` override forces the corresponding solver, without a solve
-    (so no real GPU is required to check the non-CPU branch)."""
+    """An explicit `platform` override forces the corresponding direct solver, without a
+    solve (so no real GPU is required to check the non-CPU branch)."""
     monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
     operator = make_operator(SQUARE_MATRIX)
     with jax.enable_x64(True):
         assert isinstance(
-            AutoSparseLinearSolver(platform="cpu").select_solver(operator), Pardiso
+            _AutoDispatch(platform="cpu").select_solver(operator), Pardiso
         )
         assert isinstance(
-            AutoSparseLinearSolver(platform="gpu").select_solver(operator), Spsolve
+            _AutoDispatch(platform="gpu").select_solver(operator), Spsolve
         )
     with jax.enable_x64(False):
         assert isinstance(
-            AutoSparseLinearSolver(platform="cpu").select_solver(operator), Spsolve
+            _AutoDispatch(platform="cpu").select_solver(operator), Spsolve
         )
+
+
+def test_select_solver_returns_exact_solver_with_refinement(
+    make_operator: OperatorFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`AutoSparseLinearSolver.select_solver` returns the exact solver it runs: an
+    `IterativeRefinement` wrapping the chosen direct solver by default, and the direct
+    dispatch itself when refinement is off."""
+    monkeypatch.setattr(_auto_module, "_pardiso_available", lambda: True)
+    operator = make_operator(SQUARE_MATRIX)
+    with jax.enable_x64(True):
+        refined = AutoSparseLinearSolver().select_solver(operator)
+        assert isinstance(refined, IterativeRefinement)
+        assert isinstance(refined.solver, _AutoDispatch)
+
+        plain = AutoSparseLinearSolver(iterative_refinement=False).select_solver(
+            operator
+        )
+        assert isinstance(plain, _AutoDispatch)
 
 
 def test_auto_solve_matches_numpy(
@@ -142,8 +165,10 @@ def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
             np.asarray(complex_matrix), np.asarray(right_hand_side)
         )
 
-        solver = AutoSparseLinearSolver()
-        assert isinstance(solver.select_solver(operator), Pardiso)
+        # Disable refinement so the state is the chosen direct solver's own, which this
+        # test inspects to confirm the complex fallback landed on `KLU`.
+        solver = AutoSparseLinearSolver(iterative_refinement=False)
+        assert isinstance(_AutoDispatch().select_solver(operator), Pardiso)
 
         state = solver.init(operator, {})
         assert isinstance(state, _KLUState)
@@ -161,10 +186,44 @@ def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
         assert jnp.allclose(reused, expected, atol=1e-5)
 
 
+def test_auto_applies_iterative_refinement_by_default(
+    make_operator: OperatorFactory, enable_x64: None
+) -> None:
+    """By default `AutoSparseLinearSolver` wraps its chosen solver in iterative
+    refinement, so its state is an `_IterativeRefinementState`. Disabling it returns the
+    chosen solver's own state instead."""
+    operator = make_operator(SQUARE_MATRIX)
+
+    refined = AutoSparseLinearSolver().init(operator, {})
+    assert isinstance(refined, _IterativeRefinementState)
+
+    plain = AutoSparseLinearSolver(iterative_refinement=False).init(operator, {})
+    assert not isinstance(plain, _IterativeRefinementState)
+
+
+def test_auto_refinement_settings_are_forwarded(
+    make_operator: OperatorFactory, enable_x64: None
+) -> None:
+    """An `IterativeRefinementSettings` on `AutoSparseLinearSolver` reaches the wrapping
+    `IterativeRefinement`, and the configured solve is still correct."""
+    operator = make_operator(SQUARE_MATRIX)
+    settings = IterativeRefinementSettings(tol=1e-8, max_steps=3)
+    solver = AutoSparseLinearSolver(iterative_refinement=settings)
+    wrapper = solver.select_solver(operator)
+    assert isinstance(wrapper, IterativeRefinement)
+    assert wrapper.tol == 1e-8
+    assert wrapper.max_steps == 3
+
+    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
+    solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver).value
+    assert jnp.allclose(solution, expected, atol=1e-6)
+
+
 def test_solvers_satisfy_sparse_linear_solver_protocol() -> None:
     """All solvers structurally satisfy the `SparseLinearSolver` Protocol."""
     assert isinstance(KLU(), SparseLinearSolver)
     assert isinstance(Spsolve(), SparseLinearSolver)
     assert isinstance(AutoSparseLinearSolver(), SparseLinearSolver)
+    assert isinstance(IterativeRefinement(KLU()), SparseLinearSolver)
     if _pardiso_available():
         assert isinstance(Pardiso(), SparseLinearSolver)

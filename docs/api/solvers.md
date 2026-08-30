@@ -20,6 +20,14 @@
 
 ---
 
+::: splineax.IterativeRefinement
+
+---
+
+::: splineax.IterativeRefinementSettings
+
+---
+
 ::: splineax.solvers.ReorderingScheme
 
 ## Sparsity tags

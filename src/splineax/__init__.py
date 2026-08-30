@@ -20,6 +20,12 @@ from .solvers import (
     AutoSparseLinearSolver as AutoSparseLinearSolver,
 )
 from .solvers import (
+    IterativeRefinement as IterativeRefinement,
+)
+from .solvers import (
+    IterativeRefinementSettings as IterativeRefinementSettings,
+)
+from .solvers import (
     Pardiso as Pardiso,
 )
 from .solvers import (
