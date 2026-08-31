@@ -17,6 +17,7 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
+from splineax._trace import record_event
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -111,6 +112,18 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _SpsolveState:
+        record_event("init", "spsolve", shape=(operator.out_size(), operator.in_size()))
+        return self._build(operator, options)
+
+    def _build(
+        self, operator: AbstractLinearOperator, options: dict[str, Any]
+    ) -> _SpsolveState:
+        """Sort `operator` into a solvable CSR state, no factorization.
+
+        Shared by `init` and `update`'s rebuild path, so a rebuild does not re-emit an `init`
+        boundary. `Spsolve` factors and solves in one fused call, so there is no analyze or
+        factor to record here.
+        """
         if operator.in_size() != operator.out_size():
             raise ValueError(
                 "`Spsolve` may only be used for linear solves with square matrices"
@@ -123,7 +136,7 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         sorted_asserted = sparse_indices_sorted in getattr(operator, "tags", ())
         match operator:
             case SparseJacobianLinearOperator():
-                return self.init(materialise(operator), options)
+                return self._build(materialise(operator), options)
             case BCSRLinearOperator(matrix):
                 # Round-trip an unsorted `BCSR` through `BCOO`, since `BCSR.from_bcoo`
                 # sorts.
@@ -158,6 +171,7 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         that `update` fills with the first real operator.
         """
         del sparsity, options
+        record_event("init_symbolic", "spsolve", symbolic=True, note="no-op")
         return _SpsolveState(None, None, None)
 
     def update(
@@ -171,8 +185,18 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         Repeated calls with the same operator object are a no-op.
         """
         if operator is state.operator:
+            record_event(
+                "update",
+                "spsolve",
+                outcome="noop",
+                shape=state.matrix.shape if state.matrix is not None else None,
+            )
             return state
-        return self.init(operator, options)
+        # `Spsolve` reuses nothing, so every changed operator is a full rebuild.
+        record_event(
+            "update", "spsolve", outcome="rebuilt", reused=False, note="no reuse"
+        )
+        return self._build(operator, options)
 
     def compute(
         self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]
@@ -188,6 +212,11 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         vector = ravel_vector(vector, packed_structures)
         # `spsolve` requires the right-hand side to share the matrix dtype.
         vector = vector.astype(matrix.dtype)
+        # Fused analyze+factor+solve, and unordered because `compute` runs inside lineax's
+        # solve primitive (see `record_event`).
+        record_event(
+            "solve", "spsolve", shape=matrix.shape, note="fused", ordered=False
+        )
         solution = _spsolve(
             matrix.data,
             matrix.indices,

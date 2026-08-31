@@ -19,6 +19,7 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
+from splineax._trace import record_event
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -175,6 +176,7 @@ class _KLUState(eqx.Module):
         Accepts the lineax `Solution` or a bare value pytree. The solution arrays become
         ordering dependencies on the tokens, see klujax `SymbolToken.track`.
         """
+        record_event("track", "klu", shape=self.shape)
         value = getattr(solution, "value", solution)
         leaves = tuple(jax.tree_util.tree_leaves(value))
         symbol = self.symbol.track(*leaves)
@@ -192,6 +194,7 @@ class _KLUState(eqx.Module):
 
     def release(self) -> None:
         """Free the cache slots this state owns, ordered after any tracked solves."""
+        record_event("release", "klu", shape=self.shape)
         klujax = _klujax()
         if self.numeric is not None:
             klujax.free_numeric(self.numeric)
@@ -261,6 +264,12 @@ def _reuse_or_refresh_numeric(
     reuse_is_safe = jnp.all(status == klujax.KLUStatus.OK) & jnp.all(
         reciprocal_condition > _REFACTOR_RCOND_FLOOR
     )
+    record_event(
+        "refactor",
+        "klu",
+        nnz=int(values.shape[0]),
+        dynamic={"rcond": reciprocal_condition, "reused": reuse_is_safe},
+    )
     return jax.lax.cond(
         reuse_is_safe,
         lambda: refreshed,
@@ -286,6 +295,17 @@ class KLU(AbstractLinearSolver[_KLUState]):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _KLUState:
+        record_event("init", "klu", shape=(operator.out_size(), operator.in_size()))
+        return self._analyze_and_factor(operator, options)
+
+    def _analyze_and_factor(
+        self, operator: AbstractLinearOperator, options: dict[str, Any]
+    ) -> _KLUState:
+        """Analyze and factor `operator` into a ready-to-solve state.
+
+        Shared by `init` and by `update`'s rebuild path, so the trace records the analyze and
+        factor without a second `init` boundary when a changed pattern forces a rebuild.
+        """
         del options
         if operator.in_size() != operator.out_size():
             raise ValueError(
@@ -293,10 +313,12 @@ class KLU(AbstractLinearSolver[_KLUState]):
             )
         row, col, values, shape = _extract_coo(operator)
         klujax = _klujax()
-        # `init` analyzes and factorizes right away, so the state is ready to solve and
+        # This analyzes and factorizes right away, so the state is ready to solve and
         # reusable across right-hand sides. `factor` needs the real `SymbolToken`, which
         # `analyze` returns and the state then carries.
+        record_event("analyze", "klu", shape=shape, nnz=int(values.shape[0]))
         symbol = klujax.analyze(row, col, shape[1])
+        record_event("factor", "klu", shape=shape, nnz=int(values.shape[0]))
         numeric = klujax.factor(row, col, values, symbol)
         return _KLUState(
             operator,
@@ -325,6 +347,10 @@ class KLU(AbstractLinearSolver[_KLUState]):
             raise ValueError(
                 f"`KLU.init_symbolic` requires a square matrix; got shape {shape}."
             )
+        record_event("init_symbolic", "klu", shape=shape)
+        record_event(
+            "analyze", "klu", shape=shape, nnz=int(row.shape[0]), symbolic=True
+        )
         symbol = _klujax().analyze(row, col, shape[1])
         return _KLUState(
             None,
@@ -351,6 +377,7 @@ class KLU(AbstractLinearSolver[_KLUState]):
         """
         if operator is state.operator:
             # Nothing changed, so this is a no-op.
+            record_event("update", "klu", outcome="noop", shape=state.shape)
             return state
         tag = operator_pattern_tag(operator)
         if (
@@ -359,9 +386,18 @@ class KLU(AbstractLinearSolver[_KLUState]):
             and state.sparsity_tag == tag
         ):
             # Same pattern, new values. Reuse the symbolic analysis.
+            record_event("update", "klu", outcome="reused", shape=state.shape)
             return self._refactor(state, operator, tag, options)
-        # New pattern, so analyze from scratch.
-        return self.init(operator, options)
+        # New pattern, so analyze from scratch. Recorded as a rebuild so the analyze below is
+        # attributed to the changed pattern rather than read as a first init.
+        record_event(
+            "update",
+            "klu",
+            outcome="rebuilt",
+            note="sparsity pattern changed",
+            reused=False,
+        )
+        return self._analyze_and_factor(operator, options)
 
     def _refactor(
         self,
@@ -377,6 +413,7 @@ class KLU(AbstractLinearSolver[_KLUState]):
         # `symbol` was analyzed with.
         if state.numeric is None:
             # No previous numeric factorization to reuse, so build one fresh.
+            record_event("factor", "klu", shape=shape, nnz=int(values.shape[0]))
             numeric = klujax.factor(row, col, values, state.symbol)
         else:
             numeric = _reuse_or_refresh_numeric(
@@ -414,11 +451,21 @@ class KLU(AbstractLinearSolver[_KLUState]):
         # token was dropped, so factor here as a fallback. Normally `numeric` is present.
         numeric = state.numeric
         if numeric is None:
+            record_event("factor", "klu", shape=state.shape)
             numeric = klujax.factor(row, col, values, state.symbol)
         solve = (
             klujax.tsolve_with_numeric
             if state.transposed
             else klujax.solve_with_numeric
+        )
+        # Unordered: `compute` runs inside lineax's solve primitive, which does not carry an
+        # ordered effect (see `record_event`).
+        record_event(
+            "solve",
+            "klu",
+            shape=state.shape,
+            transposed=state.transposed,
+            ordered=False,
         )
         x = solve(numeric, b, state.symbol)
         solution = unravel_solution(x, state.packed_structures)
@@ -457,6 +504,14 @@ class KLU(AbstractLinearSolver[_KLUState]):
         # Complex: conjugate the values and refactor, reusing the symbolic analysis since
         # the sparsity is unchanged.
         conjugated = values.conj()
+        if state.numeric is not None:
+            record_event(
+                "factor",
+                "klu",
+                shape=state.shape,
+                note="conj",
+                nnz=int(values.shape[0]),
+            )
         numeric = (
             None
             if state.numeric is None

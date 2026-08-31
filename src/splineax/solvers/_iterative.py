@@ -22,6 +22,7 @@ from lineax import AbstractLinearOperator, conj
 from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 
+from splineax._trace import record_event
 from splineax.solvers._sparse import SparseLinearSolver, _Sparsity
 from splineax.solvers._stateful import TrackingSolverState
 
@@ -80,6 +81,16 @@ def iterative_refinement(
     floor = _CONVERGENCE_FLOOR_ULPS * jnp.finfo(residual_dtype).eps
     threshold = jnp.maximum(tol, floor) * _tree_norm(vector)
 
+    # Unordered throughout: `iterative_refinement` runs inside `IterativeRefinement.compute`,
+    # hence inside lineax's solve primitive, which does not carry an ordered effect (see
+    # `record_event`). The `step` field and the loop's sequential carry keep the log ordered.
+    record_event(
+        "ir_start",
+        "iterative_refinement",
+        ordered=False,
+        dynamic={"residual_norm": _tree_norm(r0), "threshold": threshold},
+    )
+
     def cond(carry: tuple[PyTree[Array], PyTree[Array], Array]) -> Array:
         _, residual_value, step = carry
         return (step < max_steps) & (_tree_norm(residual_value) > threshold)
@@ -90,13 +101,30 @@ def iterative_refinement(
         x, residual_value, step = carry
         correction = solve(residual_value)
         x = _tree_add(x, correction)
-        return x, residual(x), step + 1
+        new_residual = residual(x)
+        record_event(
+            "ir_step",
+            "iterative_refinement",
+            ordered=False,
+            dynamic={"step": step + 1, "residual_norm": _tree_norm(new_residual)},
+        )
+        return x, new_residual, step + 1
 
-    x, final_residual, _ = jax.lax.while_loop(cond, body, (x0, r0, jnp.array(0)))
+    x, final_residual, steps = jax.lax.while_loop(cond, body, (x0, r0, jnp.array(0)))
     converged = _tree_norm(final_residual) <= threshold
+    record_event(
+        "ir_result",
+        "iterative_refinement",
+        ordered=False,
+        dynamic={
+            "step": steps,
+            "residual_norm": _tree_norm(final_residual),
+            "converged": converged,
+        },
+    )
+    result = RESULTS.where(converged, RESULTS.successful, RESULTS.max_steps_reached)
     # NaN out a solution that never met the tolerance, so the caller sees the failure.
     solution = jtu.tree_map(lambda leaf: jnp.where(converged, leaf, jnp.nan), x)
-    result = RESULTS.where(converged, RESULTS.successful, RESULTS.max_steps_reached)
     return solution, result
 
 

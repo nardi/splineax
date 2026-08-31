@@ -17,6 +17,7 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
+from splineax._trace import record_event
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -195,6 +196,7 @@ class _PardisoState(eqx.Module):
         """
         if self.token is None:
             return self
+        record_event("track", "pardiso", shape=self.shape)
         value = getattr(solution, "value", solution)
         leaves = tuple(jax.tree_util.tree_leaves(value))
         return _PardisoState(
@@ -211,6 +213,7 @@ class _PardisoState(eqx.Module):
         """Free the native factorization, ordered after any tracked solves."""
         if self.token is None:
             return
+        record_event("release", "pardiso", shape=self.shape)
         _pardiso_mkl_jax().primitive.release(self.token)
 
 
@@ -257,9 +260,11 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         primitive = pmj.primitive
         # `analyze` and `factor` return `(token, final_iparm)`. Only the token is kept;
         # the diagnostics iparm is dropped.
+        record_event("analyze", "pardiso", shape=shape, nnz=int(values.shape[0]))
         token, _ = primitive.analyze(
             indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
         )
+        record_event("factor", "pardiso", shape=shape, nnz=int(values.shape[0]))
         token, _ = primitive.factor(
             token,
             indptr,
@@ -285,6 +290,7 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             raise ValueError(
                 "`Pardiso` may only be used for linear solves with square matrices"
             )
+        record_event("init", "pardiso", shape=(operator.out_size(), operator.in_size()))
         return self._analyze_and_factor(operator, operator_pattern_tag(operator))
 
     def init_symbolic(
@@ -303,6 +309,10 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             raise ValueError(
                 f"`Pardiso.init_symbolic` requires a square matrix; got shape {shape}."
             )
+        # Deferred: no analyze runs here, only the pattern is recorded (see the docstring).
+        record_event(
+            "init_symbolic", "pardiso", shape=shape, symbolic=True, note="deferred"
+        )
         return _PardisoState(
             None,
             None,
@@ -328,6 +338,7 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         del options
         if operator is state.operator:
             # Nothing changed, so this is a no-op.
+            record_event("update", "pardiso", outcome="noop", shape=state.shape)
             return state
         tag = operator_pattern_tag(operator)
         same_pattern = (
@@ -338,8 +349,17 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         )
         if same_pattern:
             # Same pattern, new values. Refactor against the stored analysis.
+            record_event("update", "pardiso", outcome="reused", shape=state.shape)
             return self._refactor(state, operator, tag)
-        # New pattern, or no analysis yet, so analyze from scratch.
+        # New pattern, or no analysis yet, so analyze from scratch. Recorded as a rebuild so
+        # the analyze below is attributed to the changed pattern, not read as a first init.
+        record_event(
+            "update",
+            "pardiso",
+            outcome="rebuilt",
+            note="sparsity pattern changed",
+            reused=False,
+        )
         return self._analyze_and_factor(operator, tag)
 
     def _refactor(
@@ -359,6 +379,20 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             indices,
             values,
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+        )
+        # `perturbed_pivots`/`zero_pivot` (iparm[13]/iparm[29]) drive the reanalyze fallback;
+        # `reused` is True when the reused matching factored stably. See
+        # `_reanalyze_if_unstable`.
+        unstable = (iparm[13] > 0) | (iparm[29] != 0)
+        record_event(
+            "refactor",
+            "pardiso",
+            nnz=int(values.shape[0]),
+            dynamic={
+                "perturbed_pivots": iparm[13],
+                "zero_pivot": iparm[29] != 0,
+                "reused": ~unstable,
+            },
         )
         token = _reanalyze_if_unstable(pmj, token, iparm, indptr, indices, values)
         return _PardisoState(
@@ -389,6 +423,14 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         pmj = _pardiso_mkl_jax()
         primitive = pmj.primitive
         indptr, indices, values = state.csr
+        # Unordered: `compute` runs inside lineax's solve primitive (see `record_event`).
+        record_event(
+            "solve",
+            "pardiso",
+            shape=state.shape,
+            transposed=state.transposed,
+            ordered=False,
+        )
         # `solve_stateful` reuses the stored factorization, solving A^T when transposed.
         solution, _ = primitive.solve_stateful(
             state.token,
