@@ -23,7 +23,7 @@ from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 
 from splineax.solvers._sparse import SparseLinearSolver, _Sparsity
-from splineax.solvers._stateful import TrackingState
+from splineax.solvers._stateful import TrackingSolverState
 
 _StateT = TypeVar("_StateT")
 
@@ -117,17 +117,20 @@ class _IterativeRefinementState(eqx.Module, Generic[_StateT]):
     def track(self, solution: Any) -> "_IterativeRefinementState[_StateT]":
         """Order a later `release` after `solution`, delegating to the inner state.
 
-        A no-op for an inner state that owns nothing, matching `TrackingState`.
+        A no-op for an inner state that owns nothing, matching `TrackingSolverState`.
         """
         inner = self.inner_state
-        # Only a `TrackingState` has memory to order a release against; others are a no-op.
-        tracked = inner.track(solution) if isinstance(inner, TrackingState) else inner
+        # Only a `TrackingSolverState` has memory to order a release against; others are a
+        # no-op.
+        tracked = (
+            inner.track(solution) if isinstance(inner, TrackingSolverState) else inner
+        )
         return _IterativeRefinementState(tracked, self.operator)
 
     def release(self) -> None:
         """Release the wrapped inner state, which owns any memory this state holds."""
         inner = self.inner_state
-        if isinstance(inner, TrackingState):
+        if isinstance(inner, TrackingSolverState):
             inner.release()
 
 

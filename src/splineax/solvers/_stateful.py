@@ -18,7 +18,7 @@ _StateT = TypeVar("_StateT")
 
 
 @runtime_checkable
-class TrackingState(Protocol):
+class TrackingSolverState(Protocol):
     """A solver state that records solves depending on it and frees its own memory.
 
     A state may own memory that must outlive every solve made with it. `track` marks a
@@ -71,10 +71,10 @@ class StatefulSolver(Protocol[_StateT]):
 
     def transpose(
         self, state: _StateT, options: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any]]: ...
+    ) -> tuple[TrackingSolverState, dict[str, Any]]: ...
 
     def conj(
         self, state: _StateT, options: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any]]: ...
+    ) -> tuple[TrackingSolverState, dict[str, Any]]: ...
 
     def assume_full_rank(self) -> bool: ...

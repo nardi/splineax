@@ -59,7 +59,7 @@ solver-agnostic `StatefulSolver`. The stateful reuse API is described in
 
 ---
 
-::: splineax.TrackingState
+::: splineax.TrackingSolverState
 
 ---
 

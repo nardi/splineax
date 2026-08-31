@@ -24,4 +24,4 @@ from ._sparse import (
 from ._spsolve import ReorderingScheme as ReorderingScheme
 from ._spsolve import Spsolve as Spsolve
 from ._stateful import StatefulSolver as StatefulSolver
-from ._stateful import TrackingState as TrackingState
+from ._stateful import TrackingSolverState as TrackingSolverState
