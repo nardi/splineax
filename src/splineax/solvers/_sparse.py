@@ -8,15 +8,18 @@ from typing import (
 
 import jax
 import jax.core
+import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
 from asdex import ColoredPattern
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import PyTree
 from lineax import AbstractLinearOperator
 from lineax import linear_solve as _lx_linear_solve
-from lineax._solution import Solution
+from lineax._solution import RESULTS, Solution
 from lineax._solve import sentinel
 
+from splineax._trace import tracing_active
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -210,11 +213,59 @@ def linear_solve(
         state = solver.init(operator, opts)
     else:
         state = solver.update(state, operator, opts)
-    solution = _lx_linear_solve(
-        operator, vector, solver, options=options, state=state, throw=throw
-    )
+    if tracing_active():
+        # While a `solve_trace` is open, run `compute` directly instead of through lineax's
+        # `linear_solve` primitive, which does not propagate the trace's in-`compute`
+        # `io_callback`s (the solve and iterative-refinement steps). Off the trace path this
+        # is never taken, so ordinary solves keep lineax's full behaviour.
+        solution = _traced_compute(operator, vector, solver, opts, state, throw)
+    else:
+        solution = _lx_linear_solve(
+            operator, vector, solver, options=options, state=state, throw=throw
+        )
     # Order any later `release` after this solve. A no-op for solvers whose state owns
     # nothing, such as `Spsolve`.
     if hasattr(state, "track"):
         state = state.track(solution)
     return solution, state
+
+
+def _any_nonfinite(tree: PyTree[Any]) -> Any:
+    leaves = jtu.tree_leaves(tree)
+    if not leaves:
+        return jnp.bool_(False)
+    return jnp.any(
+        jnp.stack([jnp.any(jnp.invert(jnp.isfinite(leaf))) for leaf in leaves])
+    )
+
+
+def _traced_compute(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    solver: Any,
+    options: dict[str, Any],
+    state: PyTree[Any],
+    throw: bool,
+) -> Solution:
+    """Solve by calling `solver.compute` directly, for use while a solve trace is open.
+
+    Mirrors `lineax._solve._linear_solve_impl` (the non-finite result adjustment and the
+    `throw` check) so the returned `Solution` matches the normal path, but keeps `compute`
+    outside lineax's `linear_solve` primitive so the trace's in-`compute` callbacks run.
+    """
+    solution, result, stats = solver.compute(state, vector, options)
+    result = RESULTS.where(
+        (result == RESULTS.successful) & _any_nonfinite(solution),
+        RESULTS.singular,
+        result,
+    )
+    result = RESULTS.where(
+        (result == RESULTS.singular) & _any_nonfinite(vector),
+        RESULTS.nonfinite_input,
+        result,
+    )
+    if throw:
+        solution, result, stats = result.error_if(
+            (solution, result, stats), result != RESULTS.successful
+        )
+    return Solution(value=solution, result=result, state=state, stats=stats)
