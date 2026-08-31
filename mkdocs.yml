@@ -60,6 +60,8 @@ nav:
       - Solvers: guide/solvers.md
       - Stateful solves: guide/stateful.md
       - Transforming existing Lineax code: guide/transform.md
+      - Debugging solves: guide/tracing.md
   - API reference:
       - Operators: api/operators.md
       - Solvers: api/solvers.md
+      - Tracing: api/tracing.md
