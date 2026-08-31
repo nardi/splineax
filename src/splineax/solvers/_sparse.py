@@ -183,6 +183,11 @@ def linear_solve(
 
     With no `state`, a fresh one is built with `solver.init`. The default solver is
     `AutoSparseLinearSolver`, which picks a backend for the platform and precision.
+
+    A solver that does not implement the stateful API (the `StatefulSolver` protocol),
+    such as a plain dense `lineax.LU()`, has no reusable state to thread. For such a
+    solver this behaves like `lineax.linear_solve`, returning the incoming `state`
+    unchanged alongside the solution so the `(solution, state)` return shape stays stable.
     """
     if solver is None:
         # Imported here to avoid a cycle: `_auto` imports this module.
@@ -190,6 +195,14 @@ def linear_solve(
 
         solver = AutoSparseLinearSolver()
     opts = {} if options is None else options
+    if not isinstance(solver, StatefulSolver):
+        # A non-stateful solver keeps no reusable state, so there is nothing to `init`,
+        # `update`, or `track`. Defer the solve to `lineax.linear_solve` and hand back the
+        # incoming `state` untouched, keeping the `(solution, state)` return shape stable.
+        solution = _lx_linear_solve(
+            operator, vector, solver, options=opts, state=state, throw=throw
+        )
+        return solution, state
     # `init`/`update` build the factorization. The operator is passed through as-is, so
     # `update` can compare it by identity, and the solvers stop gradients on the values
     # themselves before handing them to the native analyze and factor.
