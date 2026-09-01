@@ -63,8 +63,8 @@ sequence 0 [klu] shape=(4, 4)
   factor [klu]  shape=(4, 4) nnz=10
   solve [klu]  shape=(4, 4) transposed=False
   track [klu]  shape=(4, 4)
-  update [klu]  outcome=reused shape=(4, 4)
-  refactor [klu]  nnz=10 reused=True rcond=8.329e-01
+  update [klu]  outcome=reused shape=(4, 4) reason="operator shares the state's sparsity tag"
+  refactor [klu]  nnz=10 reused=True rcond=8.329e-01 reason="reused pivots stable: refactor ok and rcond > 1e-08"
   solve [klu]  shape=(4, 4) transposed=False
   track [klu]  shape=(4, 4)
   release [klu]  shape=(4, 4)
@@ -80,11 +80,14 @@ assert len(trace.sequences) == 1
 ## When reuse is lost
 
 If you `update` with an operator whose sparsity pattern differs from the state's, the analysis
-cannot be reused and the solver rebuilds it from scratch. The trace makes that explicit: the
-`update` is recorded with `outcome="rebuilt"` and a `note`, and a fresh `analyze` follows.
+cannot be reused and the solver rebuilds it from scratch. The trace makes that explicit and
+motivated: the `update` is recorded with `outcome="rebuilt"` and a `reason` saying why, and a
+fresh `analyze` follows. Every choice carries a `reason` like this — why an analysis was
+rebuilt rather than reused, or why a fresh factorization was taken instead of a refactor.
 
 ```{.python continuation}
-changed = splx.BCOOLinearOperator(BCOO.fromdense(dense[::-1]))  # a different pattern
+other = BCOO.fromdense(dense[::-1])  # a different sparsity pattern
+changed = splx.BCOOLinearOperator(other, tags=splx.sparsity_pattern_tag(other))
 with splx.solve_trace() as trace:
     solution, state = splx.linear_solve(first, b1, solver)
     solution, state = splx.linear_solve(changed, b1, solver, state=state)
@@ -92,7 +95,7 @@ with splx.solve_trace() as trace:
 
 update = next(record for record in trace.records if record.action == "update")
 assert update.outcome == "rebuilt"
-assert update.note == "sparsity pattern changed"
+assert update.reason == "operator's sparsity tag differs from the state's"
 ```
 
 ## What each backend records

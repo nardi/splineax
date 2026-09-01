@@ -190,11 +190,16 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
                 "spsolve",
                 outcome="noop",
                 shape=state.matrix.shape if state.matrix is not None else None,
+                reason="same operator object",
             )
             return state
         # `Spsolve` reuses nothing, so every changed operator is a full rebuild.
         record_event(
-            "update", "spsolve", outcome="rebuilt", reused=False, note="no reuse"
+            "update",
+            "spsolve",
+            outcome="rebuilt",
+            reused=False,
+            reason="Spsolve keeps no factorization to reuse",
         )
         return self._build(operator, options)
 

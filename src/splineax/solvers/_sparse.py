@@ -130,6 +130,24 @@ def sparsity_pattern_tag(pattern: "_Sparsity | None" = None) -> object:
     return _ContentPatternTag(indices, shape)
 
 
+def sparsity_reuse_block(
+    state_tag: object | None, operator_tag: object | None
+) -> str | None:
+    """Why a state's analysis cannot be reused for an operator, or None if it can.
+
+    `update` reuses a symbolic analysis only when both the state and the new operator carry
+    the same sparsity-pattern tag. This returns a short reason a solve trace can record when
+    that fails, so a rebuilt-from-scratch analysis is motivated rather than mysterious.
+    """
+    if state_tag is None:
+        return "state carries no sparsity tag to reuse"
+    if operator_tag is None:
+        return "operator carries no sparsity tag"
+    if state_tag != operator_tag:
+        return "operator's sparsity tag differs from the state's"
+    return None
+
+
 def operator_pattern_tag(operator: AbstractLinearOperator) -> object | None:
     """Return the operator's sparsity-pattern tag, or None if it carries none.
 

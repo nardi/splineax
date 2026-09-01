@@ -29,6 +29,7 @@ from splineax.solvers._sparse import (
     operator_pattern_tag,
     sparse_indices_sorted,
     sparsity_pattern_tag,
+    sparsity_reuse_block,
     warn_if_unsorted,
 )
 
@@ -147,8 +148,13 @@ def _reanalyze_if_unstable(
     """
     primitive = pmj.primitive
     unstable = (iparm[13] > 0) | (iparm[29] != 0)
+    nnz = int(values.shape[0])
 
     def refresh() -> Any:
+        # Record the branch actually taken: the reused matching was unstable, so the analysis
+        # is rebuilt for these values and factored again.
+        reason = "reused matching unstable (perturbed or zero pivots); reanalyzed"
+        record_event("analyze", "pardiso", nnz=nnz, reason=reason)
         reanalyzed, _ = primitive.reanalyze(
             token,
             indptr,
@@ -156,6 +162,7 @@ def _reanalyze_if_unstable(
             values,
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
+        record_event("factor", "pardiso", nnz=nnz, reason=reason)
         refactored, _ = primitive.factor(
             reanalyzed,
             indptr,
@@ -338,27 +345,39 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         del options
         if operator is state.operator:
             # Nothing changed, so this is a no-op.
-            record_event("update", "pardiso", outcome="noop", shape=state.shape)
+            record_event(
+                "update",
+                "pardiso",
+                outcome="noop",
+                shape=state.shape,
+                reason="same operator object",
+            )
             return state
         tag = operator_pattern_tag(operator)
-        same_pattern = (
-            state.token is not None
-            and state.sparsity_tag is not None
-            and tag is not None
-            and state.sparsity_tag == tag
-        )
-        if same_pattern:
+        if state.token is None:
+            # A symbolic-only state from `init_symbolic` deferred the analysis, so the first
+            # update must analyze from scratch regardless of the tag.
+            reuse_block: str | None = "no factorization yet (deferred symbolic state)"
+        else:
+            reuse_block = sparsity_reuse_block(state.sparsity_tag, tag)
+        if reuse_block is None:
             # Same pattern, new values. Refactor against the stored analysis.
-            record_event("update", "pardiso", outcome="reused", shape=state.shape)
+            record_event(
+                "update",
+                "pardiso",
+                outcome="reused",
+                shape=state.shape,
+                reason="operator shares the state's sparsity tag",
+            )
             return self._refactor(state, operator, tag)
-        # New pattern, or no analysis yet, so analyze from scratch. Recorded as a rebuild so
-        # the analyze below is attributed to the changed pattern, not read as a first init.
+        # Cannot reuse the analysis, so analyze from scratch. Recorded as a rebuild, with the
+        # reason, so the analyze below is attributed to it rather than read as a first init.
         record_event(
             "update",
             "pardiso",
             outcome="rebuilt",
-            note="sparsity pattern changed",
             reused=False,
+            reason=reuse_block,
         )
         return self._analyze_and_factor(operator, tag)
 
@@ -388,6 +407,7 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             "refactor",
             "pardiso",
             nnz=int(values.shape[0]),
+            reason="reused the stored matching; checking pivot stability",
             dynamic={
                 "perturbed_pivots": iparm[13],
                 "zero_pivot": iparm[29] != 0,

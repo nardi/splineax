@@ -31,6 +31,7 @@ from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
     sparsity_pattern_tag,
+    sparsity_reuse_block,
 )
 
 # `Ai` (row indices), `Aj` (column indices), `Ax` (values): the matrix in COO form.
@@ -264,17 +265,34 @@ def _reuse_or_refresh_numeric(
     reuse_is_safe = jnp.all(status == klujax.KLUStatus.OK) & jnp.all(
         reciprocal_condition > _REFACTOR_RCOND_FLOOR
     )
-    record_event(
-        "refactor",
-        "klu",
-        nnz=int(values.shape[0]),
-        dynamic={"rcond": reciprocal_condition, "reused": reuse_is_safe},
-    )
-    return jax.lax.cond(
-        reuse_is_safe,
-        lambda: refreshed,
-        lambda: klujax.factor(row, col, values, symbol),
-    )
+    floor = _REFACTOR_RCOND_FLOOR
+
+    def reuse() -> NumericToken:
+        # Record the branch actually taken, so the log shows a refactor was reused and why.
+        record_event(
+            "refactor",
+            "klu",
+            nnz=int(values.shape[0]),
+            reused=True,
+            reason=f"reused pivots stable: refactor ok and rcond > {floor:g}",
+            dynamic={"rcond": reciprocal_condition},
+        )
+        return refreshed
+
+    def factor_fresh() -> NumericToken:
+        # A fresh factor rather than a refactor: motivate why the reuse was rejected.
+        record_event(
+            "factor",
+            "klu",
+            nnz=int(values.shape[0]),
+            reused=False,
+            reason=f"refactor rejected (status not OK or rcond <= {floor:g}); "
+            "factored fresh",
+            dynamic={"rcond": reciprocal_condition},
+        )
+        return klujax.factor(row, col, values, symbol)
+
+    return jax.lax.cond(reuse_is_safe, reuse, factor_fresh)
 
 
 class KLU(AbstractLinearSolver[_KLUState]):
@@ -377,25 +395,34 @@ class KLU(AbstractLinearSolver[_KLUState]):
         """
         if operator is state.operator:
             # Nothing changed, so this is a no-op.
-            record_event("update", "klu", outcome="noop", shape=state.shape)
+            record_event(
+                "update",
+                "klu",
+                outcome="noop",
+                shape=state.shape,
+                reason="same operator object",
+            )
             return state
         tag = operator_pattern_tag(operator)
-        if (
-            state.sparsity_tag is not None
-            and tag is not None
-            and state.sparsity_tag == tag
-        ):
+        reuse_block = sparsity_reuse_block(state.sparsity_tag, tag)
+        if reuse_block is None:
             # Same pattern, new values. Reuse the symbolic analysis.
-            record_event("update", "klu", outcome="reused", shape=state.shape)
+            record_event(
+                "update",
+                "klu",
+                outcome="reused",
+                shape=state.shape,
+                reason="operator shares the state's sparsity tag",
+            )
             return self._refactor(state, operator, tag, options)
-        # New pattern, so analyze from scratch. Recorded as a rebuild so the analyze below is
-        # attributed to the changed pattern rather than read as a first init.
+        # Cannot reuse the analysis, so analyze from scratch. Recorded as a rebuild, with the
+        # reason, so the analyze below is attributed to it rather than read as a first init.
         record_event(
             "update",
             "klu",
             outcome="rebuilt",
-            note="sparsity pattern changed",
             reused=False,
+            reason=reuse_block,
         )
         return self._analyze_and_factor(operator, options)
 
@@ -412,8 +439,15 @@ class KLU(AbstractLinearSolver[_KLUState]):
         # Reuse the stored symbolic analysis. The tag asserts the indices match the ones
         # `symbol` was analyzed with.
         if state.numeric is None:
-            # No previous numeric factorization to reuse, so build one fresh.
-            record_event("factor", "klu", shape=shape, nnz=int(values.shape[0]))
+            # No previous numeric factorization to reuse (a symbolic-only state from
+            # `init_symbolic`), so build one fresh against the reused analysis.
+            record_event(
+                "factor",
+                "klu",
+                shape=shape,
+                nnz=int(values.shape[0]),
+                reason="no numeric factorization to reuse (symbolic-only state)",
+            )
             numeric = klujax.factor(row, col, values, state.symbol)
         else:
             numeric = _reuse_or_refresh_numeric(
@@ -511,6 +545,7 @@ class KLU(AbstractLinearSolver[_KLUState]):
                 shape=state.shape,
                 note="conj",
                 nnz=int(values.shape[0]),
+                reason="conjugated values, refactored against the reused analysis",
             )
         numeric = (
             None

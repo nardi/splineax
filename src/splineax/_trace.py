@@ -87,6 +87,9 @@ class TraceRecord:
     outcome: str | None = None
     """For `update`: `noop` (same operator), `reused` (analysis reused), or `rebuilt` (a new
     analysis because the sparsity pattern changed)."""
+    reason: str | None = None
+    """Why a choice was made: why an analysis was rebuilt rather than reused, why a fresh
+    factorization was taken rather than a refactor, and so on."""
     note: str | None = None
     reused: bool | None = None
     rcond: float | None = None
@@ -122,6 +125,7 @@ _DETAIL_FIELDS = (
     "zero_pivot",
     "converged",
     "note",
+    "reason",
 )
 
 
@@ -147,6 +151,9 @@ def _format_value(field: str, value: Any) -> str:
         value, (int, float)
     ):
         return f"{field}={value:.3e}"
+    if field in ("reason", "note"):
+        # Free text, so quote it to keep the space-joined detail line readable.
+        return f'{field}="{value}"'
     return f"{field}={value}"
 
 

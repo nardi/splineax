@@ -93,8 +93,26 @@ def test_update_reuses_analysis_on_shared_pattern(enable_x64: None) -> None:
     assert len(refactors) == 1
     assert refactors[0].reused is True
     assert refactors[0].rcond is not None and refactors[0].rcond > 0.0
+    # The reuse is motivated.
+    assert refactors[0].reason is not None and "stable" in refactors[0].reason
     # Reusing the analysis means no second analyze was recorded.
     assert sum(action == "analyze" for action in _actions(trace)) == 1
+
+
+def test_symbolic_state_records_factor_reason(enable_x64: None) -> None:
+    """A first `update` on a symbolic-only state factors (there is no numeric to refactor),
+    and the trace says so."""
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    tag = splx.sparsity_pattern_tag(sparsity)
+    operator = splx.BCOOLinearOperator(sparsity, tags=tag)
+    solver = splx.KLU()
+    with splx.solve_trace() as trace:
+        state = solver.init_symbolic(sparsity)
+        state = solver.update(state, operator)
+        state.release()
+    factors = [record for record in trace.records if record.action == "factor"]
+    assert len(factors) == 1
+    assert factors[0].reason is not None and "symbolic-only" in factors[0].reason
 
 
 def test_update_rebuilds_on_changed_pattern(enable_x64: None) -> None:
@@ -109,7 +127,8 @@ def test_update_rebuilds_on_changed_pattern(enable_x64: None) -> None:
         state.release()
     updates = [record for record in trace.records if record.action == "update"]
     assert [update.outcome for update in updates] == ["rebuilt"]
-    assert updates[0].note == "sparsity pattern changed"
+    # The rebuild is motivated: neither operator carries a sparsity tag to match on.
+    assert updates[0].reason is not None and "tag" in updates[0].reason
     # A rebuild re-analyzes, so there are two analyze events and still one sequence.
     assert sum(action == "analyze" for action in _actions(trace)) == 2
     assert len(trace.sequences) == 1
