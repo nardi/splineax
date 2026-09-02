@@ -246,13 +246,17 @@ class SolveTrace:
         def paint(text: str, code: str) -> str:
             return f"{code}{text}{_RESET}" if use_colour else text
 
-        legend = (
-            "solve trace  "
-            + paint("created", _CREATED)
-            + "  "
-            + paint("reused", _REUSED)
-        )
-        lines = [legend]
+        # The colour key only means anything in colour, so show it only then.
+        if use_colour:
+            header = (
+                "solve trace   key: "
+                + paint("created", _CREATED)
+                + " / "
+                + paint("reused", _REUSED)
+            )
+        else:
+            header = "solve trace"
+        lines = [header]
         if not self.records:
             lines.append("  (empty)")
             return "\n".join(lines)

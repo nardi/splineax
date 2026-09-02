@@ -60,7 +60,7 @@ print(trace)
 ```
 
 ```text
-solve trace  created  reused
+solve trace
 sequence 0
   init[shape=(4, 4), nse=10, sparsity_hash=0x60347]
     KLU.analyze
