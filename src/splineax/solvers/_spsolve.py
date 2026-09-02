@@ -17,7 +17,7 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
-from splineax._trace import record_event
+from splineax._trace import compute_scope, record_event
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -25,7 +25,9 @@ from splineax.operators._jacobian import (
 )
 from splineax.solvers._sparse import (
     _Sparsity,
+    operator_pattern_tag,
     sparse_indices_sorted,
+    trace_inputs,
     warn_if_unsorted,
 )
 
@@ -48,10 +50,12 @@ class _SpsolveState(eqx.Module):
     def track(self, solution: Any) -> "_SpsolveState":
         """No-op, since a Spsolve state owns no memory to order a release after."""
         del solution
+        record_event("track")
         return self
 
     def release(self) -> None:
         """No-op, since a Spsolve state owns nothing to free."""
+        record_event("release")
 
 
 class ReorderingScheme(IntEnum):
@@ -112,7 +116,14 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _SpsolveState:
-        record_event("init", "spsolve", shape=(operator.out_size(), operator.in_size()))
+        record_event(
+            "init",
+            inputs=lambda: trace_inputs(
+                operator,
+                operator_pattern_tag(operator),
+                (operator.out_size(), operator.in_size()),
+            ),
+        )
         return self._build(operator, options)
 
     def _build(
@@ -171,7 +182,7 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         that `update` fills with the first real operator.
         """
         del sparsity, options
-        record_event("init_symbolic", "spsolve", symbolic=True, note="no-op")
+        record_event("init_symbolic", outputs={"note": "no-op"})
         return _SpsolveState(None, None, None)
 
     def update(
@@ -184,22 +195,23 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
 
         Repeated calls with the same operator object are a no-op.
         """
+        shape = state.matrix.shape if state.matrix is not None else None
         if operator is state.operator:
             record_event(
                 "update",
-                "spsolve",
-                outcome="noop",
-                shape=state.matrix.shape if state.matrix is not None else None,
-                reason="same operator object",
+                inputs=lambda: trace_inputs(
+                    operator, operator_pattern_tag(operator), shape
+                ),
+                outputs={"outcome": "noop", "reason": "Same operator"},
             )
             return state
         # `Spsolve` reuses nothing, so every changed operator is a full rebuild.
         record_event(
             "update",
-            "spsolve",
-            outcome="rebuilt",
-            reused=False,
-            reason="Spsolve keeps no factorization to reuse",
+            inputs=lambda: trace_inputs(
+                operator, operator_pattern_tag(operator), shape
+            ),
+            outputs={"outcome": "rebuilt", "reason": "No factorization to reuse"},
         )
         return self._build(operator, options)
 
@@ -212,26 +224,24 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
                 "`Spsolve` cannot solve with a symbolic-only state; call `update` with "
                 "an operator first."
             )
-        matrix = state.matrix
-        packed_structures = state.packed_structures
-        vector = ravel_vector(vector, packed_structures)
-        # `spsolve` requires the right-hand side to share the matrix dtype.
-        vector = vector.astype(matrix.dtype)
-        # Fused analyze+factor+solve, and unordered because `compute` runs inside lineax's
-        # solve primitive (see `record_event`).
-        record_event(
-            "solve", "spsolve", shape=matrix.shape, note="fused", ordered=False
-        )
-        solution = _spsolve(
-            matrix.data,
-            matrix.indices,
-            matrix.indptr,
-            vector,
-            tol=self.tol,
-            reorder=self.reorder,
-        )
-        solution = unravel_solution(solution, packed_structures)
-        return solution, RESULTS.successful, {}
+        with compute_scope():
+            matrix = state.matrix
+            packed_structures = state.packed_structures
+            vector = ravel_vector(vector, packed_structures)
+            # `spsolve` requires the right-hand side to share the matrix dtype.
+            vector = vector.astype(matrix.dtype)
+            # Fused analyze+factor+solve, so no separate factorization is reused.
+            record_event("spsolve", "Spsolve", outputs={"note": "fused"})
+            solution = _spsolve(
+                matrix.data,
+                matrix.indices,
+                matrix.indptr,
+                vector,
+                tol=self.tol,
+                reorder=self.reorder,
+            )
+            solution = unravel_solution(solution, packed_structures)
+            return solution, RESULTS.successful, {}
 
     def transpose(
         self, state: _SpsolveState, options: dict[str, Any]

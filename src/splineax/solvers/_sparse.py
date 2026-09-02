@@ -20,7 +20,7 @@ from lineax import linear_solve as _lx_linear_solve
 from lineax._solution import RESULTS, Solution
 from lineax._solve import sentinel
 
-from splineax._trace import tracing_active
+from splineax._trace import sparsity_hash, tracing_active
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -131,6 +131,26 @@ def sparsity_pattern_tag(pattern: "_Sparsity | None" = None) -> object:
     return _ContentPatternTag(indices, shape)
 
 
+def trace_inputs(
+    pattern: Any,
+    tag: object | None,
+    shape: tuple[int, ...] | None = None,
+) -> dict[str, Any]:
+    """Build the `shape`/`nse`/`sparsity_hash` inputs a solve trace records for an operation.
+
+    Reads the pattern's concrete indices (None under `jit`) for `nse`, and hashes `tag` for
+    `sparsity_hash`. Meant to be called lazily (only when a trace is active), since reading
+    the index array is not free.
+    """
+    indices, index_shape = _pattern_indices(pattern)
+    nse = None if indices is None else int(indices.shape[0])
+    return {
+        "shape": shape if shape is not None else index_shape,
+        "nse": nse,
+        "sparsity_hash": sparsity_hash(tag),
+    }
+
+
 def sparsity_reuse_block(
     state_tag: object | None, operator_tag: object | None
 ) -> str | None:
@@ -141,11 +161,11 @@ def sparsity_reuse_block(
     that fails, so a rebuilt-from-scratch analysis is motivated rather than mysterious.
     """
     if state_tag is None:
-        return "state carries no sparsity tag to reuse"
+        return "State has no sparsity tag"
     if operator_tag is None:
-        return "operator carries no sparsity tag"
+        return "Operator has no sparsity tag"
     if state_tag != operator_tag:
-        return "operator's sparsity tag differs from the state's"
+        return "Different sparsity tag"
     return None
 
 

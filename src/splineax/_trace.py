@@ -6,8 +6,8 @@ state-sequence (`init`, `update`, `update`, ..., `release`) the choices they mak
 factorization or rebuild it, refactor or reanalyze, how many refinement steps) are
 invisible from the outside.
 
-`solve_trace` turns that on. Inside the context manager every relevant action is recorded,
-in program order, into a `SolveTrace`:
+`solve_trace` turns that on. Inside the context manager every relevant action is recorded
+into a `SolveTrace` and printed as an indented tree:
 
 ```{.python notest}
 with splineax.solve_trace() as trace:
@@ -16,9 +16,15 @@ with splineax.solve_trace() as trace:
 print(trace)
 ```
 
-The records are appended through ordered `jax.experimental.io_callback`s, so they keep their
-true order even under `jax.jit` and inside control flow. When no trace is active nothing is
-emitted into the traced program at all, so tracing costs nothing when it is off.
+Each line is one operation. A **generic** operation is one of the stateful-API steps (`init`,
+`init_symbolic`, `update`, `compute`, `track`, `release`), written bare. Nested under it are
+the **solver-specific** operations it ran, written `SolverType.function` (e.g. `KLU.analyze`).
+An operation is rendered `operation[inputs] => (outputs)`.
+
+The records are appended through `jax.experimental.io_callback`s, which fire during execution;
+each record carries a trace-time order index, so the printed tree is in program order even
+though the callbacks are unordered. When no trace is active nothing is emitted into the traced
+program, so tracing costs nothing when it is off.
 """
 
 import contextlib
@@ -26,14 +32,15 @@ import dataclasses
 import os
 import sys
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 import jax
 from jax.experimental import io_callback
 
-# Per-thread stack of the traces currently open, so nested `solve_trace()` blocks work and
-# concurrent traces on different threads never share a log.
+# Per-thread state: the stack of open traces, a monotonic order counter stamped on each
+# record (so the tree prints in program order despite unordered callbacks), and the current
+# `compute` nesting depth (so only the outermost `compute` emits the generic boundary).
 _LOCAL = threading.local()
 
 
@@ -56,49 +63,33 @@ def tracing_active() -> bool:
     return bool(_stack())
 
 
-# Actions that begin a new state-sequence when grouping a flat log.
-_SEQUENCE_STARTS = frozenset({"init", "init_symbolic"})
+def _next_order() -> int:
+    order = getattr(_LOCAL, "order", 0)
+    _LOCAL.order = order + 1
+    return order
 
-# Actions coloured as building a factorization anew, versus reusing an existing one. Every
-# other action is neutral. `refactor` and `update` decide their colour from `reused`, so they
-# are not listed here.
-_CREATED_ACTIONS = frozenset({"analyze", "factor"})
-_REUSED_ACTIONS = frozenset({"refactor", "solve", "track"})
+
+# Generic operations that begin a new state-sequence when grouping the log.
+_SEQUENCE_STARTS = frozenset({"init", "init_symbolic"})
 
 
 @dataclasses.dataclass(frozen=True)
 class TraceRecord:
-    """One recorded action in a `SolveTrace`.
+    """One recorded operation in a `SolveTrace`.
 
-    `action` is the kind of work (`init`, `init_symbolic`, `update`, `analyze`, `factor`,
-    `refactor`, `solve`, `track`, `release`, `ir_start`, `ir_step`, `ir_result`) and
-    `backend` is the solver that did it (`klu`, `pardiso`, `spsolve`, `iterative_refinement`).
-    The remaining fields are populated only where they apply, so most are None on any given
-    record.
+    `operation` is the operation name. A **generic** operation (`init`, `init_symbolic`,
+    `update`, `compute`, `track`, `release`) has `solver` None. A **solver-specific**
+    operation has `solver` set to the solver type (`KLU`, `Pardiso`, `Spsolve`,
+    `IterativeRefinement`) and `operation` set to the library function it ran (`analyze`,
+    `factor`, `solve_with_numeric`, ...). `inputs` and `outputs` hold the fields rendered as
+    `operation[inputs] => (outputs)`. `order` is the trace-time program order.
     """
 
-    action: str
-    backend: str
-    shape: tuple[int, ...] | None = None
-    dtype: str | None = None
-    nnz: int | None = None
-    symbolic: bool | None = None
-    transposed: bool | None = None
-    outcome: str | None = None
-    """For `update`: `noop` (same operator), `reused` (analysis reused), or `rebuilt` (a new
-    analysis because the sparsity pattern changed)."""
-    reason: str | None = None
-    """Why a choice was made: why an analysis was rebuilt rather than reused, why a fresh
-    factorization was taken rather than a refactor, and so on."""
-    note: str | None = None
-    reused: bool | None = None
-    rcond: float | None = None
-    residual_norm: float | None = None
-    threshold: float | None = None
-    step: int | None = None
-    perturbed_pivots: int | None = None
-    zero_pivot: bool | None = None
-    converged: bool | None = None
+    operation: str
+    solver: str | None = None
+    inputs: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    outputs: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    order: int = 0
 
 
 # ANSI colours for the pretty tree. Kept tiny and dependency-free.
@@ -108,62 +99,102 @@ _CREATED = "\033[33m"  # yellow: a factorization built anew
 _REUSED = "\033[32m"  # green: an existing factorization reused
 _BOLD = "\033[1m"
 
-# The fields shown, in order, after `action [backend]` on a record line.
-_DETAIL_FIELDS = (
-    "outcome",
-    "shape",
-    "nnz",
-    "dtype",
-    "symbolic",
-    "transposed",
-    "reused",
-    "rcond",
-    "step",
-    "residual_norm",
-    "threshold",
-    "perturbed_pivots",
-    "zero_pivot",
-    "converged",
-    "note",
-    "reason",
-)
+# Solver-specific operations coloured as building a factorization anew.
+_CREATED_OPS = frozenset({"analyze", "reanalyze", "spsolve"})
+# Solver-specific operations coloured as reusing an existing factorization.
+_REUSED_OPS = frozenset({"solve_with_numeric", "tsolve_with_numeric", "solve_stateful"})
+# The floating-point output fields shown in scientific notation.
+_SCI_FIELDS = frozenset({"rcond", "residual_norm", "threshold"})
+# Free-text output fields, quoted so a space-joined line stays readable.
+_TEXT_FIELDS = frozenset({"reason", "note"})
+
+# A canonical display order for fields, so a line reads the same regardless of dict order
+# (the runtime `dynamic` values come back from the callback in JAX's sorted-key order).
+_FIELD_ORDER = {
+    field: index
+    for index, field in enumerate(
+        (
+            "shape",
+            "nse",
+            "sparsity_hash",
+            "transposed",
+            "outcome",
+            "reused",
+            "rcond",
+            "perturbed_pivots",
+            "zero_pivot",
+            "step",
+            "residual_norm",
+            "threshold",
+            "converged",
+            "note",
+            "reason",
+        )
+    )
+}
+
+
+def sparsity_hash(tag: object | None) -> str | None:
+    """A short hex digest of a sparsity-pattern tag, or None when there is no tag.
+
+    Reuses the tag's own hash, so two operators the solver treats as one pattern (equal tags)
+    get the same digest. Consistent within a run; not stable across runs.
+    """
+    if tag is None:
+        return None
+    return f"0x{hash(tag) & 0xFFFFF:05x}"
 
 
 def _record_colour(record: TraceRecord) -> str:
     """The colour for a record, by whether it builds a factorization or reuses one."""
-    if record.action in _CREATED_ACTIONS:
-        return _CREATED
-    if record.action == "refactor":
-        return _CREATED if record.reused is False else _REUSED
-    if record.action == "update":
-        if record.outcome == "rebuilt":
-            return _CREATED
-        if record.outcome == "reused":
-            return _REUSED
+    operation = record.operation
+    if record.solver is None:
+        if operation == "update":
+            outcome = record.outputs.get("outcome")
+            if outcome == "reused":
+                return _REUSED
+            if outcome == "rebuilt":
+                return _CREATED
         return _DIM
-    if record.action in _REUSED_ACTIONS:
+    if operation in _CREATED_OPS:
+        return _CREATED
+    if operation == "refactor":
+        return _CREATED if record.outputs.get("reused") is False else _REUSED
+    if operation == "factor":
+        return _REUSED if record.outputs.get("reused") is True else _CREATED
+    if operation in _REUSED_OPS:
         return _REUSED
     return _DIM
 
 
 def _format_value(field: str, value: Any) -> str:
-    if field in ("rcond", "residual_norm", "threshold") and isinstance(
-        value, (int, float)
-    ):
+    if field in _SCI_FIELDS and isinstance(value, (int, float)):
         return f"{field}={value:.3e}"
-    if field in ("reason", "note"):
-        # Free text, so quote it to keep the space-joined detail line readable.
+    if field in _TEXT_FIELDS:
         return f'{field}="{value}"'
     return f"{field}={value}"
 
 
-def _format_details(record: TraceRecord) -> str:
-    parts = [
-        _format_value(field, getattr(record, field))
-        for field in _DETAIL_FIELDS
-        if getattr(record, field) is not None
-    ]
-    return " ".join(parts)
+def _format_fields(fields: Mapping[str, Any]) -> str:
+    present = [(key, value) for key, value in fields.items() if value is not None]
+    present.sort(key=lambda kv: _FIELD_ORDER.get(kv[0], len(_FIELD_ORDER)))
+    return ", ".join(_format_value(key, value) for key, value in present)
+
+
+def _format_record(record: TraceRecord) -> str:
+    name = (
+        f"{record.solver}.{record.operation}"
+        if record.solver is not None
+        else record.operation
+    )
+    text = name
+    inputs = _format_fields(record.inputs)
+    if inputs:
+        text += f"[{inputs}]"
+    outputs = _format_fields(record.outputs)
+    if outputs:
+        text += f" => ({outputs})"
+    return text
 
 
 def _want_colour(colour: bool | None) -> bool:
@@ -175,12 +206,12 @@ def _want_colour(colour: bool | None) -> bool:
 
 
 class SolveTrace:
-    """An ordered log of the actions taken across one or more state-sequences.
+    """An ordered log of the operations taken across one or more state-sequences.
 
-    Collected by `solve_trace`. `records` is the flat log in execution order; `sequences`
-    slices it into one list per state-sequence (each `init`/`init_symbolic` starts a new
-    one). Printing a `SolveTrace` renders an indented, coloured tree, with factorizations
-    built anew and factorizations reused shown in different colours.
+    Collected by `solve_trace`. `records` is the log; `sequences` slices it into one list per
+    state-sequence (each generic `init`/`init_symbolic` starts a new one). Printing a
+    `SolveTrace` renders the indented tree, with factorizations built anew and factorizations
+    reused shown in different colours.
     """
 
     def __init__(self) -> None:
@@ -190,13 +221,19 @@ class SolveTrace:
         # Runs on the io_callback thread; `list.append` is atomic under the GIL.
         self.records.append(record)
 
+    def _in_order(self) -> list[TraceRecord]:
+        # The callbacks are unordered, so sort by the trace-time order index for a stable,
+        # program-order view.
+        return sorted(self.records, key=lambda record: record.order)
+
     @property
     def sequences(self) -> list[list[TraceRecord]]:
-        """The records grouped into state-sequences, split at each `init`/`init_symbolic`."""
+        """The records grouped into state-sequences, split at each generic init."""
         groups: list[list[TraceRecord]] = []
         current: list[TraceRecord] | None = None
-        for record in self.records:
-            if current is None or record.action in _SEQUENCE_STARTS:
+        for record in self._in_order():
+            starts = record.solver is None and record.operation in _SEQUENCE_STARTS
+            if current is None or starts:
                 current = []
                 groups.append(current)
             current.append(record)
@@ -209,32 +246,24 @@ class SolveTrace:
         def paint(text: str, code: str) -> str:
             return f"{code}{text}{_RESET}" if use_colour else text
 
-        lines: list[str] = []
         legend = (
             "solve trace  "
             + paint("created", _CREATED)
             + "  "
             + paint("reused", _REUSED)
         )
-        lines.append(legend)
+        lines = [legend]
         if not self.records:
             lines.append("  (empty)")
             return "\n".join(lines)
-
         for index, sequence in enumerate(self.sequences):
-            head = sequence[0]
-            label = f"sequence {index} [{head.backend}]"
-            if head.shape is not None:
-                label += f" shape={head.shape}"
-            lines.append(paint(label, _BOLD))
+            lines.append(paint(f"sequence {index}", _BOLD))
             for record in sequence:
-                # Refinement bookkeeping nests a level under the solve it belongs to.
-                indent = "    " if record.action.startswith("ir_") else "  "
-                details = _format_details(record)
-                text = f"{record.action} [{record.backend}]"
-                if details:
-                    text += f"  {details}"
-                lines.append(indent + paint(text, _record_colour(record)))
+                # Solver-specific operations nest one level under their generic operation.
+                indent = "    " if record.solver is not None else "  "
+                lines.append(
+                    indent + paint(_format_record(record), _record_colour(record))
+                )
         return "\n".join(lines)
 
     def __str__(self) -> str:
@@ -246,12 +275,11 @@ class SolveTrace:
 
 @contextlib.contextmanager
 def solve_trace() -> Iterator[SolveTrace]:
-    """Record every action the sparse solvers take within this block, for debugging.
+    """Record every operation the sparse solvers take within this block, for debugging.
 
     Returns a `SolveTrace` collecting the analyze, factor, refactor, solve, and
-    iterative-refinement steps run inside the block, in program order. Tracing is scoped to
-    the block and to the current thread, and adds nothing to the traced program when no block
-    is open.
+    iterative-refinement operations run inside the block. Tracing is scoped to the block and
+    to the current thread, and adds nothing to the traced program when no block is open.
 
     ```{.python notest}
     with splineax.solve_trace() as trace:
@@ -261,9 +289,9 @@ def solve_trace() -> Iterator[SolveTrace]:
     ```
 
     Because the records are added at trace time, only code traced inside the block is
-    recorded: a function compiled outside the block and called within it emits nothing.
-    Ordered `io_callback`s do not compose with `jax.vmap` and may conflict with reverse-mode
-    autodiff, so trace plain solves rather than solves under `vmap`/`grad`.
+    recorded: a function compiled outside the block and called within it emits nothing. The
+    callbacks do not compose with `jax.vmap` and may conflict with reverse-mode autodiff, so
+    trace plain solves rather than solves under `vmap`/`grad`.
     """
     trace = SolveTrace()
     stack = _stack()
@@ -277,6 +305,24 @@ def solve_trace() -> Iterator[SolveTrace]:
         stack.pop()
 
 
+@contextlib.contextmanager
+def compute_scope() -> Iterator[None]:
+    """Emit the generic `compute` boundary once, at the outermost solver's `compute`.
+
+    A wrapping solver's `compute` (e.g. `IterativeRefinement`) calls an inner solver's
+    `compute`; this suppresses the inner boundary so one user solve is one generic `compute`,
+    with every solver-specific operation nested under it.
+    """
+    depth = getattr(_LOCAL, "compute_depth", 0)
+    if depth == 0:
+        record_event("compute")
+    _LOCAL.compute_depth = depth + 1
+    try:
+        yield
+    finally:
+        _LOCAL.compute_depth = depth
+
+
 def _to_python(value: Any) -> Any:
     """Convert a runtime array handed to the callback into a plain Python scalar/list."""
     array = jax.numpy.asarray(value)
@@ -286,38 +332,50 @@ def _to_python(value: Any) -> Any:
 
 
 def record_event(
-    action: str,
-    backend: str,
+    operation: str,
+    solver: str | None = None,
     *,
+    inputs: Mapping[str, Any] | Callable[[], Mapping[str, Any]] | None = None,
+    outputs: Mapping[str, Any] | None = None,
     dynamic: Mapping[str, Any] | None = None,
-    ordered: bool = True,
-    **static: Any,
 ) -> None:
-    """Append one event to the active trace, or do nothing when tracing is off.
+    """Append one operation to the active trace, or do nothing when tracing is off.
 
-    `static` fields are known at trace time (shape, dtype, outcome, ...). `dynamic` holds
-    runtime arrays (rcond, residual norms, step, pivot flags, ...) that are read on the host
-    through an `io_callback`. When no trace is active this returns before emitting any
-    callback, so it leaves the traced program untouched.
-
-    `ordered` uses an ordered `io_callback`, which keeps events in strict program order and is
-    the default. Events emitted from inside a solver's `compute` (the solve itself and the
-    iterative-refinement steps) must pass `ordered=False`, because they run inside lineax's
-    `linear_solve` primitive, which does not carry ordered effects. Those events are still
-    logged in order in practice: each sits between the ordered `update` and `track` of its
-    solve, and the refinement steps chain through the loop carry.
+    `solver` is None for a generic operation, or the solver type for a solver-specific one.
+    `inputs` and `outputs` are fields known at trace time; `dynamic` holds runtime output
+    arrays (rcond, residual norms, step, ...) read on the host through an unordered
+    `io_callback` and merged into the outputs. `inputs` may be a callable, evaluated only when
+    a trace is active, so a caller can defer work (like reading index arrays) that would
+    otherwise cost something when tracing is off. When no trace is active this returns before
+    emitting any callback, so it leaves the traced program untouched.
     """
     trace = _active()
     if trace is None:
         return
+    order = _next_order()
+    if inputs is None:
+        input_fields: dict[str, Any] = {}
+    elif isinstance(inputs, Mapping):
+        input_fields = dict(inputs)
+    else:
+        input_fields = dict(inputs())
+    static_outputs = dict(outputs or {})
     dynamic_values = {
         key: jax.lax.stop_gradient(value) for key, value in (dynamic or {}).items()
     }
 
     def _callback(values: Mapping[str, Any]) -> None:
-        fields = dict(static)
+        merged = dict(static_outputs)
         for key, value in values.items():
-            fields[key] = _to_python(value)
-        trace._append(TraceRecord(action=action, backend=backend, **fields))
+            merged[key] = _to_python(value)
+        trace._append(
+            TraceRecord(
+                operation=operation,
+                solver=solver,
+                inputs=input_fields,
+                outputs=merged,
+                order=order,
+            )
+        )
 
-    io_callback(_callback, (), dynamic_values, ordered=ordered)
+    io_callback(_callback, (), dynamic_values, ordered=False)

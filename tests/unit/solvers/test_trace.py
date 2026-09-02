@@ -1,11 +1,11 @@
-"""Tests for `splineax.solve_trace`, the opt-in debugging log of solver actions.
+"""Tests for `splineax.solve_trace`, the opt-in debugging log of solver operations.
 
-`solve_trace` records the analyze, factor, refactor, solve, and iterative-refinement steps
-run inside its context, grouped into state-sequences (`init` ... `release`). These tests
-check that the right actions are recorded in order, that reuse and rebuild are distinguished,
-that iterative refinement records its steps, and that tracing adds nothing outside the
-context. They lean on the `solver`/`make_operator`/`enable_x64` fixtures from
-[conftest.py](conftest.py).
+`solve_trace` records the generic stateful-API operations (`init`, `update`, `compute`,
+`track`, `release`) and the solver-specific operations nested under them (`KLU.analyze`,
+`KLU.refactor`, ...), grouped into state-sequences. These tests check that the right
+operations are recorded in order, that reuse and rebuild are distinguished, that iterative
+refinement records its steps, and that tracing adds nothing outside the context. They lean on
+the `solver`/`make_operator`/`enable_x64` fixtures from [conftest.py](conftest.py).
 """
 
 from __future__ import annotations
@@ -22,14 +22,29 @@ from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 
 import splineax as splx
-from splineax import IterativeRefinement
+from splineax import IterativeRefinement, TraceRecord
 from splineax._trace import _active
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
 
-def _actions(trace: splx.SolveTrace) -> list[str]:
-    return [record.action for record in trace.records]
+def _ordered(trace: splx.SolveTrace) -> list[TraceRecord]:
+    return sorted(trace.records, key=lambda record: record.order)
+
+
+def _ops(trace: splx.SolveTrace) -> list[str]:
+    return [record.operation for record in _ordered(trace)]
+
+
+def _by_op(
+    trace: splx.SolveTrace,
+    operation: str,
+    solver: str | None = ...,  # type: ignore[assignment]
+) -> list[TraceRecord]:
+    records = [r for r in _ordered(trace) if r.operation == operation]
+    if solver is not ...:
+        records = [r for r in records if r.solver == solver]
+    return records
 
 
 def test_no_active_trace_outside_context() -> None:
@@ -49,36 +64,45 @@ def test_empty_block_records_nothing() -> None:
     assert "empty" in trace.render(colour=False)
 
 
-def test_records_solve_actions(
+def test_records_generic_operations(
     make_operator: OperatorFactory, solver: lx.AbstractLinearSolver
 ) -> None:
-    """A solve inside the context records an `init` boundary, a `solve`, and lands in a
-    single state-sequence, for every backend."""
+    """A solve inside the context opens with a generic `init`, runs a `compute`, and lands in
+    a single state-sequence, for every backend."""
     operator = make_operator(SQUARE_MATRIX)
     with splx.solve_trace() as trace:
         _, state = splx.linear_solve(operator, RIGHT_HAND_SIDE, solver)
         state.release()
-    actions = _actions(trace)
-    assert actions[0] == "init"
-    assert "solve" in actions
+    ops = _ops(trace)
+    assert ops[0] == "init"
+    assert "compute" in ops
     assert len(trace.sequences) == 1
+    # A generic `init` carries no solver; the work under it does.
+    assert _by_op(trace, "init")[0].solver is None
+    assert any(record.solver is not None for record in trace.records)
 
 
-def test_klu_records_analyze_factor_solve_in_order(
+def test_klu_nests_native_operations_in_order(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
-    """`KLU` records the analyze, factor, and solve of a fresh solve, in that order."""
+    """`KLU`'s analyze, factor, and triangular solve are recorded as `KLU.*` operations, in
+    that order."""
     operator = make_operator(SQUARE_MATRIX)
     with splx.solve_trace() as trace:
         _, state = splx.linear_solve(operator, RIGHT_HAND_SIDE, splx.KLU())
         state.release()
-    actions = _actions(trace)
-    assert actions.index("analyze") < actions.index("factor") < actions.index("solve")
+    ops = _ops(trace)
+    assert ops.index("analyze") < ops.index("factor") < ops.index("solve_with_numeric")
+    assert _by_op(trace, "analyze")[0].solver == "KLU"
+    # The native free operations nest under `release`.
+    assert _by_op(trace, "free_numeric", "KLU") and _by_op(
+        trace, "free_symbolic", "KLU"
+    )
 
 
 def test_update_reuses_analysis_on_shared_pattern(enable_x64: None) -> None:
-    """`update` on a shared `sparsity_pattern_tag` records a `reused` update and a
-    `refactor` carrying a finite `rcond`, rather than a fresh analyze."""
+    """`update` on a shared `sparsity_pattern_tag` records a `reused` outcome and a
+    `KLU.refactor` carrying a finite `rcond`, rather than a fresh analyze."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     tag = splx.sparsity_pattern_tag(sparsity)
     first = splx.BCOOLinearOperator(sparsity, tags=tag)
@@ -87,16 +111,15 @@ def test_update_reuses_analysis_on_shared_pattern(enable_x64: None) -> None:
         _, state = splx.linear_solve(first, RIGHT_HAND_SIDE, splx.KLU())
         _, state = splx.linear_solve(second, RIGHT_HAND_SIDE, splx.KLU(), state=state)
         state.release()
-    updates = [record for record in trace.records if record.action == "update"]
-    assert [update.outcome for update in updates] == ["reused"]
-    refactors = [record for record in trace.records if record.action == "refactor"]
+    updates = _by_op(trace, "update")
+    assert [update.outputs["outcome"] for update in updates] == ["reused"]
+    refactors = _by_op(trace, "refactor", "KLU")
     assert len(refactors) == 1
-    assert refactors[0].reused is True
-    assert refactors[0].rcond is not None and refactors[0].rcond > 0.0
-    # The reuse is motivated.
-    assert refactors[0].reason is not None and "stable" in refactors[0].reason
+    assert refactors[0].outputs["reused"] is True
+    assert refactors[0].outputs["rcond"] > 0.0
+    assert "stable" in refactors[0].outputs["reason"]
     # Reusing the analysis means no second analyze was recorded.
-    assert sum(action == "analyze" for action in _actions(trace)) == 1
+    assert _ops(trace).count("analyze") == 1
 
 
 def test_symbolic_state_records_factor_reason(enable_x64: None) -> None:
@@ -110,13 +133,13 @@ def test_symbolic_state_records_factor_reason(enable_x64: None) -> None:
         state = solver.init_symbolic(sparsity)
         state = solver.update(state, operator)
         state.release()
-    factors = [record for record in trace.records if record.action == "factor"]
+    factors = _by_op(trace, "factor", "KLU")
     assert len(factors) == 1
-    assert factors[0].reason is not None and "symbolic-only" in factors[0].reason
+    assert factors[0].outputs["reason"] == "No prior factorization"
 
 
 def test_update_rebuilds_on_changed_pattern(enable_x64: None) -> None:
-    """`update` with a different sparsity pattern records a `rebuilt` update and re-analyzes,
+    """`update` with a different sparsity pattern records a `rebuilt` outcome and re-analyzes,
     so a lost reuse is explicit in the log."""
     first = splx.BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     # A different sparsity pattern (reversed rows), so the tags cannot match.
@@ -125,12 +148,12 @@ def test_update_rebuilds_on_changed_pattern(enable_x64: None) -> None:
         _, state = splx.linear_solve(first, RIGHT_HAND_SIDE, splx.KLU())
         _, state = splx.linear_solve(second, RIGHT_HAND_SIDE, splx.KLU(), state=state)
         state.release()
-    updates = [record for record in trace.records if record.action == "update"]
-    assert [update.outcome for update in updates] == ["rebuilt"]
+    updates = _by_op(trace, "update")
+    assert [update.outputs["outcome"] for update in updates] == ["rebuilt"]
     # The rebuild is motivated: neither operator carries a sparsity tag to match on.
-    assert updates[0].reason is not None and "tag" in updates[0].reason
-    # A rebuild re-analyzes, so there are two analyze events and still one sequence.
-    assert sum(action == "analyze" for action in _actions(trace)) == 2
+    assert "tag" in updates[0].outputs["reason"]
+    # A rebuild re-analyzes, so there are two analyze operations and still one sequence.
+    assert _ops(trace).count("analyze") == 2
     assert len(trace.sequences) == 1
 
 
@@ -143,7 +166,7 @@ def test_two_lineages_are_separate_sequences(enable_x64: None) -> None:
         _, second = splx.linear_solve(operator, RIGHT_HAND_SIDE, splx.KLU())
         second.release()
     assert len(trace.sequences) == 2
-    assert all(sequence[0].action == "init" for sequence in trace.sequences)
+    assert all(sequence[0].operation == "init" for sequence in trace.sequences)
 
 
 class _JacobiState(eqx.Module):
@@ -160,7 +183,7 @@ class _JacobiSolver(lx.AbstractLinearSolver[_JacobiState]):
     """A weak stateful solver (one Jacobi sweep, `x = b / diag(A)`), only for these tests.
 
     Wrapped in `IterativeRefinement` the correction loop becomes a Jacobi iteration that
-    needs several steps to converge, so the trace records more than one `ir_step`.
+    needs several steps to converge, so the trace records more than one `refine_step`.
     """
 
     def init(
@@ -201,8 +224,9 @@ class _JacobiSolver(lx.AbstractLinearSolver[_JacobiState]):
 
 
 def test_iterative_refinement_records_steps(enable_x64: None) -> None:
-    """Iterative refinement records `ir_start`, one `ir_step` per correction with an
-    increasing step and a non-increasing residual, and a converged `ir_result`."""
+    """Iterative refinement records one `refine_start`, one `refine_step` per correction with
+    an increasing step and a non-increasing residual, and a converged `refine_result`, all as
+    `IterativeRefinement.*` operations nested under a single `compute`."""
     operator = splx.BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = IterativeRefinement(_JacobiSolver(), tol=1e-8, max_steps=50)
     with splx.solve_trace() as trace:
@@ -212,21 +236,24 @@ def test_iterative_refinement_records_steps(enable_x64: None) -> None:
         jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE)),
         atol=1e-6,
     )
-    actions = _actions(trace)
-    assert actions.count("ir_start") == 1
-    assert actions.count("ir_result") == 1
-    steps = [record for record in trace.records if record.action == "ir_step"]
+    ops = _ops(trace)
+    assert ops.count("refine_start") == 1
+    assert ops.count("refine_result") == 1
+    assert ops.count("compute") == 1
+    steps = _by_op(trace, "refine_step", "IterativeRefinement")
     assert len(steps) >= 2
-    assert [record.step for record in steps] == list(range(1, len(steps) + 1))
-    norms = [record.residual_norm for record in steps]
+    assert [record.outputs["step"] for record in steps] == list(
+        range(1, len(steps) + 1)
+    )
+    norms = [record.outputs["residual_norm"] for record in steps]
     assert all(later <= earlier for earlier, later in zip(norms, norms[1:]))
-    result = next(record for record in trace.records if record.action == "ir_result")
-    assert result.converged is True
+    result = _by_op(trace, "refine_result")[0]
+    assert result.outputs["converged"] is True
 
 
 def test_records_under_jit(enable_x64: None) -> None:
-    """Tracing works through `jax.jit`: every expected action is recorded, and the ordered
-    structural events keep their relative order (the solve rides on unordered callbacks)."""
+    """Tracing works through `jax.jit`: every expected operation is recorded, and the
+    trace-time order index keeps the printed tree in program order."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     indices, shape = sparsity.indices, sparsity.shape
 
@@ -241,14 +268,24 @@ def test_records_under_jit(enable_x64: None) -> None:
 
     with splx.solve_trace() as trace:
         run(sparsity.data)
-    actions = _actions(trace)
-    for expected in ("init", "analyze", "factor", "solve", "track", "release"):
-        assert expected in actions
-    # Ordered structural events keep program order among themselves.
-    ordered = [
-        a for a in actions if a in ("init", "analyze", "factor", "track", "release")
-    ]
-    assert ordered == ["init", "analyze", "factor", "track", "release"]
+    ops = _ops(trace)
+    for expected in (
+        "init",
+        "analyze",
+        "factor",
+        "solve_with_numeric",
+        "track",
+        "release",
+    ):
+        assert expected in ops
+    # Sorting by the order index recovers program order, even under jit.
+    assert (
+        ops.index("init")
+        < ops.index("analyze")
+        < ops.index("factor")
+        < ops.index("solve_with_numeric")
+        < ops.index("release")
+    )
 
 
 def test_function_compiled_outside_context_records_nothing(enable_x64: None) -> None:

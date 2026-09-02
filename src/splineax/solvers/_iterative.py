@@ -22,7 +22,7 @@ from lineax import AbstractLinearOperator, conj
 from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 
-from splineax._trace import record_event
+from splineax._trace import compute_scope, record_event
 from splineax.solvers._sparse import SparseLinearSolver, _Sparsity
 from splineax.solvers._stateful import TrackingSolverState
 
@@ -81,13 +81,9 @@ def iterative_refinement(
     floor = _CONVERGENCE_FLOOR_ULPS * jnp.finfo(residual_dtype).eps
     threshold = jnp.maximum(tol, floor) * _tree_norm(vector)
 
-    # Unordered throughout: `iterative_refinement` runs inside `IterativeRefinement.compute`,
-    # hence inside lineax's solve primitive, which does not carry an ordered effect (see
-    # `record_event`). The `step` field and the loop's sequential carry keep the log ordered.
     record_event(
-        "ir_start",
-        "iterative_refinement",
-        ordered=False,
+        "refine_start",
+        "IterativeRefinement",
         dynamic={"residual_norm": _tree_norm(r0), "threshold": threshold},
     )
 
@@ -103,9 +99,8 @@ def iterative_refinement(
         x = _tree_add(x, correction)
         new_residual = residual(x)
         record_event(
-            "ir_step",
-            "iterative_refinement",
-            ordered=False,
+            "refine_step",
+            "IterativeRefinement",
             dynamic={"step": step + 1, "residual_norm": _tree_norm(new_residual)},
         )
         return x, new_residual, step + 1
@@ -113,9 +108,8 @@ def iterative_refinement(
     x, final_residual, steps = jax.lax.while_loop(cond, body, (x0, r0, jnp.array(0)))
     converged = _tree_norm(final_residual) <= threshold
     record_event(
-        "ir_result",
-        "iterative_refinement",
-        ordered=False,
+        "refine_result",
+        "IterativeRefinement",
         dynamic={
             "step": steps,
             "residual_norm": _tree_norm(final_residual),
@@ -245,9 +239,12 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
             )
             return solution
 
-        solution, result = iterative_refinement(
-            solve, operator, vector, self.tol, self.max_steps
-        )
+        # The outermost `compute`, so it opens the generic `compute` boundary; the inner
+        # solver's per-step solves nest under it (see `compute_scope`).
+        with compute_scope():
+            solution, result = iterative_refinement(
+                solve, operator, vector, self.tol, self.max_steps
+            )
         return solution, result, {}
 
     def transpose(

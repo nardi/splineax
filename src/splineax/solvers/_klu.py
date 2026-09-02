@@ -19,7 +19,7 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
-from splineax._trace import record_event
+from splineax._trace import compute_scope, record_event
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -32,6 +32,7 @@ from splineax.solvers._sparse import (
     operator_pattern_tag,
     sparsity_pattern_tag,
     sparsity_reuse_block,
+    trace_inputs,
 )
 
 # `Ai` (row indices), `Aj` (column indices), `Ax` (values): the matrix in COO form.
@@ -177,7 +178,7 @@ class _KLUState(eqx.Module):
         Accepts the lineax `Solution` or a bare value pytree. The solution arrays become
         ordering dependencies on the tokens, see klujax `SymbolToken.track`.
         """
-        record_event("track", "klu", shape=self.shape)
+        record_event("track")
         value = getattr(solution, "value", solution)
         leaves = tuple(jax.tree_util.tree_leaves(value))
         symbol = self.symbol.track(*leaves)
@@ -195,10 +196,12 @@ class _KLUState(eqx.Module):
 
     def release(self) -> None:
         """Free the cache slots this state owns, ordered after any tracked solves."""
-        record_event("release", "klu", shape=self.shape)
+        record_event("release")
         klujax = _klujax()
         if self.numeric is not None:
+            record_event("free_numeric", "KLU")
             klujax.free_numeric(self.numeric)
+        record_event("free_symbolic", "KLU")
         klujax.free_symbolic(self.symbol)
 
 
@@ -271,10 +274,11 @@ def _reuse_or_refresh_numeric(
         # Record the branch actually taken, so the log shows a refactor was reused and why.
         record_event(
             "refactor",
-            "klu",
-            nnz=int(values.shape[0]),
-            reused=True,
-            reason=f"reused pivots stable: refactor ok and rcond > {floor:g}",
+            "KLU",
+            outputs={
+                "reused": True,
+                "reason": f"Pivots stable: no error and rcond > {floor:g}",
+            },
             dynamic={"rcond": reciprocal_condition},
         )
         return refreshed
@@ -283,11 +287,11 @@ def _reuse_or_refresh_numeric(
         # A fresh factor rather than a refactor: motivate why the reuse was rejected.
         record_event(
             "factor",
-            "klu",
-            nnz=int(values.shape[0]),
-            reused=False,
-            reason=f"refactor rejected (status not OK or rcond <= {floor:g}); "
-            "factored fresh",
+            "KLU",
+            outputs={
+                "reused": False,
+                "reason": f"Pivots unstable: error or rcond <= {floor:g}",
+            },
             dynamic={"rcond": reciprocal_condition},
         )
         return klujax.factor(row, col, values, symbol)
@@ -313,7 +317,14 @@ class KLU(AbstractLinearSolver[_KLUState]):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _KLUState:
-        record_event("init", "klu", shape=(operator.out_size(), operator.in_size()))
+        record_event(
+            "init",
+            inputs=lambda: trace_inputs(
+                operator,
+                operator_pattern_tag(operator),
+                (operator.out_size(), operator.in_size()),
+            ),
+        )
         return self._analyze_and_factor(operator, options)
 
     def _analyze_and_factor(
@@ -334,9 +345,9 @@ class KLU(AbstractLinearSolver[_KLUState]):
         # This analyzes and factorizes right away, so the state is ready to solve and
         # reusable across right-hand sides. `factor` needs the real `SymbolToken`, which
         # `analyze` returns and the state then carries.
-        record_event("analyze", "klu", shape=shape, nnz=int(values.shape[0]))
+        record_event("analyze", "KLU")
         symbol = klujax.analyze(row, col, shape[1])
-        record_event("factor", "klu", shape=shape, nnz=int(values.shape[0]))
+        record_event("factor", "KLU")
         numeric = klujax.factor(row, col, values, symbol)
         return _KLUState(
             operator,
@@ -365,10 +376,13 @@ class KLU(AbstractLinearSolver[_KLUState]):
             raise ValueError(
                 f"`KLU.init_symbolic` requires a square matrix; got shape {shape}."
             )
-        record_event("init_symbolic", "klu", shape=shape)
         record_event(
-            "analyze", "klu", shape=shape, nnz=int(row.shape[0]), symbolic=True
+            "init_symbolic",
+            inputs=lambda: trace_inputs(
+                sparsity, sparsity_pattern_tag(sparsity), shape
+            ),
         )
+        record_event("analyze", "KLU")
         symbol = _klujax().analyze(row, col, shape[1])
         return _KLUState(
             None,
@@ -397,10 +411,10 @@ class KLU(AbstractLinearSolver[_KLUState]):
             # Nothing changed, so this is a no-op.
             record_event(
                 "update",
-                "klu",
-                outcome="noop",
-                shape=state.shape,
-                reason="same operator object",
+                inputs=lambda: trace_inputs(
+                    operator, operator_pattern_tag(operator), state.shape
+                ),
+                outputs={"outcome": "noop", "reason": "Same operator"},
             )
             return state
         tag = operator_pattern_tag(operator)
@@ -409,20 +423,16 @@ class KLU(AbstractLinearSolver[_KLUState]):
             # Same pattern, new values. Reuse the symbolic analysis.
             record_event(
                 "update",
-                "klu",
-                outcome="reused",
-                shape=state.shape,
-                reason="operator shares the state's sparsity tag",
+                inputs=lambda: trace_inputs(operator, tag, state.shape),
+                outputs={"outcome": "reused", "reason": "Identical sparsity tag"},
             )
             return self._refactor(state, operator, tag, options)
         # Cannot reuse the analysis, so analyze from scratch. Recorded as a rebuild, with the
         # reason, so the analyze below is attributed to it rather than read as a first init.
         record_event(
             "update",
-            "klu",
-            outcome="rebuilt",
-            reused=False,
-            reason=reuse_block,
+            inputs=lambda: trace_inputs(operator, tag, state.shape),
+            outputs={"outcome": "rebuilt", "reason": reuse_block},
         )
         return self._analyze_and_factor(operator, options)
 
@@ -441,13 +451,7 @@ class KLU(AbstractLinearSolver[_KLUState]):
         if state.numeric is None:
             # No previous numeric factorization to reuse (a symbolic-only state from
             # `init_symbolic`), so build one fresh against the reused analysis.
-            record_event(
-                "factor",
-                "klu",
-                shape=shape,
-                nnz=int(values.shape[0]),
-                reason="no numeric factorization to reuse (symbolic-only state)",
-            )
+            record_event("factor", "KLU", outputs={"reason": "No prior factorization"})
             numeric = klujax.factor(row, col, values, state.symbol)
         else:
             numeric = _reuse_or_refresh_numeric(
@@ -476,34 +480,28 @@ class KLU(AbstractLinearSolver[_KLUState]):
                 "`KLU` cannot solve with a symbolic-only state; call `update` with an "
                 "operator first."
             )
-        row, col, values = state.coo
-        b = ravel_vector(vector, state.packed_structures)
-        row, col, values, b = _ensure_cpu((row, col, values, b))
-        klujax = _klujax()
-        b = _upcast(b)
-        # A symbolic-only tier is possible if `update` reused an analysis but the numeric
-        # token was dropped, so factor here as a fallback. Normally `numeric` is present.
-        numeric = state.numeric
-        if numeric is None:
-            record_event("factor", "klu", shape=state.shape)
-            numeric = klujax.factor(row, col, values, state.symbol)
-        solve = (
-            klujax.tsolve_with_numeric
-            if state.transposed
-            else klujax.solve_with_numeric
-        )
-        # Unordered: `compute` runs inside lineax's solve primitive, which does not carry an
-        # ordered effect (see `record_event`).
-        record_event(
-            "solve",
-            "klu",
-            shape=state.shape,
-            transposed=state.transposed,
-            ordered=False,
-        )
-        x = solve(numeric, b, state.symbol)
-        solution = unravel_solution(x, state.packed_structures)
-        return solution, RESULTS.successful, {}
+        with compute_scope():
+            row, col, values = state.coo
+            b = ravel_vector(vector, state.packed_structures)
+            row, col, values, b = _ensure_cpu((row, col, values, b))
+            klujax = _klujax()
+            b = _upcast(b)
+            # A symbolic-only tier is possible if `update` reused an analysis but the numeric
+            # token was dropped, so factor here as a fallback. Normally `numeric` is present.
+            numeric = state.numeric
+            if numeric is None:
+                record_event(
+                    "factor", "KLU", outputs={"reason": "No prior factorization"}
+                )
+                numeric = klujax.factor(row, col, values, state.symbol)
+            if state.transposed:
+                operation, solve = "tsolve_with_numeric", klujax.tsolve_with_numeric
+            else:
+                operation, solve = "solve_with_numeric", klujax.solve_with_numeric
+            record_event(operation, "KLU")
+            x = solve(numeric, b, state.symbol)
+            solution = unravel_solution(x, state.packed_structures)
+            return solution, RESULTS.successful, {}
 
     def transpose(
         self, state: _KLUState, options: dict[str, Any]
@@ -539,14 +537,7 @@ class KLU(AbstractLinearSolver[_KLUState]):
         # the sparsity is unchanged.
         conjugated = values.conj()
         if state.numeric is not None:
-            record_event(
-                "factor",
-                "klu",
-                shape=state.shape,
-                note="conj",
-                nnz=int(values.shape[0]),
-                reason="conjugated values, refactored against the reused analysis",
-            )
+            record_event("factor", "KLU", outputs={"reason": "Conjugated values"})
         numeric = (
             None
             if state.numeric is None
