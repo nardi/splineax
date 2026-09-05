@@ -27,7 +27,11 @@ from lineax import AbstractLinearOperator, AbstractLinearSolver
 from lineax._solution import RESULTS
 from lineax._solve import linear_solve_p
 
-from splineax.solvers._stateful import StatefulSolver, TrackingState
+from splineax._solve import (
+    _restore_operator,
+    _splineax_linear_solve_p,
+)
+from splineax.solvers._stateful import StatefulSolver
 
 _OutputT = TypeVar("_OutputT")
 """The return type of the wrapped function."""
@@ -270,11 +274,17 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         return list(result) if primitive.multiple_results else [result]
 
     def _thread_solve(self, arguments: _SolveArguments) -> list[Any]:
-        """Update the state for this solve's operator, solve, and track the solution.
+        """Update the state for this solve's operator, then solve through splineax's own
+        primitive and thread the state it returns.
 
-        The operator and the state are stopped before the bind so the solve's autodiff rule
-        sees no state tangent, matching what `lineax.linear_solve` does with the state it
-        builds. Returns the solve's output values.
+        The operator's values are stopped before `init` and `update`, so the factorization is
+        an autodiff constant, but the operator handed to the solve keeps its tangent so the
+        matrix gradient flows through its `matvec`. Binding `_splineax_linear_solve_p` rather
+        than `lineax`'s primitive is what makes a reused factorization differentiate
+        correctly: its transpose and forward rules factor an independent slot per
+        differentiated solve, so an earlier solve's adjoint does not read a slot a later
+        refactor overwrote. The returned state carries the ordering token, so no separate
+        `track` is needed.
         """
         operator, _old_state, vector, options, solver_any, throw = arguments
         solver = cast(StatefulSolver[_StateT], solver_any)
@@ -283,18 +293,22 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             self.state = solver.init(stopped_operator, {})
         else:
             self.state = solver.update(self.state, stopped_operator, {})
-        solution, result_code, stats = _rebind_solve(
-            (
+        prior_operator = getattr(self.state, "operator", None)
+        solution, result_code, stats, new_state = cast(
+            tuple[PyTree[Array], RESULTS, dict[str, Any], _StateT],
+            eqxi.filter_primitive_bind(
+                _splineax_linear_solve_p,
                 operator,
-                _stop_gradient_leaves(self.state),
+                self.state,
                 vector,
                 options,
                 solver_any,
                 throw,
-            )
+            ),
         )
-        tracking_state = cast(TrackingState, self.state)
-        self.state = cast(_StateT, tracking_state.track(solution))
+        # The primitive strips the operator from the threaded state, so restore it with the
+        # updated state's identity, which keeps the next `update`'s no-op check working.
+        self.state = _restore_operator(new_state, prior_operator)
         return _runtime_value_leaves((solution, result_code, stats))
 
     def _require_prior_state(self, region: str) -> None:

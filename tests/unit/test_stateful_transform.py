@@ -65,6 +65,29 @@ def _two_solve_fn(tag: object):
     return fn
 
 
+def _two_operator_fn(tag: object, indices: jax.Array, shape: tuple[int, int] = (3, 3)):
+    """A function that solves two different-valued operators sharing a pattern.
+
+    Unlike `_two_solve_fn`, the two operators differ, so the second solve refactors the
+    shared cache slot in place. That is the reused-factorization hazard, and threading such a
+    function is where an incorrect backward pass shows up. Both operators solve one
+    right-hand side each, and the function returns a scalar loss.
+    """
+
+    def fn(data1: jax.Array, data2: jax.Array, b1: jax.Array, b2: jax.Array):
+        operator1 = splx.BCOOLinearOperator(
+            BCOO((data1, indices), shape=shape, indices_sorted=True), tags=tag
+        )
+        operator2 = splx.BCOOLinearOperator(
+            BCOO((data2, indices), shape=shape, indices_sorted=True), tags=tag
+        )
+        x1 = lx.linear_solve(operator1, b1, splx.KLU()).value
+        x2 = lx.linear_solve(operator2, b2, splx.KLU()).value
+        return jnp.sum(x1**2) + jnp.sum(x2**2)
+
+    return fn
+
+
 def _count_primitive(jaxpr, needle: str) -> int:
     """Count equations whose primitive name contains `needle`, recursing into sub-jaxprs."""
     total = 0
@@ -136,6 +159,85 @@ def test_differentiates_through_the_matrix() -> None:
     grad_run = jax.grad(lambda d: loss(d, run))(_data())
     grad_plain = jax.grad(lambda d: loss(d, fn))(_data())
     assert jnp.allclose(grad_run, grad_plain, atol=1e-6)
+
+
+def test_grad_of_reused_factorization_matches_untransformed() -> None:
+    """Differentiating a transform of two different-valued operators sharing a pattern
+    matches the untransformed function.
+
+    This is the reused-factorization gradient bug in the implicit API. The second solve
+    refactors the shared cache slot in place, so the earlier solve's adjoint would read the
+    wrong matrix if the transform rebound `lineax`'s own solve. Rebinding through splineax's
+    primitive routes each threaded solve through a transpose rule that factors an independent
+    slot, so the gradient stays correct.
+    """
+    indices = _indices()
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _two_operator_fn(tag, indices)
+    run = splx.stateful_solve_transform(fn)
+    data1, data2 = _data() * 1.3, _data() * 0.7
+    args = (data1, data2, _b1(), _b2())
+
+    transformed = jax.jit(jax.grad(run, argnums=(0, 1)))(*args)
+    untransformed = jax.grad(fn, argnums=(0, 1))(*args)
+    assert jnp.allclose(transformed[0], untransformed[0], atol=1e-6)
+    assert jnp.allclose(transformed[1], untransformed[1], atol=1e-6)
+
+
+def test_grad_and_transform_commute_over_reuse() -> None:
+    """`grad(transform(f))` and `transform(grad(f))` agree, so the transform returns the same
+    gradients whichever order the transform and `grad` run in, over a reused factorization."""
+    indices = _indices()
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _two_operator_fn(tag, indices)
+    data1, data2 = _data() * 1.3, _data() * 0.7
+    args = (data1, data2, _b1(), _b2())
+
+    grad_of_transform = jax.jit(
+        jax.grad(splx.stateful_solve_transform(fn), argnums=(0, 1))
+    )(*args)
+    transform_of_grad = jax.jit(
+        splx.stateful_solve_transform(jax.grad(fn, argnums=(0, 1)))
+    )(*args)
+    assert jnp.allclose(grad_of_transform[0], transform_of_grad[0], atol=1e-6)
+    assert jnp.allclose(grad_of_transform[1], transform_of_grad[1], atol=1e-6)
+
+
+def test_reuse_backward_correct_for_nonsymmetric_pattern() -> None:
+    """A reused factorization differentiates correctly when the sparsity is structurally
+    non-symmetric, in both transform orders.
+
+    The adjoint solves the transposed operator, whose pattern differs from the forward one
+    here, so this guards against reusing the forward symbolic analysis for the wrong pattern.
+    """
+    # Entry (0, 2) is present but (2, 0) is absent, so the pattern is not symmetric.
+    dense = jnp.asarray([[10.0, 0.0, 1.0], [3.0, 14.0, 0.0], [0.0, 6.0, 18.0]])
+    sparsity = BCOO.fromdense(dense)
+    indices, data = sparsity.indices, sparsity.data
+    tag = splx.sparsity_pattern_tag(sparsity)
+    fn = _two_operator_fn(tag, indices)
+    data1, data2 = data * 1.3, data * 0.7
+    args = (data1, data2, _b1(), _b2())
+
+    def dense_loss(d1: jax.Array, d2: jax.Array) -> jax.Array:
+        first = jnp.linalg.solve(
+            BCOO((d1, indices), shape=(3, 3)).todense(), _b1()
+        )
+        second = jnp.linalg.solve(
+            BCOO((d2, indices), shape=(3, 3)).todense(), _b2()
+        )
+        return jnp.sum(first**2) + jnp.sum(second**2)
+
+    reference = jax.grad(dense_loss, argnums=(0, 1))(data1, data2)
+    grad_of_transform = jax.jit(
+        jax.grad(splx.stateful_solve_transform(fn), argnums=(0, 1))
+    )(*args)
+    transform_of_grad = jax.jit(
+        splx.stateful_solve_transform(jax.grad(fn, argnums=(0, 1)))
+    )(*args)
+    for index in (0, 1):
+        assert jnp.allclose(grad_of_transform[index], reference[index], atol=1e-6)
+        assert jnp.allclose(transform_of_grad[index], reference[index], atol=1e-6)
 
 
 def test_vmap_over_operators_agrees_both_ways() -> None:
