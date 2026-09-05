@@ -447,13 +447,32 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         self, state: _PardisoState, options: dict[str, Any]
     ) -> tuple[_PardisoState, dict[str, Any]]:
         del options
-        # `pardiso_mkl_jax` solves against A^T natively with the same factorization, so
-        # transposing is pure metadata: flip `transposed`, transpose the packed
-        # structures, and swap `shape`. The token carries over unchanged.
+        # Build a fresh, independent factorization from this state's own values, and let
+        # `solve_stateful` solve A^T against it. Reusing `state.token` would be cheaper,
+        # but the forward may have refactored the shared handle for a later operator, so
+        # the adjoint would then solve the wrong matrix. A fresh handle is independent of
+        # any other solve, so the adjoints need no ordering between them. Pardiso's analysis
+        # depends on the values through its weighted matching, so there is no cheaper
+        # symbolic-only reuse to lean on here.
+        token = state.token
+        if state.csr is not None:
+            pmj = _pardiso_mkl_jax()
+            primitive = pmj.primitive
+            indptr, indices, values = state.csr
+            token, _ = primitive.analyze(
+                indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
+            )
+            token, _ = primitive.factor(
+                token,
+                indptr,
+                indices,
+                values,
+                matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+            )
         transposed_state = _PardisoState(
             state.operator,
             state.csr,
-            state.token,
+            token,
             transpose_packed_structures(state.packed_structures)
             if state.packed_structures is not None
             else None,

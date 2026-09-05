@@ -128,9 +128,15 @@ def test_init_symbolic_defers_analysis() -> None:
     assert updated.token is not None
 
 
-def test_transpose_reuses_factorization() -> None:
-    """`transpose` reuses the same token and solves A^T through `solve_stateful`, with no
-    extra analyze or factor."""
+def test_transpose_fresh_factorization() -> None:
+    """`transpose` builds a fresh, independent factorization and solves A^T through
+    `solve_stateful`.
+
+    A fresh handle is what keeps the backward correct across a reused factorization. The
+    forward may refactor a shared handle for a later operator, so reusing this state's token
+    would solve the wrong matrix in the adjoint. Pardiso's analysis depends on the values,
+    so the fresh factorization re-analyzes and re-factors.
+    """
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = Pardiso()
     expected = jnp.linalg.solve(
@@ -139,10 +145,10 @@ def test_transpose_reuses_factorization() -> None:
     state = solver.init(operator, {})
     with _spy("analyze") as analyze_calls, _spy("factor") as factor_calls:
         transposed, _ = solver.transpose(state, {})
-        assert transposed.token is state.token
+        assert transposed.token is not state.token
         solution = solver.compute(transposed, RIGHT_HAND_SIDE, {})[0]
-    assert not analyze_calls, "transpose re-analyzed the pattern"
-    assert not factor_calls, "transpose re-factored the matrix"
+    assert analyze_calls, "transpose did not build a fresh analysis"
+    assert factor_calls, "transpose did not build a fresh factorization"
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 

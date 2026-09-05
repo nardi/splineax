@@ -469,13 +469,21 @@ class KLU(AbstractLinearSolver[_KLUState]):
         self, state: _KLUState, options: dict[str, Any]
     ) -> tuple[_KLUState, dict[str, Any]]:
         del options
-        # Reuse the factorization unchanged and let `tsolve` handle the transposed
-        # direction. `coo` stays A's own arrays, which `tsolve` needs.
+        # Factor a fresh numeric slot from this state's own values, reusing the symbolic
+        # analysis, and let `tsolve` handle the transposed direction. `state.numeric` may
+        # point at a shared slot a later forward refactor has overwritten, so reusing it
+        # would `tsolve` the wrong matrix in the backward. A fresh slot is independent of
+        # any other solve, so the adjoints need no ordering between them. `coo` stays A's
+        # own arrays, which `tsolve` needs.
+        numeric = state.numeric
+        if state.coo is not None:
+            row, col, values = state.coo
+            numeric = _klujax().factor(row, col, values, state.symbol)
         transposed_state = _KLUState(
             state.operator,
             state.coo,
             state.symbol,
-            state.numeric,
+            numeric,
             transpose_packed_structures(state.packed_structures)
             if state.packed_structures is not None
             else None,

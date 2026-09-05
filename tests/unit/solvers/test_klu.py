@@ -139,8 +139,15 @@ def test_update_falls_back_when_reused_pivots_go_bad() -> None:
     assert jnp.allclose(solution, expected, atol=1e-6)
 
 
-def test_transpose_reuses_factorization_via_tsolve() -> None:
-    """`transpose` reuses the same tokens and solves A^T through `tsolve_with_numeric`."""
+def test_transpose_fresh_numeric_reuses_symbol_via_tsolve() -> None:
+    """`transpose` reuses the symbolic analysis but factors a fresh numeric slot, then
+    solves A^T through `tsolve_with_numeric`.
+
+    A fresh numeric slot is what keeps the backward correct across a reused factorization.
+    The forward may refactor a shared slot for a later operator, so reusing this state's
+    numeric token would `tsolve` the wrong matrix in the adjoint. Factoring afresh from this
+    state's own values, reusing the symbolic analysis, gives an independent slot.
+    """
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = KLU()
     expected = jnp.linalg.solve(
@@ -150,7 +157,7 @@ def test_transpose_reuses_factorization_via_tsolve() -> None:
         state = solver.init(operator, {})
         transposed, _ = solver.transpose(state, {})
         assert transposed.symbol is state.symbol
-        assert transposed.numeric is state.numeric
+        assert transposed.numeric is not state.numeric
         solution = solver.compute(transposed, RIGHT_HAND_SIDE, {})[0]
     assert tsolve_calls, "transpose did not use tsolve_with_numeric"
     assert len(analyze_calls) == 1, "transpose re-analyzed the pattern"
