@@ -443,36 +443,53 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         solution, result, _state, stats = self.compute_stateful(state, vector, options)
         return solution, result, stats
 
+    def isolate(
+        self, state: _PardisoState, options: dict[str, Any]
+    ) -> tuple[_PardisoState, dict[str, Any]]:
+        del options
+        # Build a fresh, independent factorization from this state's own values. Reusing
+        # `state.token` would be cheaper, but the forward may have refactored the shared
+        # handle for a later operator, so a differentiated solve against it would solve the
+        # wrong matrix. A fresh handle is independent of any other solve. Pardiso's analysis
+        # depends on the values through its weighted matching, so there is no cheaper
+        # symbolic-only reuse to lean on here.
+        if state.token is None or state.csr is None:
+            return state, {}
+        pmj = _pardiso_mkl_jax()
+        primitive = pmj.primitive
+        indptr, indices, values = state.csr
+        token, _ = primitive.analyze(
+            indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
+        )
+        token, _ = primitive.factor(
+            token,
+            indptr,
+            indices,
+            values,
+            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+        )
+        isolated_state = _PardisoState(
+            state.operator,
+            state.csr,
+            token,
+            state.packed_structures,
+            state.shape,
+            state.transposed,
+            state.sparsity_tag,
+        )
+        return isolated_state, {}
+
     def transpose(
         self, state: _PardisoState, options: dict[str, Any]
     ) -> tuple[_PardisoState, dict[str, Any]]:
         del options
-        # Build a fresh, independent factorization from this state's own values, and let
-        # `solve_stateful` solve A^T against it. Reusing `state.token` would be cheaper,
-        # but the forward may have refactored the shared handle for a later operator, so
-        # the adjoint would then solve the wrong matrix. A fresh handle is independent of
-        # any other solve, so the adjoints need no ordering between them. Pardiso's analysis
-        # depends on the values through its weighted matching, so there is no cheaper
-        # symbolic-only reuse to lean on here.
-        token = state.token
-        if state.csr is not None:
-            pmj = _pardiso_mkl_jax()
-            primitive = pmj.primitive
-            indptr, indices, values = state.csr
-            token, _ = primitive.analyze(
-                indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
-            )
-            token, _ = primitive.factor(
-                token,
-                indptr,
-                indices,
-                values,
-                matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
-            )
+        # Isolate a fresh, independent factorization, then flip the orientation so
+        # `solve_stateful` solves A^T against it.
+        isolated, _ = self.isolate(state, {})
         transposed_state = _PardisoState(
-            state.operator,
-            state.csr,
-            token,
+            isolated.operator,
+            isolated.csr,
+            isolated.token,
             transpose_packed_structures(state.packed_structures)
             if state.packed_structures is not None
             else None,

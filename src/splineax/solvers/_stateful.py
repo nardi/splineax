@@ -85,6 +85,19 @@ class StatefulSolver(Protocol[_StateT]):
         self, state: _StateT, options: dict[str, Any]
     ) -> tuple[Any, dict[str, Any]]: ...
 
+    def isolate(
+        self, state: _StateT, options: dict[str, Any]
+    ) -> tuple[Any, dict[str, Any]]:
+        """Return a state backed by a fresh, independent factorization of the same operator.
+
+        A differentiated solve applies the factorization after the primal solve, so reusing
+        a shared cache slot a later `update` overwrites would solve the wrong matrix. An
+        isolated state owns a slot no other solve writes, so a tangent or adjoint solve
+        against it stays correct with no ordering between the solves. A solver that keeps no
+        shared handle implements this as a no-op returning `state`.
+        """
+        ...
+
     def conj(
         self, state: _StateT, options: dict[str, Any]
     ) -> tuple[Any, dict[str, Any]]: ...

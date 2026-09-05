@@ -144,7 +144,8 @@ def _linear_solve_jvp(primals, tangents):
     )
 
     # Full-rank square solve, so x = A^-1 b and x' = A^-1 (b' - A' x). The tangent solve
-    # reuses the same factorization through the same primitive.
+    # applies A^-1 after the primal, so it factors a fresh, independent slot rather than the
+    # state's shared one, which a later refactor of the same cache slot would overwrite.
     vecs = []
     if any(t is not None for t in jtu.tree_leaves(t_vector, is_leaf=_is_none)):
         vecs.append(
@@ -157,8 +158,15 @@ def _linear_solve_jvp(primals, tangents):
         t_solution = jtu.tree_map(jnp.zeros_like, solution)
     else:
         rhs = jtu.tree_map(_sum, *vecs) if len(vecs) > 1 else vecs[0]
+        state_isolated, options_isolated = solver.isolate(state, options)
         t_solution, _, _, _ = eqxi.filter_primitive_bind(
-            _splineax_linear_solve_p, operator, state, rhs, options, solver, True
+            _splineax_linear_solve_p,
+            operator,
+            state_isolated,
+            rhs,
+            options_isolated,
+            solver,
+            True,
         )
 
     out = solution, result, stats, new_state

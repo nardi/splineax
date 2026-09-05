@@ -253,6 +253,19 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
             transpose_options,
         )
 
+    def isolate(
+        self, state: _IterativeRefinementState, options: dict[str, Any]
+    ) -> tuple[_IterativeRefinementState, dict[str, Any]]:
+        # Isolate the inner factorization and keep the operator, since orientation is
+        # unchanged and the residual still uses A on this state.
+        inner_isolated, isolated_options = self.solver.isolate(
+            state.inner_state, options
+        )
+        return (
+            _IterativeRefinementState(inner_isolated, state.operator),
+            isolated_options,
+        )
+
     def conj(
         self, state: _IterativeRefinementState, options: dict[str, Any]
     ) -> tuple[_IterativeRefinementState, dict[str, Any]]:

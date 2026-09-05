@@ -465,25 +465,42 @@ class KLU(AbstractLinearSolver[_KLUState]):
         solution, result, _state, stats = self.compute_stateful(state, vector, options)
         return solution, result, stats
 
-    def transpose(
+    def isolate(
         self, state: _KLUState, options: dict[str, Any]
     ) -> tuple[_KLUState, dict[str, Any]]:
         del options
         # Factor a fresh numeric slot from this state's own values, reusing the symbolic
-        # analysis, and let `tsolve` handle the transposed direction. `state.numeric` may
-        # point at a shared slot a later forward refactor has overwritten, so reusing it
-        # would `tsolve` the wrong matrix in the backward. A fresh slot is independent of
-        # any other solve, so the adjoints need no ordering between them. `coo` stays A's
-        # own arrays, which `tsolve` needs.
-        numeric = state.numeric
-        if state.coo is not None:
-            row, col, values = state.coo
-            numeric = _klujax().factor(row, col, values, state.symbol)
-        transposed_state = _KLUState(
+        # analysis. `state.numeric` may point at a shared slot a later forward refactor
+        # overwrites, so a differentiated solve reusing it would solve the wrong matrix. A
+        # fresh slot is independent of any other solve.
+        if state.numeric is None or state.coo is None:
+            return state, {}
+        row, col, values = state.coo
+        numeric = _klujax().factor(row, col, values, state.symbol)
+        isolated_state = _KLUState(
             state.operator,
             state.coo,
             state.symbol,
             numeric,
+            state.packed_structures,
+            state.shape,
+            state.transposed,
+            state.sparsity_tag,
+        )
+        return isolated_state, {}
+
+    def transpose(
+        self, state: _KLUState, options: dict[str, Any]
+    ) -> tuple[_KLUState, dict[str, Any]]:
+        del options
+        # Isolate a fresh numeric slot, then flip the orientation so `tsolve` handles A^T.
+        # `coo` stays A's own arrays, which `tsolve` needs.
+        isolated, _ = self.isolate(state, {})
+        transposed_state = _KLUState(
+            isolated.operator,
+            isolated.coo,
+            isolated.symbol,
+            isolated.numeric,
             transpose_packed_structures(state.packed_structures)
             if state.packed_structures is not None
             else None,

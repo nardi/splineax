@@ -227,6 +227,14 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         )
         return transpose_state, {}
 
+    def isolate(
+        self, state: _SpsolveState, options: dict[str, Any]
+    ) -> tuple[_SpsolveState, dict[str, Any]]:
+        del options
+        # `Spsolve` keeps no native handle and refactors from `state.matrix` on every solve,
+        # so there is nothing to isolate.
+        return state, {}
+
     def conj(
         self, state: _SpsolveState, options: dict[str, Any]
     ) -> tuple[_SpsolveState, dict[str, Any]]:
