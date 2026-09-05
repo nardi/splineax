@@ -139,28 +139,62 @@ def test_update_falls_back_when_reused_pivots_go_bad() -> None:
     assert jnp.allclose(solution, expected, atol=1e-6)
 
 
-def test_transpose_fresh_numeric_reuses_symbol_via_tsolve() -> None:
-    """`transpose` reuses the symbolic analysis but factors a fresh numeric slot, then
+def test_transpose_with_no_order_after_reuses_numeric_via_tsolve() -> None:
+    """With no `order_after`, `transpose` reuses the numeric slot as-is (no refactor) and
     solves A^T through `tsolve_with_numeric`.
 
-    A fresh numeric slot is what keeps the backward correct across a reused factorization.
-    The forward may refactor a shared slot for a later operator, so reusing this state's
-    numeric token would `tsolve` the wrong matrix in the adjoint. Factoring afresh from this
-    state's own values, reusing the symbolic analysis, gives an independent slot.
+    `order_after=None` means nothing later in a reused chain has overwritten this slot, so
+    it already holds this state's own values: `tsolve` can read it directly, with no
+    refactor and no fresh factor.
     """
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = KLU()
     expected = jnp.linalg.solve(
         np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
     )
-    with _spy("tsolve_with_numeric") as tsolve_calls, _spy("analyze") as analyze_calls:
-        state = solver.init(operator, {})
+    state = solver.init(operator, {})
+    with (
+        _spy("tsolve_with_numeric") as tsolve_calls,
+        _spy("factor") as factor_calls,
+        _spy("refactor_with_status") as refactor_calls,
+    ):
         transposed, _ = solver.transpose(state, {})
         assert transposed.symbol is state.symbol
-        assert transposed.numeric is not state.numeric
+        assert transposed.numeric is state.numeric
         solution = solver.compute(transposed, RIGHT_HAND_SIDE, {})[0]
     assert tsolve_calls, "transpose did not use tsolve_with_numeric"
-    assert len(analyze_calls) == 1, "transpose re-analyzed the pattern"
+    assert not factor_calls, "transpose factored a slot it didn't need to"
+    assert not refactor_calls, "transpose refactored a slot it already held"
+    assert jnp.allclose(solution, expected, atol=1e-5)
+
+
+def test_transpose_with_order_after_refactors_the_shared_slot() -> None:
+    """With an `order_after` witness, `transpose` refactors the same numeric slot in
+    place, ordered after the witness, rather than factoring an independent one.
+
+    This is the shape a reused-factorization adjoint takes when an earlier solve in the
+    chain needs its own values back: `order_numeric_after` threads the witness into the
+    refactor, and the refactored slot keeps the same id as the one passed in.
+    """
+    operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
+    solver = KLU()
+    expected = jnp.linalg.solve(
+        np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
+    )
+    state = solver.init(operator, {})
+    # `_reuse_or_refresh_numeric`'s fallback factor lives inside a `jax.lax.cond`, whose
+    # untaken branch still traces (and so still calls the spied Python function) even
+    # though it never runs natively, so this doesn't assert on `factor`'s own call count.
+    with (
+        _spy("tsolve_with_numeric") as tsolve_calls,
+        _spy("refactor_with_status") as refactor_calls,
+    ):
+        transposed, _ = solver.transpose(state, {}, order_after=jnp.zeros(()))
+        assert transposed.symbol is state.symbol
+        assert transposed.numeric.id is not state.numeric.id
+        solution = solver.compute(transposed, RIGHT_HAND_SIDE, {})[0]
+    assert tsolve_calls, "transpose did not use tsolve_with_numeric"
+    assert refactor_calls, "transpose did not refactor the shared slot"
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 

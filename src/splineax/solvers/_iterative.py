@@ -241,10 +241,14 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
         return solution, result, {}
 
     def transpose(
-        self, state: _IterativeRefinementState, options: dict[str, Any]
+        self,
+        state: _IterativeRefinementState,
+        options: dict[str, Any],
+        *,
+        order_after: Any = None,
     ) -> tuple[_IterativeRefinementState, dict[str, Any]]:
         inner_transpose, transpose_options = self.solver.transpose(
-            state.inner_state, options
+            state.inner_state, options, order_after=order_after
         )
         # Transpose the stored operator too, so the residual uses A^T on this state.
         operator = None if state.operator is None else state.operator.transpose()

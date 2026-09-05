@@ -82,8 +82,22 @@ class StatefulSolver(Protocol[_StateT]):
         ...
 
     def transpose(
-        self, state: _StateT, options: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any]]: ...
+        self,
+        state: _StateT,
+        options: dict[str, Any],
+        *,
+        order_after: Any = None,
+    ) -> tuple[Any, dict[str, Any]]:
+        """Return the transposed state, reusing a shared cache slot when it is safe to.
+
+        `order_after` is `None` when nothing else reuses this state's cache slot after this
+        adjoint runs, so the slot already holds the values this call needs and it can solve
+        directly. Otherwise `order_after` is a value a later adjoint's own read produced;
+        threading it into this call's own refactor, ordered after that value, is what keeps
+        the refactor from racing that read under `jit`. A solver with no shared cache slot
+        ignores `order_after`.
+        """
+        ...
 
     def isolate(
         self, state: _StateT, options: dict[str, Any]

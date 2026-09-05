@@ -168,6 +168,18 @@ class _KLUState(eqx.Module):
     shape: tuple[int, ...] = eqx.field(static=True)
     transposed: bool = eqx.field(static=True, default=False)
     sparsity_tag: object | None = eqx.field(static=True, default=None)
+    order_witness: Array = eqx.field(default_factory=lambda: jnp.zeros(()))
+    """Ordering plumbing for `splineax.linear_solve`'s reverse-mode rule, not a real
+    factorization value. It has no meaning on its own; `_solve.py` uses it to make the
+    adjoint of a reused factorization pick up a genuine data dependency on a later
+    adjoint's own read, so the two native calls stay ordered under `jit`."""
+    shared_numeric: NumericToken | None = eqx.field(default=None)
+    """The numeric token of the state `isolate` was called on, carried alongside the fresh
+    one `isolate` builds. `transpose` refactors this slot, not the fresh one: the fresh
+    slot only has to be safe for a tangent solve that might read it directly, but the
+    adjoint never reads it at all, only `order_witness`, so reusing the original slot
+    there is what makes the reused-factorization backward cheap rather than independently
+    refactoring the fresh one for nothing."""
 
     def track(self, solution: Any) -> "_KLUState":
         """Return a state whose `release` is ordered after `solution`.
@@ -396,6 +408,7 @@ class KLU(AbstractLinearSolver[_KLUState]):
             shape,
             False,
             tag,
+            state.order_witness,
         )
 
     def _with_numeric(self, state: _KLUState, numeric: NumericToken) -> _KLUState:
@@ -486,21 +499,47 @@ class KLU(AbstractLinearSolver[_KLUState]):
             state.shape,
             state.transposed,
             state.sparsity_tag,
+            state.order_witness,
+            # The original slot rides along so `transpose` can reuse it instead of this
+            # fresh one, which only exists for a tangent solve that reads it directly.
+            state.numeric,
         )
         return isolated_state, {}
 
     def transpose(
-        self, state: _KLUState, options: dict[str, Any]
+        self,
+        state: _KLUState,
+        options: dict[str, Any],
+        *,
+        order_after: Array | None = None,
     ) -> tuple[_KLUState, dict[str, Any]]:
         del options
-        # Isolate a fresh numeric slot, then flip the orientation so `tsolve` handles A^T.
-        # `coo` stays A's own arrays, which `tsolve` needs.
-        isolated, _ = self.isolate(state, {})
+        # `shared_numeric`, when present, is the slot the primal chain actually reuses;
+        # `numeric` is the independent one `isolate` built for a tangent solve, which the
+        # adjoint never reads. Reusing `shared_numeric` here, instead of refactoring or
+        # solving against the independent slot, is what keeps this adjoint cheap.
+        shared = (
+            state.shared_numeric if state.shared_numeric is not None else state.numeric
+        )
+        numeric = shared
+        if state.coo is not None and shared is not None and order_after is not None:
+            # A later adjoint's own read produced `order_after`. Reusing the shared slot
+            # is only safe once that read is done, so thread it into the refactor as an
+            # ordering operand: `order_numeric_after` returns a token whose id waits on
+            # it, and refactoring through that token orders the write after the read.
+            row, col, values = state.coo
+            klujax = _klujax()
+            ordered = klujax.order_numeric_after(shared, order_after)
+            numeric = _reuse_or_refresh_numeric(
+                klujax, row, col, values, state.symbol, ordered
+            )
+        # `order_after` is None when no later adjoint reused this slot, so it already
+        # holds this state's own values and `numeric` solves directly, no refactor needed.
         transposed_state = _KLUState(
-            isolated.operator,
-            isolated.coo,
-            isolated.symbol,
-            isolated.numeric,
+            state.operator,
+            state.coo,
+            state.symbol,
+            numeric,
             transpose_packed_structures(state.packed_structures)
             if state.packed_structures is not None
             else None,

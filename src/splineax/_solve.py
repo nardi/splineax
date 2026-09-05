@@ -50,6 +50,33 @@ def _sum(*args: Any) -> Any:
     return sum(args[1:], args[0])
 
 
+def _witness_dtype(state: Any) -> Any:
+    return getattr(state, "order_witness", jnp.zeros(())).dtype
+
+
+def _local_witness(rhs: PyTree[Array], dtype: Any) -> Array:
+    """A witness value that depends on `rhs`, for a solve with no preceding solve in its
+    chain to receive one from.
+
+    Multiplying by `0.0` keeps the value zero-valued but, since `0.0` times a `NaN` or an
+    infinity is `NaN` under IEEE 754, XLA cannot fold it away as a disconnected constant.
+    Reading one element makes the result depend on the whole tangent seed.
+    """
+    leaf = jtu.tree_leaves(rhs)[0]
+    return (0.0 * jnp.real(jnp.ravel(leaf)[0])).astype(dtype)
+
+
+def _read_witness(result: PyTree[Array], dtype: Any) -> Array:
+    """A witness value that depends on `result`, a solve's own output.
+
+    Used the same way as `_local_witness`, but derived from what a solve actually
+    produced, so the witness a transpose call returns for its own `state` input carries a
+    genuine dependency on the read it just performed.
+    """
+    leaf = jtu.tree_leaves(result)[0]
+    return (0.0 * jnp.real(jnp.ravel(leaf)[0])).astype(dtype)
+
+
 def _to_struct(x: Any) -> Any:
     if isinstance(x, jax.core.ShapedArray):
         return jax.ShapeDtypeStruct(x.shape, x.dtype)
@@ -86,7 +113,9 @@ def _restore_operator(state: Any, operator: Any) -> Any:
     return eqx.tree_at(lambda s: s.operator, state, operator, is_leaf=_is_none)
 
 
-def _linear_solve_impl(operator, state, vector, options, solver, throw, *, check_closure):
+def _linear_solve_impl(
+    operator, state, vector, options, solver, throw, *, check_closure
+):
     out = solver.compute_stateful(state, vector, options)
     if check_closure:
         out = eqxi.nontraceable(
@@ -137,7 +166,7 @@ def _linear_solve_abstract_eval(operator, state, vector, options, solver, throw)
 def _linear_solve_jvp(primals, tangents):
     operator, state, vector, options, solver, throw = primals
     t_operator, t_state, t_vector, t_options, t_solver, t_throw = tangents
-    del t_state, t_options, t_solver, t_throw
+    del t_options, t_solver, t_throw
 
     solution, result, stats, new_state = eqxi.filter_primitive_bind(
         _splineax_linear_solve_p, operator, state, vector, options, solver, throw
@@ -154,12 +183,41 @@ def _linear_solve_jvp(primals, tangents):
     if any(t is not None for t in jtu.tree_leaves(t_operator, is_leaf=_is_none)):
         t_operator = linearise(TangentLinearOperator(operator, t_operator))
         vecs.append((-(t_operator.mv(solution) ** ω)).ω)
+
+    # A state that keeps a shared, mutable cache slot carries `order_witness`, a leaf with
+    # no factorization meaning of its own. Threading a real (not symbolic-zero) value
+    # through it here is what lets the transpose rule below chain a later solve's adjoint
+    # read into an earlier one's adjoint refactor, so reusing the slot stays correct
+    # without giving each adjoint an independent factorization. See `_linear_solve_transpose`.
+    incoming_witness = (
+        None if t_state is None else getattr(t_state, "order_witness", None)
+    )
+    chains_reuse = hasattr(new_state, "order_witness")
+
     if len(vecs) == 0:
         t_solution = jtu.tree_map(jnp.zeros_like, solution)
+        t_new_state = jtu.tree_map(lambda _: None, new_state)
+        if chains_reuse and incoming_witness is not None:
+            # Nothing here differentiates this solve, but a chain passing through it must
+            # still carry the witness onward, or a solve before it would wrongly conclude
+            # nothing downstream reuses its slot.
+            t_new_state = eqx.tree_at(
+                lambda s: s.order_witness,
+                t_new_state,
+                incoming_witness,
+                is_leaf=_is_none,
+            )
     else:
         rhs = jtu.tree_map(_sum, *vecs) if len(vecs) > 1 else vecs[0]
         state_isolated, options_isolated = solver.isolate(state, options)
-        t_solution, _, _, _ = eqxi.filter_primitive_bind(
+        if chains_reuse:
+            witness_in = incoming_witness
+            if witness_in is None:
+                witness_in = _local_witness(rhs, _witness_dtype(state_isolated))
+            state_isolated = eqx.tree_at(
+                lambda s: s.order_witness, state_isolated, witness_in
+            )
+        t_solution, _, _, t_new_state_inner = eqxi.filter_primitive_bind(
             _splineax_linear_solve_p,
             operator,
             state_isolated,
@@ -168,20 +226,28 @@ def _linear_solve_jvp(primals, tangents):
             solver,
             True,
         )
+        t_new_state = jtu.tree_map(lambda _: None, new_state)
+        if chains_reuse:
+            t_new_state = eqx.tree_at(
+                lambda s: s.order_witness,
+                t_new_state,
+                t_new_state_inner.order_witness,
+                is_leaf=_is_none,
+            )
 
     out = solution, result, stats, new_state
     t_out = (
         t_solution,
         jtu.tree_map(lambda _: None, result),
         jtu.tree_map(lambda _: None, stats),
-        jtu.tree_map(lambda _: None, new_state),
+        t_new_state,
     )
     return out, t_out
 
 
-@eqxi.filter_primitive_transpose(materialise_zeros=True)
+@eqxi.filter_primitive_transpose
 def _linear_solve_transpose(inputs, cts_out):
-    cts_solution, _, _, _ = cts_out
+    cts_solution, _, _, cts_new_state = cts_out
     operator, state, vector, options, solver, _ = inputs
     cts_solution = jtu.tree_map(
         ft.partial(eqxi.materialise_zeros, allow_struct=True),
@@ -189,7 +255,17 @@ def _linear_solve_transpose(inputs, cts_out):
         cts_solution,
     )
     operator_transpose = operator.transpose()
-    state_transpose, options_transpose = solver.transpose(state, options)
+    # `cts_new_state` is the witness a later solve's own transpose call produced for its
+    # `state` input, or `None` when nothing downstream reuses this state's cache slot (the
+    # last solve in a reused chain). Threading it into `transpose` is what lets a solver
+    # reuse its shared slot for this adjoint's refactor, ordered after that later read,
+    # rather than always factoring an independent one. See `StatefulSolver.transpose`.
+    order_after = (
+        None if cts_new_state is None else getattr(cts_new_state, "order_witness", None)
+    )
+    state_transpose, options_transpose = solver.transpose(
+        state, options, order_after=order_after
+    )
     cts_vector, _, _, _ = eqxi.filter_primitive_bind(
         _splineax_linear_solve_p,
         operator_transpose,
@@ -206,10 +282,19 @@ def _linear_solve_transpose(inputs, cts_out):
         is_leaf=lambda x: isinstance(x, ad.UndefinedPrimal),
     )
     operator_none = jtu.tree_map(lambda _: None, operator)
-    state_none = jtu.tree_map(lambda _: None, state)
+    state_cts = jtu.tree_map(lambda _: None, state)
+    witness_in = getattr(state, "order_witness", None)
+    if isinstance(witness_in, ad.UndefinedPrimal):
+        # A later solve's transpose call wants a cotangent for our own `state` input,
+        # chaining this read into it. Derive it from `cts_vector`, this solve's own
+        # adjoint result, so the value genuinely depends on this read having happened.
+        outgoing_witness = _read_witness(cts_vector, witness_in.aval.dtype)
+        state_cts = eqx.tree_at(
+            lambda s: s.order_witness, state_cts, outgoing_witness, is_leaf=_is_none
+        )
     options_none = jtu.tree_map(lambda _: None, options)
     solver_none = jtu.tree_map(lambda _: None, solver)
-    return operator_none, state_none, cts_vector, options_none, solver_none, None
+    return operator_none, state_cts, cts_vector, options_none, solver_none, None
 
 
 _splineax_linear_solve_p = eqxi.create_vprim(
@@ -306,4 +391,6 @@ def linear_solve(
     # its original identity, which keeps `update`'s no-op check working for a repeated
     # operator.
     new_state = _restore_operator(new_state, state.operator)
-    return Solution(value=solution, result=result, stats=stats, state=new_state), new_state
+    return Solution(
+        value=solution, result=result, stats=stats, state=new_state
+    ), new_state

@@ -480,9 +480,17 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         return isolated_state, {}
 
     def transpose(
-        self, state: _PardisoState, options: dict[str, Any]
+        self,
+        state: _PardisoState,
+        options: dict[str, Any],
+        *,
+        order_after: Any = None,
     ) -> tuple[_PardisoState, dict[str, Any]]:
         del options
+        # `pardiso_mkl_jax` has no ordering-operand primitive to thread `order_after`
+        # through (unlike `klujax`'s `order_after`), so this always isolates a fresh
+        # handle rather than conditionally reusing the shared one.
+        del order_after
         # Isolate a fresh, independent factorization, then flip the orientation so
         # `solve_stateful` solves A^T against it.
         isolated, _ = self.isolate(state, {})

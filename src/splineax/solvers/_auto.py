@@ -100,9 +100,11 @@ class _AutoDispatch(AbstractLinearSolver[_State]):
         return self._solver_for_state(state).compute_stateful(state, vector, options)
 
     def transpose(
-        self, state: Any, options: dict[str, Any]
+        self, state: Any, options: dict[str, Any], *, order_after: Any = None
     ) -> tuple[Any, dict[str, Any]]:
-        return self._solver_for_state(state).transpose(state, options)
+        return self._solver_for_state(state).transpose(
+            state, options, order_after=order_after
+        )
 
     def isolate(
         self, state: Any, options: dict[str, Any]
@@ -208,9 +210,9 @@ class AutoSparseLinearSolver(AbstractLinearSolver[Any]):
         return self._solver.compute_stateful(state, vector, options)
 
     def transpose(
-        self, state: Any, options: dict[str, Any]
+        self, state: Any, options: dict[str, Any], *, order_after: Any = None
     ) -> tuple[Any, dict[str, Any]]:
-        return self._solver.transpose(state, options)
+        return self._solver.transpose(state, options, order_after=order_after)
 
     def isolate(
         self, state: Any, options: dict[str, Any]

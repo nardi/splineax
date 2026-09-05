@@ -211,9 +211,14 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         return solution, RESULTS.successful, {}
 
     def transpose(
-        self, state: _SpsolveState, options: dict[str, Any]
+        self,
+        state: _SpsolveState,
+        options: dict[str, Any],
+        *,
+        order_after: Any = None,
     ) -> tuple[_SpsolveState, dict[str, Any]]:
-        del options
+        del options, order_after
+        # `Spsolve` keeps no native handle to reuse, so there is no ordering to thread.
         matrix = state.matrix
         assert matrix is not None and state.packed_structures is not None
         matrix_T = BCSR(
