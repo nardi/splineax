@@ -190,8 +190,9 @@ class _PardisoState(eqx.Module):
     def track(self, solution: Any) -> "_PardisoState":
         """Return a state whose `release` is ordered after `solution`.
 
-        Accepts the lineax `Solution` or a bare value pytree. A no-op when no analysis
-        has run yet, see `pardiso_mkl_jax` FactorizationToken.track.
+        The explicit `linear_solve` API no longer needs this, since `compute_stateful`
+        threads the token through the solve. It is kept for `stateful_solve_transform` and
+        `IterativeRefinement`, which still order their releases this way.
         """
         if self.token is None:
             return self
@@ -208,7 +209,11 @@ class _PardisoState(eqx.Module):
         )
 
     def release(self) -> None:
-        """Free the native factorization, ordered after any tracked solves."""
+        """Free the native factorization, ordered after any solve made with it.
+
+        `compute_stateful` threads the token through each solve, so `release` consuming that
+        token is ordered after those solves without a separate `track`.
+        """
         if self.token is None:
             return
         _pardiso_mkl_jax().primitive.release(self.token)
@@ -371,12 +376,35 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             tag,
         )
 
-    def compute(
+    def _with_token(self, state: _PardisoState, token: Any) -> _PardisoState:
+        """Return a copy of `state` carrying `token`, keeping everything else.
+
+        The operator object is passed through unchanged, so `update`'s identity check
+        still recognises a repeated operator.
+        """
+        return _PardisoState(
+            state.operator,
+            state.csr,
+            token,
+            state.packed_structures,
+            state.shape,
+            state.transposed,
+            state.sparsity_tag,
+        )
+
+    def compute_stateful(
         self,
         state: _PardisoState,
         vector: PyTree[Array],
         options: dict[str, Any],
-    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
+    ) -> tuple[PyTree[Array], RESULTS, _PardisoState, dict[str, Any]]:
+        """Solve and return the solution paired with a state ordered after this solve.
+
+        The returned state carries the token `solve_stateful` hands back with
+        `return_token`, which the native solve echoes as one of its outputs. A later
+        `update` refactors that slot in place and consumes the token, so the refactor is
+        ordered after this solve rather than racing it under `jit`.
+        """
         del options
         if state.csr is None or state.token is None or state.packed_structures is None:
             raise ValueError(
@@ -390,7 +418,7 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         primitive = pmj.primitive
         indptr, indices, values = state.csr
         # `solve_stateful` reuses the stored factorization, solving A^T when transposed.
-        solution, _ = primitive.solve_stateful(
+        solution, threaded, _ = primitive.solve_stateful(
             state.token,
             indptr,
             indices,
@@ -398,9 +426,22 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             b[None, :],
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
             transpose=state.transposed,
+            return_token=True,
         )
         solution = unravel_solution(solution[0], state.packed_structures)
-        return solution, RESULTS.successful, {}
+        return solution, RESULTS.successful, self._with_token(state, threaded), {}
+
+    def compute(
+        self,
+        state: _PardisoState,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
+        # The threaded state is only useful to `compute_stateful`'s caller. Dropping it
+        # leaves the ordering token unused, so it stays a plain solve for lineax's own
+        # differentiation.
+        solution, result, _state, stats = self.compute_stateful(state, vector, options)
+        return solution, result, stats
 
     def transpose(
         self, state: _PardisoState, options: dict[str, Any]

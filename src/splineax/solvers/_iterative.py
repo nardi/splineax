@@ -195,6 +195,27 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
             return state
         return _IterativeRefinementState(inner, operator)
 
+    def compute_stateful(
+        self,
+        state: _IterativeRefinementState,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, _IterativeRefinementState, dict[str, Any]]:
+        """Solve and return a state whose release is ordered after this refinement.
+
+        The refinement's inner solves all reuse one factorization, so there is no in-place
+        refactor to order within a single call. The inner state is threaded through `track`
+        so a later `release` waits on this solve. Ordering a later `update` after this solve
+        is not threaded yet, since that needs the inner token carried through the refinement
+        loop, which the inner solver's vmap rule does not support for a batched token.
+        """
+        solution, result, stats = self.compute(state, vector, options)
+        inner = state.inner_state
+        if isinstance(inner, TrackingState):
+            inner = inner.track(solution)
+        new_state = _IterativeRefinementState(inner, state.operator)
+        return solution, result, new_state, stats
+
     def compute(
         self,
         state: _IterativeRefinementState,

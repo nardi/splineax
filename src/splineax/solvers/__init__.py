@@ -10,9 +10,6 @@ from ._sparse import (
     SparseLinearSolver as SparseLinearSolver,
 )
 from ._sparse import (
-    linear_solve as linear_solve,
-)
-from ._sparse import (
     operator_pattern_tag as operator_pattern_tag,
 )
 from ._sparse import (

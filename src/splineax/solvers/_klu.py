@@ -172,8 +172,9 @@ class _KLUState(eqx.Module):
     def track(self, solution: Any) -> "_KLUState":
         """Return a state whose `release` is ordered after `solution`.
 
-        Accepts the lineax `Solution` or a bare value pytree. The solution arrays become
-        ordering dependencies on the tokens, see klujax `SymbolToken.track`.
+        The explicit `linear_solve` API no longer needs this, since `compute_stateful`
+        threads the numeric token through the solve. It is kept for `stateful_solve_transform`
+        and `IterativeRefinement`, which still order their releases this way.
         """
         value = getattr(solution, "value", solution)
         leaves = tuple(jax.tree_util.tree_leaves(value))
@@ -191,7 +192,11 @@ class _KLUState(eqx.Module):
         )
 
     def release(self) -> None:
-        """Free the cache slots this state owns, ordered after any tracked solves."""
+        """Free the cache slots this state owns, ordered after any solve made with it.
+
+        `compute_stateful` threads the numeric token through each solve, so `free_numeric`
+        consuming that token is ordered after those solves without a separate `track`.
+        """
         klujax = _klujax()
         if self.numeric is not None:
             klujax.free_numeric(self.numeric)
@@ -393,12 +398,36 @@ class KLU(AbstractLinearSolver[_KLUState]):
             tag,
         )
 
-    def compute(
+    def _with_numeric(self, state: _KLUState, numeric: NumericToken) -> _KLUState:
+        """Return a copy of `state` carrying `numeric`, keeping everything else.
+
+        The operator object is passed through unchanged, so `update`'s identity check
+        still recognises a repeated operator.
+        """
+        return _KLUState(
+            state.operator,
+            state.coo,
+            state.symbol,
+            numeric,
+            state.packed_structures,
+            state.shape,
+            state.transposed,
+            state.sparsity_tag,
+        )
+
+    def compute_stateful(
         self,
         state: _KLUState,
         vector: PyTree[Array],
         options: dict[str, Any],
-    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
+    ) -> tuple[PyTree[Array], RESULTS, _KLUState, dict[str, Any]]:
+        """Solve and return the solution paired with a state ordered after this solve.
+
+        The returned state carries the numeric token `solve_with_numeric` hands back with
+        `return_token`, whose id waits on this solve. A later `update` refactors that slot
+        in place and consumes the token, so the refactor is ordered after this solve rather
+        than racing it under `jit`.
+        """
         del options
         if state.coo is None or state.packed_structures is None:
             raise ValueError(
@@ -420,9 +449,21 @@ class KLU(AbstractLinearSolver[_KLUState]):
             if state.transposed
             else klujax.solve_with_numeric
         )
-        x = solve(numeric, b, state.symbol)
+        x, threaded = solve(numeric, b, state.symbol, return_token=True)
         solution = unravel_solution(x, state.packed_structures)
-        return solution, RESULTS.successful, {}
+        return solution, RESULTS.successful, self._with_numeric(state, threaded), {}
+
+    def compute(
+        self,
+        state: _KLUState,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
+        # The threaded state is only useful to `compute_stateful`'s caller. Dropping it
+        # leaves the ordering token unused, so XLA elides it, which keeps `compute` a plain
+        # solve for lineax's own differentiation.
+        solution, result, _state, stats = self.compute_stateful(state, vector, options)
+        return solution, result, stats
 
     def transpose(
         self, state: _KLUState, options: dict[str, Any]

@@ -69,6 +69,18 @@ class StatefulSolver(Protocol[_StateT]):
         self, state: _StateT, vector: PyTree[Array], options: dict[str, Any]
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]: ...
 
+    def compute_stateful(
+        self, state: _StateT, vector: PyTree[Array], options: dict[str, Any]
+    ) -> tuple[PyTree[Array], RESULTS, _StateT, dict[str, Any]]:
+        """Solve and return the solution with a state ordered after this solve.
+
+        The returned state carries a factorization token that waits on this solve, so a
+        later `update` refactoring the same cache slot is ordered after it rather than
+        racing it under `jit`. `compute` is the same solve with the state dropped, kept for
+        lineax's own differentiation.
+        """
+        ...
+
     def transpose(
         self, state: _StateT, options: dict[str, Any]
     ) -> tuple[Any, dict[str, Any]]: ...

@@ -174,6 +174,17 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
             return state
         return self.init(operator, options)
 
+    def compute_stateful(
+        self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]
+    ) -> tuple[PyTree[Array], RESULTS, _SpsolveState, dict[str, Any]]:
+        """Solve and return the state unchanged.
+
+        `spsolve` factorizes afresh on every solve, so there is no cache slot to order a
+        later solve against and nothing to thread. The state is returned as-is.
+        """
+        solution, result, stats = self.compute(state, vector, options)
+        return solution, result, state, stats
+
     def compute(
         self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:

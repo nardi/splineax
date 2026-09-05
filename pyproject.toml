@@ -21,6 +21,14 @@ pardiso = ["pardiso-mkl-jax>=0.2.2"]
 requires = ["uv_build>=0.11.7,<0.12.0"]
 build-backend = "uv_build"
 
+# `splineax-klujax` and `pardiso-mkl-jax` are pinned to their `ordered_tokens` branches,
+# which return an ordering token from every read so a later in-place refactor waits on the
+# solve. `linear_solve` relies on that token to keep a reused factorization ordered under
+# `jit`. See `docs/dev/klujax-ordered-state-tokens.md`.
+[tool.uv.sources]
+splineax-klujax = { git = "https://github.com/nardi/klujax", branch = "ordered_tokens" }
+pardiso-mkl-jax = { git = "https://github.com/nardi/pardiso-mkl-jax", branch = "ordered_tokens" }
+
 [dependency-groups]
 dev = [
     "mkdocs-material>=9.7.6",
