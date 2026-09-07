@@ -183,6 +183,14 @@ wheels = [
 ]
 
 [[package]]
+name = "entangle-jax"
+version = "0.1.0"
+source = { git = "https://github.com/nardi/entangle-jax#3462a08202dcb723d7b569cc0e4ce558a0efeb19" }
+dependencies = [
+    { name = "jax" },
+]
+
+[[package]]
 name = "equinox"
 version = "0.13.8"
 source = { registry = "https://pypi.org/simple" }
@@ -1115,6 +1123,7 @@ version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "asdex" },
+    { name = "entangle-jax" },
     { name = "equinox" },
     { name = "jax" },
     { name = "jaxtyping" },
@@ -1140,6 +1149,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "asdex", specifier = ">=0.5.1" },
+    { name = "entangle-jax", git = "https://github.com/nardi/entangle-jax" },
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4" },
     { name = "jaxtyping", specifier = ">=0.2" },
