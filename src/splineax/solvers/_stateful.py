@@ -69,9 +69,48 @@ class StatefulSolver(Protocol[_StateT]):
         self, state: _StateT, vector: PyTree[Array], options: dict[str, Any]
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]: ...
 
+    def compute_stateful(
+        self, state: _StateT, vector: PyTree[Array], options: dict[str, Any]
+    ) -> tuple[PyTree[Array], RESULTS, _StateT, dict[str, Any]]:
+        """Solve and return the solution with a state ordered after this solve.
+
+        The returned state carries a factorization token that waits on this solve, so a
+        later `update` refactoring the same cache slot is ordered after it rather than
+        racing it under `jit`. `compute` is the same solve with the state dropped, kept for
+        lineax's own differentiation.
+        """
+        ...
+
     def transpose(
+        self,
+        state: _StateT,
+        options: dict[str, Any],
+        *,
+        order_after: Any = None,
+    ) -> tuple[Any, dict[str, Any]]:
+        """Return the transposed state, reusing a shared cache slot when it is safe to.
+
+        `order_after` is `None` when nothing else reuses this state's cache slot after this
+        adjoint runs, so the slot already holds the values this call needs and it can solve
+        directly. Otherwise `order_after` is a value a later adjoint's own read produced;
+        threading it into this call's own refactor, ordered after that value, is what keeps
+        the refactor from racing that read under `jit`. A solver with no shared cache slot
+        ignores `order_after`.
+        """
+        ...
+
+    def isolate(
         self, state: _StateT, options: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any]]: ...
+    ) -> tuple[Any, dict[str, Any]]:
+        """Return a state backed by a fresh, independent factorization of the same operator.
+
+        A differentiated solve applies the factorization after the primal solve, so reusing
+        a shared cache slot a later `update` overwrites would solve the wrong matrix. An
+        isolated state owns a slot no other solve writes, so a tangent or adjoint solve
+        against it stays correct with no ordering between the solves. A solver that keeps no
+        shared handle implements this as a no-op returning `state`.
+        """
+        ...
 
     def conj(
         self, state: _StateT, options: dict[str, Any]

@@ -181,6 +181,56 @@ def test_release_ordered_in_while_loop(solver: splx.SparseLinearSolver) -> None:
     assert jnp.allclose(total, iterations * _EXPECTED, atol=1e-5)
 
 
+def test_reuse_under_autodiff_matches_dense(
+    solver: splx.SparseLinearSolver,
+) -> None:
+    """Differentiating two tag-sharing solves of different-valued operators, threaded
+    through one state, matches a dense reference in both forward and reverse mode.
+
+    This is the reused-factorization gradient bug. The two operators share a cache slot, so
+    the second solve refactors it in place. `splineax.linear_solve` factors an independent
+    slot for each differentiated solve, so the tangent and adjoint solves read the right
+    matrix even under `jit`, where XLA is free to reorder a pure read against an in-place
+    refactor. `Spsolve` keeps no shared slot and is a control here.
+    """
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    indices, shape = sparsity.indices, sparsity.shape
+    tag = splx.sparsity_pattern_tag(sparsity)
+    first_rhs = RIGHT_HAND_SIDE
+    second_rhs = RIGHT_HAND_SIDE[::-1]
+
+    def _operator(values: jax.Array) -> BCOOLinearOperator:
+        matrix = BCOO((values, indices), shape=shape, indices_sorted=True)
+        return BCOOLinearOperator(matrix, tags=tag)
+
+    def loss(scale_first: jax.Array, scale_second: jax.Array) -> jax.Array:
+        first_solution, state = splx.linear_solve(
+            _operator(sparsity.data * scale_first), first_rhs, solver
+        )
+        second_solution, _ = splx.linear_solve(
+            _operator(sparsity.data * scale_second), second_rhs, solver, state=state
+        )
+        return jnp.sum(first_solution.value**2) + jnp.sum(second_solution.value**2)
+
+    def dense_loss(scale_first: jax.Array, scale_second: jax.Array) -> jax.Array:
+        first = jnp.linalg.solve(np.asarray(SQUARE_MATRIX) * scale_first, first_rhs)
+        second = jnp.linalg.solve(np.asarray(SQUARE_MATRIX) * scale_second, second_rhs)
+        return jnp.sum(first**2) + jnp.sum(second**2)
+
+    point = (jnp.asarray(1.3), jnp.asarray(0.7))
+    reverse = jax.jit(jax.grad(loss, argnums=(0, 1)))(*point)
+    reverse_reference = jax.grad(dense_loss, argnums=(0, 1))(*point)
+    assert jnp.allclose(reverse[0], reverse_reference[0], atol=1e-6)
+    assert jnp.allclose(reverse[1], reverse_reference[1], atol=1e-6)
+
+    # Forward mode reuses the same shared slot for its tangent solves, so it exercises the
+    # same hazard along an independent path.
+    tangents = (jnp.asarray(1.0), jnp.asarray(-0.5))
+    _, forward = jax.jit(lambda p, t: jax.jvp(loss, p, t))(point, tangents)
+    _, forward_reference = jax.jvp(dense_loss, point, tangents)
+    assert jnp.allclose(forward, forward_reference, atol=1e-6)
+
+
 def test_sparsity_tag_reuse_solves_new_values(
     solver: splx.SparseLinearSolver,
 ) -> None:

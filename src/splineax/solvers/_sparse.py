@@ -11,11 +11,7 @@ import jax.core
 import numpy as np
 from asdex import ColoredPattern
 from jax.experimental.sparse import BCOO, BCSR
-from jaxtyping import PyTree
 from lineax import AbstractLinearOperator
-from lineax import linear_solve as _lx_linear_solve
-from lineax._solution import Solution
-from lineax._solve import sentinel
 
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
@@ -160,48 +156,3 @@ class SparseLinearSolver(StatefulSolver[_StateT], Protocol[_StateT]):
         """Analyze a sparsity pattern into a state, reused by a later `update`."""
         ...
 
-
-def linear_solve(
-    operator: AbstractLinearOperator,
-    vector: PyTree[Any],
-    solver: Any = None,
-    *,
-    options: dict[str, Any] | None = None,
-    state: PyTree[Any] = sentinel,
-    throw: bool = True,
-) -> tuple[Solution, Any]:
-    """Solve `operator @ x = vector`, returning the solution and an updated state.
-
-    A wrapper over `lineax.linear_solve` for the stateful sparse API. It runs the
-    solver's `init` or `update` to fold the operator into a state, solves, then tracks the
-    solution against the state so a later release is ordered after it.
-    Unlike `lineax.linear_solve`, it returns a `(solution, state)` tuple:
-
-    ```python
-    solution, state = splineax.linear_solve(operator, vector, solver, state=state)
-    ```
-
-    With no `state`, a fresh one is built with `solver.init`. The default solver is
-    `AutoSparseLinearSolver`, which picks a backend for the platform and precision.
-    """
-    if solver is None:
-        # Imported here to avoid a cycle: `_auto` imports this module.
-        from splineax.solvers._auto import AutoSparseLinearSolver
-
-        solver = AutoSparseLinearSolver()
-    opts = {} if options is None else options
-    # `init`/`update` build the factorization. The operator is passed through as-is, so
-    # `update` can compare it by identity, and the solvers stop gradients on the values
-    # themselves before handing them to the native analyze and factor.
-    if state is sentinel:
-        state = solver.init(operator, opts)
-    else:
-        state = solver.update(state, operator, opts)
-    solution = _lx_linear_solve(
-        operator, vector, solver, options=options, state=state, throw=throw
-    )
-    # Order any later `release` after this solve. A no-op for solvers whose state owns
-    # nothing, such as `Spsolve`.
-    if hasattr(state, "track"):
-        state = state.track(solution)
-    return solution, state

@@ -56,6 +56,14 @@ def _pardiso_mkl_jax():
     return pardiso_mkl_jax
 
 
+def _entangle():
+    # Lazy import, matching `_pardiso_mkl_jax` above and `_klu.py`'s `_entangle`: deferred
+    # until a Pardiso adjoint chain actually needs to order a reused factorization slot.
+    from entangle_jax import entangle
+
+    return entangle
+
+
 T = Any
 
 
@@ -186,12 +194,21 @@ class _PardisoState(eqx.Module):
     shape: tuple[int, ...] = eqx.field(static=True)
     transposed: bool = eqx.field(static=True, default=False)
     sparsity_tag: object | None = eqx.field(static=True, default=None)
+    order_witness: Array = eqx.field(default_factory=lambda: jnp.zeros(()))
+    """Ordering plumbing for `splineax.linear_solve`'s reverse-mode rule, not a real
+    factorization value. Mirrors `_KLUState.order_witness`; see there for the full
+    explanation."""
+    shared_token: Any | None = eqx.field(default=None)
+    """The token of the state `isolate` was called on, carried alongside the fresh one
+    `isolate` builds. Mirrors `_KLUState.shared_numeric`; see there for the full
+    explanation."""
 
     def track(self, solution: Any) -> "_PardisoState":
         """Return a state whose `release` is ordered after `solution`.
 
-        Accepts the lineax `Solution` or a bare value pytree. A no-op when no analysis
-        has run yet, see `pardiso_mkl_jax` FactorizationToken.track.
+        The explicit `linear_solve` API no longer needs this, since `compute_stateful`
+        threads the token through the solve. It is kept for `stateful_solve_transform` and
+        `IterativeRefinement`, which still order their releases this way.
         """
         if self.token is None:
             return self
@@ -208,7 +225,11 @@ class _PardisoState(eqx.Module):
         )
 
     def release(self) -> None:
-        """Free the native factorization, ordered after any tracked solves."""
+        """Free the native factorization, ordered after any solve made with it.
+
+        `compute_stateful` threads the token through each solve, so `release` consuming that
+        token is ordered after those solves without a separate `track`.
+        """
         if self.token is None:
             return
         _pardiso_mkl_jax().primitive.release(self.token)
@@ -369,14 +390,39 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             shape,
             False,
             tag,
+            state.order_witness,
         )
 
-    def compute(
+    def _with_token(self, state: _PardisoState, token: Any) -> _PardisoState:
+        """Return a copy of `state` carrying `token`, keeping everything else.
+
+        The operator object is passed through unchanged, so `update`'s identity check
+        still recognises a repeated operator.
+        """
+        return _PardisoState(
+            state.operator,
+            state.csr,
+            token,
+            state.packed_structures,
+            state.shape,
+            state.transposed,
+            state.sparsity_tag,
+        )
+
+    def compute_stateful(
         self,
         state: _PardisoState,
         vector: PyTree[Array],
         options: dict[str, Any],
-    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
+    ) -> tuple[PyTree[Array], RESULTS, _PardisoState, dict[str, Any]]:
+        """Solve and return the solution paired with a state ordered after this solve.
+
+        `pardiso_mkl_jax` does not hand back a token that waits on the solve, so the
+        returned state's token is entangled with this solve's own result: a later
+        `update` refactors that slot in place and consumes it, so the refactor is
+        ordered after this solve rather than racing it under `jit`. Mirrors what
+        `transpose` already does for the backward direction's own reuse.
+        """
         del options
         if state.csr is None or state.token is None or state.packed_structures is None:
             raise ValueError(
@@ -400,19 +446,104 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             transpose=state.transposed,
         )
         solution = unravel_solution(solution[0], state.packed_structures)
-        return solution, RESULTS.successful, {}
+        ordered_token = _entangle()(state.token, solution)
+        return (
+            solution,
+            RESULTS.successful,
+            self._with_token(state, ordered_token),
+            {},
+        )
 
-    def transpose(
+    def compute(
+        self,
+        state: _PardisoState,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
+        # The threaded state is only useful to `compute_stateful`'s caller. Dropping it
+        # leaves the ordering token unused, so it stays a plain solve for lineax's own
+        # differentiation.
+        solution, result, _state, stats = self.compute_stateful(state, vector, options)
+        return solution, result, stats
+
+    def isolate(
         self, state: _PardisoState, options: dict[str, Any]
     ) -> tuple[_PardisoState, dict[str, Any]]:
         del options
-        # `pardiso_mkl_jax` solves against A^T natively with the same factorization, so
-        # transposing is pure metadata: flip `transposed`, transpose the packed
-        # structures, and swap `shape`. The token carries over unchanged.
+        # Build a fresh, independent factorization from this state's own values. Reusing
+        # `state.token` would be cheaper, but the forward may have refactored the shared
+        # handle for a later operator, so a differentiated solve against it would solve the
+        # wrong matrix. A fresh handle is independent of any other solve. Pardiso's analysis
+        # depends on the values through its weighted matching, so there is no cheaper
+        # symbolic-only reuse to lean on here.
+        if state.token is None or state.csr is None:
+            return state, {}
+        pmj = _pardiso_mkl_jax()
+        primitive = pmj.primitive
+        indptr, indices, values = state.csr
+        token, _ = primitive.analyze(
+            indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
+        )
+        token, _ = primitive.factor(
+            token,
+            indptr,
+            indices,
+            values,
+            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+        )
+        isolated_state = _PardisoState(
+            state.operator,
+            state.csr,
+            token,
+            state.packed_structures,
+            state.shape,
+            state.transposed,
+            state.sparsity_tag,
+            state.order_witness,
+            # The original slot rides along so `transpose` can reuse it instead of this
+            # fresh one, which only exists for a tangent solve that reads it directly.
+            state.token,
+        )
+        return isolated_state, {}
+
+    def transpose(
+        self,
+        state: _PardisoState,
+        options: dict[str, Any],
+        *,
+        order_after: Any = None,
+    ) -> tuple[_PardisoState, dict[str, Any]]:
+        del options
+        # `shared_token`, when present, is the slot the primal chain actually reuses;
+        # `token` is the independent one `isolate` built for a tangent solve, which the
+        # adjoint never reads. Reusing `shared_token` here, instead of refactoring or
+        # solving against the independent slot, is what keeps this adjoint cheap.
+        shared = state.shared_token if state.shared_token is not None else state.token
+        token = shared
+        if state.csr is not None and shared is not None and order_after is not None:
+            # A later adjoint's own read produced `order_after`. Reusing the shared slot
+            # is only safe once that read is done, so thread it into the refactor as an
+            # ordering operand: `entangle` returns a token pytree whose leaves wait on
+            # `order_after`, opaque to XLA's algebraic simplifier by construction, and
+            # refactoring through that token orders the write after the read.
+            indptr, indices, values = state.csr
+            pmj = _pardiso_mkl_jax()
+            ordered = _entangle()(shared, order_after)
+            token, iparm = pmj.primitive.factor(
+                ordered,
+                indptr,
+                indices,
+                values,
+                matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+            )
+            token = _reanalyze_if_unstable(pmj, token, iparm, indptr, indices, values)
+        # `order_after` is None when no later adjoint reused this slot, so `token` already
+        # holds this state's own values and solves directly (via `transpose=True` below),
+        # no refactor needed.
         transposed_state = _PardisoState(
             state.operator,
             state.csr,
-            state.token,
+            token,
             transpose_packed_structures(state.packed_structures)
             if state.packed_structures is not None
             else None,

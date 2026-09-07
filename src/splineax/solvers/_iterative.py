@@ -114,6 +114,24 @@ class _IterativeRefinementState(eqx.Module, Generic[_StateT]):
     operator: AbstractLinearOperator | None
     """The operator this state represents, or None for a symbolic-only state."""
 
+    @property
+    def order_witness(self) -> Any:
+        """Forwards to the inner state's ordering witness.
+
+        `splineax.linear_solve`'s reverse-mode rule detects a reusable factorization by
+        `hasattr(state, "order_witness")`, so without this forwarding property it would
+        never see through this wrapper and would treat every refined solve as one with
+        nothing downstream to order against, even when the inner solver's own `transpose`
+        can safely reuse a shared slot. Raises `AttributeError` (so `hasattr` correctly
+        reports `False`) when the inner solver has no such field, e.g. `Spsolve`.
+
+        `_StateT` is unbound, since the inner state can be any stateful solver's own state
+        type, so this reaches through it as `Any` rather than asserting a field no bound
+        guarantees.
+        """
+        inner: Any = self.inner_state
+        return inner.order_witness
+
     def track(self, solution: Any) -> "_IterativeRefinementState[_StateT]":
         """Order a later `release` after `solution`, delegating to the inner state.
 
@@ -195,6 +213,27 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
             return state
         return _IterativeRefinementState(inner, operator)
 
+    def compute_stateful(
+        self,
+        state: _IterativeRefinementState,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, _IterativeRefinementState, dict[str, Any]]:
+        """Solve and return a state whose release is ordered after this refinement.
+
+        The refinement's inner solves all reuse one factorization, so there is no in-place
+        refactor to order within a single call. The inner state is threaded through `track`
+        so a later `release` waits on this solve. Ordering a later `update` after this solve
+        is not threaded yet, since that needs the inner token carried through the refinement
+        loop, which the inner solver's vmap rule does not support for a batched token.
+        """
+        solution, result, stats = self.compute(state, vector, options)
+        inner = state.inner_state
+        if isinstance(inner, TrackingState):
+            inner = inner.track(solution)
+        new_state = _IterativeRefinementState(inner, state.operator)
+        return solution, result, new_state, stats
+
     def compute(
         self,
         state: _IterativeRefinementState,
@@ -220,16 +259,33 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
         return solution, result, {}
 
     def transpose(
-        self, state: _IterativeRefinementState, options: dict[str, Any]
+        self,
+        state: _IterativeRefinementState,
+        options: dict[str, Any],
+        *,
+        order_after: Any = None,
     ) -> tuple[_IterativeRefinementState, dict[str, Any]]:
         inner_transpose, transpose_options = self.solver.transpose(
-            state.inner_state, options
+            state.inner_state, options, order_after=order_after
         )
         # Transpose the stored operator too, so the residual uses A^T on this state.
         operator = None if state.operator is None else state.operator.transpose()
         return (
             _IterativeRefinementState(inner_transpose, operator),
             transpose_options,
+        )
+
+    def isolate(
+        self, state: _IterativeRefinementState, options: dict[str, Any]
+    ) -> tuple[_IterativeRefinementState, dict[str, Any]]:
+        # Isolate the inner factorization and keep the operator, since orientation is
+        # unchanged and the residual still uses A on this state.
+        inner_isolated, isolated_options = self.solver.isolate(
+            state.inner_state, options
+        )
+        return (
+            _IterativeRefinementState(inner_isolated, state.operator),
+            isolated_options,
         )
 
     def conj(

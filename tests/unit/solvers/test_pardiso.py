@@ -128,21 +128,55 @@ def test_init_symbolic_defers_analysis() -> None:
     assert updated.token is not None
 
 
-def test_transpose_reuses_factorization() -> None:
-    """`transpose` reuses the same token and solves A^T through `solve_stateful`, with no
-    extra analyze or factor."""
+def test_transpose_with_no_order_after_reuses_token_via_transpose_solve() -> None:
+    """With no `order_after`, `transpose` reuses the token as-is (no refactor) and solves
+    A^T through `solve_stateful`'s `transpose` flag.
+
+    `order_after=None` means nothing later in a reused chain has overwritten this token, so
+    it already holds this state's own values: `solve_stateful` can read it directly, with no
+    refactor and no fresh analysis or factor.
+    """
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = Pardiso()
     expected = jnp.linalg.solve(
         np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
     )
     state = solver.init(operator, {})
-    with _spy("analyze") as analyze_calls, _spy("factor") as factor_calls:
+    with (
+        _spy("solve_stateful") as solve_calls,
+        _spy("analyze") as analyze_calls,
+        _spy("factor") as factor_calls,
+    ):
         transposed, _ = solver.transpose(state, {})
         assert transposed.token is state.token
         solution = solver.compute(transposed, RIGHT_HAND_SIDE, {})[0]
-    assert not analyze_calls, "transpose re-analyzed the pattern"
-    assert not factor_calls, "transpose re-factored the matrix"
+    assert solve_calls, "transpose did not use solve_stateful"
+    assert not analyze_calls, "transpose analyzed a slot it didn't need to"
+    assert not factor_calls, "transpose factored a slot it already held"
+    assert jnp.allclose(solution, expected, atol=1e-5)
+
+
+def test_transpose_with_order_after_refactors_the_shared_token() -> None:
+    """With an `order_after` witness, `transpose` refactors the same token in place,
+    ordered after the witness, rather than building an independent factorization.
+
+    This is the shape a reused-factorization adjoint takes when an earlier solve in the
+    chain needs its own values back: `entangle` threads the witness into the refactor,
+    ordering it after whatever produced `order_after`.
+    """
+    operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
+    solver = Pardiso()
+    expected = jnp.linalg.solve(
+        np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
+    )
+    state = solver.init(operator, {})
+    with _spy("solve_stateful") as solve_calls, _spy("factor") as factor_calls:
+        transposed, _ = solver.transpose(state, {}, order_after=jnp.zeros(()))
+        assert transposed.token is not state.token
+        assert transposed.token.id == state.token.id
+        solution = solver.compute(transposed, RIGHT_HAND_SIDE, {})[0]
+    assert solve_calls, "transpose did not use solve_stateful"
+    assert factor_calls, "transpose did not refactor the shared token"
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 

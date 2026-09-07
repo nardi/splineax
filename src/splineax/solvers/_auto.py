@@ -94,10 +94,22 @@ class _AutoDispatch(AbstractLinearSolver[_State]):
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
         return self._solver_for_state(state).compute(state, vector, options)
 
+    def compute_stateful(
+        self, state: Any, vector: PyTree[Array], options: dict[str, Any]
+    ) -> tuple[PyTree[Array], RESULTS, Any, dict[str, Any]]:
+        return self._solver_for_state(state).compute_stateful(state, vector, options)
+
     def transpose(
+        self, state: Any, options: dict[str, Any], *, order_after: Any = None
+    ) -> tuple[Any, dict[str, Any]]:
+        return self._solver_for_state(state).transpose(
+            state, options, order_after=order_after
+        )
+
+    def isolate(
         self, state: Any, options: dict[str, Any]
     ) -> tuple[Any, dict[str, Any]]:
-        return self._solver_for_state(state).transpose(state, options)
+        return self._solver_for_state(state).isolate(state, options)
 
     def conj(self, state: Any, options: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         return self._solver_for_state(state).conj(state, options)
@@ -192,10 +204,20 @@ class AutoSparseLinearSolver(AbstractLinearSolver[Any]):
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
         return self._solver.compute(state, vector, options)
 
+    def compute_stateful(
+        self, state: Any, vector: PyTree[Array], options: dict[str, Any]
+    ) -> tuple[PyTree[Array], RESULTS, Any, dict[str, Any]]:
+        return self._solver.compute_stateful(state, vector, options)
+
     def transpose(
+        self, state: Any, options: dict[str, Any], *, order_after: Any = None
+    ) -> tuple[Any, dict[str, Any]]:
+        return self._solver.transpose(state, options, order_after=order_after)
+
+    def isolate(
         self, state: Any, options: dict[str, Any]
     ) -> tuple[Any, dict[str, Any]]:
-        return self._solver.transpose(state, options)
+        return self._solver.isolate(state, options)
 
     def conj(self, state: Any, options: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         return self._solver.conj(state, options)

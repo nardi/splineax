@@ -51,6 +51,14 @@ def _klujax():
     return klujax
 
 
+def _entangle():
+    # Lazy import, matching `_klujax` above: deferred until a KLU adjoint chain actually
+    # needs to order a reused factorization slot.
+    from entangle_jax import entangle
+
+    return entangle
+
+
 def _upcast(values: Array) -> Array:
     """Upcast values to the double precision klujax needs, complex or real."""
     if values.dtype in COMPLEX_DTYPES:
@@ -168,12 +176,25 @@ class _KLUState(eqx.Module):
     shape: tuple[int, ...] = eqx.field(static=True)
     transposed: bool = eqx.field(static=True, default=False)
     sparsity_tag: object | None = eqx.field(static=True, default=None)
+    order_witness: Array = eqx.field(default_factory=lambda: jnp.zeros(()))
+    """Ordering plumbing for `splineax.linear_solve`'s reverse-mode rule, not a real
+    factorization value. It has no meaning on its own; `_solve.py` uses it to make the
+    adjoint of a reused factorization pick up a genuine data dependency on a later
+    adjoint's own read, so the two native calls stay ordered under `jit`."""
+    shared_numeric: NumericToken | None = eqx.field(default=None)
+    """The numeric token of the state `isolate` was called on, carried alongside the fresh
+    one `isolate` builds. `transpose` refactors this slot, not the fresh one: the fresh
+    slot only has to be safe for a tangent solve that might read it directly, but the
+    adjoint never reads it at all, only `order_witness`, so reusing the original slot
+    there is what makes the reused-factorization backward cheap rather than independently
+    refactoring the fresh one for nothing."""
 
     def track(self, solution: Any) -> "_KLUState":
         """Return a state whose `release` is ordered after `solution`.
 
-        Accepts the lineax `Solution` or a bare value pytree. The solution arrays become
-        ordering dependencies on the tokens, see klujax `SymbolToken.track`.
+        The explicit `linear_solve` API no longer needs this, since `compute_stateful`
+        threads the numeric token through the solve. It is kept for `stateful_solve_transform`
+        and `IterativeRefinement`, which still order their releases this way.
         """
         value = getattr(solution, "value", solution)
         leaves = tuple(jax.tree_util.tree_leaves(value))
@@ -191,7 +212,11 @@ class _KLUState(eqx.Module):
         )
 
     def release(self) -> None:
-        """Free the cache slots this state owns, ordered after any tracked solves."""
+        """Free the cache slots this state owns, ordered after any solve made with it.
+
+        `compute_stateful` threads the numeric token through each solve, so `free_numeric`
+        consuming that token is ordered after those solves without a separate `track`.
+        """
         klujax = _klujax()
         if self.numeric is not None:
             klujax.free_numeric(self.numeric)
@@ -391,14 +416,40 @@ class KLU(AbstractLinearSolver[_KLUState]):
             shape,
             False,
             tag,
+            state.order_witness,
         )
 
-    def compute(
+    def _with_numeric(self, state: _KLUState, numeric: NumericToken) -> _KLUState:
+        """Return a copy of `state` carrying `numeric`, keeping everything else.
+
+        The operator object is passed through unchanged, so `update`'s identity check
+        still recognises a repeated operator.
+        """
+        return _KLUState(
+            state.operator,
+            state.coo,
+            state.symbol,
+            numeric,
+            state.packed_structures,
+            state.shape,
+            state.transposed,
+            state.sparsity_tag,
+        )
+
+    def compute_stateful(
         self,
         state: _KLUState,
         vector: PyTree[Array],
         options: dict[str, Any],
-    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
+    ) -> tuple[PyTree[Array], RESULTS, _KLUState, dict[str, Any]]:
+        """Solve and return the solution paired with a state ordered after this solve.
+
+        `klujax` does not hand back a token that waits on the solve, so the returned
+        state's numeric is entangled with this solve's own result: a later `update`
+        refactors that slot in place and consumes it, so the refactor is ordered after
+        this solve rather than racing it under `jit`. Mirrors what `transpose` already
+        does for the backward direction's own reuse.
+        """
         del options
         if state.coo is None or state.packed_structures is None:
             raise ValueError(
@@ -422,19 +473,101 @@ class KLU(AbstractLinearSolver[_KLUState]):
         )
         x = solve(numeric, b, state.symbol)
         solution = unravel_solution(x, state.packed_structures)
-        return solution, RESULTS.successful, {}
+        ordered_numeric = _entangle()(numeric, x)
+        return (
+            solution,
+            RESULTS.successful,
+            self._with_numeric(state, ordered_numeric),
+            {},
+        )
 
-    def transpose(
+    def compute(
+        self,
+        state: _KLUState,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
+        # The threaded state is only useful to `compute_stateful`'s caller. Dropping it
+        # leaves the ordering token unused, so XLA elides it, which keeps `compute` a plain
+        # solve for lineax's own differentiation.
+        solution, result, _state, stats = self.compute_stateful(state, vector, options)
+        return solution, result, stats
+
+    def isolate(
         self, state: _KLUState, options: dict[str, Any]
     ) -> tuple[_KLUState, dict[str, Any]]:
         del options
-        # Reuse the factorization unchanged and let `tsolve` handle the transposed
-        # direction. `coo` stays A's own arrays, which `tsolve` needs.
+        # Factor a fresh numeric slot from this state's own values, reusing the symbolic
+        # analysis. `state.numeric` may point at a shared slot a later forward refactor
+        # overwrites, so a differentiated solve reusing it would solve the wrong matrix. A
+        # fresh slot is independent of any other solve.
+        if state.numeric is None or state.coo is None:
+            return state, {}
+        row, col, values = state.coo
+        # This factor call's inputs (row, col, values) are the exact same jaxpr values
+        # that already produced `state.numeric`, and klujax's `factor` cannot be trusted
+        # to keep two such calls independent under `jit`: its public API wraps the
+        # side-effecting FFI call in its own nested jit boundary, and XLA can fold two
+        # calls to that boundary into one before ever inspecting the inner instruction's
+        # side-effect flag, silently collapsing this "independent" slot onto the shared
+        # one (verified directly against klujax; see its own factor()-level CSE caveat).
+        # Entangling `values` against `state.numeric` -- unique per distinct slot, since
+        # it is itself a prior factor/refactor's own output -- makes this call's inputs
+        # structurally different from whatever produced `state.numeric`, which is enough
+        # to defeat that folding without changing the values actually factored.
+        guarded_values = _entangle()(values, state.numeric)
+        numeric = _klujax().factor(row, col, guarded_values, state.symbol)
+        isolated_state = _KLUState(
+            state.operator,
+            state.coo,
+            state.symbol,
+            numeric,
+            state.packed_structures,
+            state.shape,
+            state.transposed,
+            state.sparsity_tag,
+            state.order_witness,
+            # The original slot rides along so `transpose` can reuse it instead of this
+            # fresh one, which only exists for a tangent solve that reads it directly.
+            state.numeric,
+        )
+        return isolated_state, {}
+
+    def transpose(
+        self,
+        state: _KLUState,
+        options: dict[str, Any],
+        *,
+        order_after: Array | None = None,
+    ) -> tuple[_KLUState, dict[str, Any]]:
+        del options
+        # `shared_numeric`, when present, is the slot the primal chain actually reuses;
+        # `numeric` is the independent one `isolate` built for a tangent solve, which the
+        # adjoint never reads. Reusing `shared_numeric` here, instead of refactoring or
+        # solving against the independent slot, is what keeps this adjoint cheap.
+        shared = (
+            state.shared_numeric if state.shared_numeric is not None else state.numeric
+        )
+        numeric = shared
+        if state.coo is not None and shared is not None and order_after is not None:
+            # A later adjoint's own read produced `order_after`. Reusing the shared slot
+            # is only safe once that read is done, so thread it into the refactor as an
+            # ordering operand: `entangle` returns a token pytree whose leaves wait on
+            # `order_after`, opaque to XLA's algebraic simplifier by construction, and
+            # refactoring through that token orders the write after the read.
+            row, col, values = state.coo
+            klujax = _klujax()
+            ordered = _entangle()(shared, order_after)
+            numeric = _reuse_or_refresh_numeric(
+                klujax, row, col, values, state.symbol, ordered
+            )
+        # `order_after` is None when no later adjoint reused this slot, so it already
+        # holds this state's own values and `numeric` solves directly, no refactor needed.
         transposed_state = _KLUState(
             state.operator,
             state.coo,
             state.symbol,
-            state.numeric,
+            numeric,
             transpose_packed_structures(state.packed_structures)
             if state.packed_structures is not None
             else None,

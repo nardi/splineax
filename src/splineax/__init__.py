@@ -1,3 +1,6 @@
+from ._solve import (
+    linear_solve as linear_solve,
+)
 from ._stateful_transform import (
     stateful_solve_transform as stateful_solve_transform,
 )
@@ -45,9 +48,6 @@ from .solvers import (
 )
 from .solvers import (
     TrackingState as TrackingState,
-)
-from .solvers import (
-    linear_solve as linear_solve,
 )
 from .solvers import (
     sparse_indices_sorted as sparse_indices_sorted,

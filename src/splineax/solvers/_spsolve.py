@@ -174,6 +174,17 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
             return state
         return self.init(operator, options)
 
+    def compute_stateful(
+        self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]
+    ) -> tuple[PyTree[Array], RESULTS, _SpsolveState, dict[str, Any]]:
+        """Solve and return the state unchanged.
+
+        `spsolve` factorizes afresh on every solve, so there is no cache slot to order a
+        later solve against and nothing to thread. The state is returned as-is.
+        """
+        solution, result, stats = self.compute(state, vector, options)
+        return solution, result, state, stats
+
     def compute(
         self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
@@ -200,9 +211,14 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         return solution, RESULTS.successful, {}
 
     def transpose(
-        self, state: _SpsolveState, options: dict[str, Any]
+        self,
+        state: _SpsolveState,
+        options: dict[str, Any],
+        *,
+        order_after: Any = None,
     ) -> tuple[_SpsolveState, dict[str, Any]]:
-        del options
+        del options, order_after
+        # `Spsolve` keeps no native handle to reuse, so there is no ordering to thread.
         matrix = state.matrix
         assert matrix is not None and state.packed_structures is not None
         matrix_T = BCSR(
@@ -215,6 +231,14 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
             transpose_packed_structures(state.packed_structures),
         )
         return transpose_state, {}
+
+    def isolate(
+        self, state: _SpsolveState, options: dict[str, Any]
+    ) -> tuple[_SpsolveState, dict[str, Any]]:
+        del options
+        # `Spsolve` keeps no native handle and refactors from `state.matrix` on every solve,
+        # so there is nothing to isolate.
+        return state, {}
 
     def conj(
         self, state: _SpsolveState, options: dict[str, Any]
