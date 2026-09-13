@@ -23,10 +23,13 @@ function.
 
 Start with a function that calls `lineax.linear_solve`. When you give this to
 the transform it runs the function, and each time it encounters a
-`lineax.linear_solve` it surrounds it with `init`/`update` and `track` calls,
-equivalent to `splx.linear_solve`. The first solve builds the state with `init`,
-and every later solve folds the operator in with `update`, so a new matrix that
-shares the same pattern as the previous one will reuse the previous analysis.
+`lineax.linear_solve` it folds the operator into the threaded state and solves
+through splineax's own primitive instead, the same one `splx.linear_solve` uses.
+The first solve builds the state with `init`, and every later solve folds the
+operator in with `update`, so a new matrix that shares the same pattern as the
+previous one will reuse the previous analysis. This gives a transformed solve the
+same ordering guarantees `splx.linear_solve` has: nothing further to call to keep
+a reused factorization correct, under `jit` or under differentiation.
 
 ```python
 import jax
@@ -179,6 +182,44 @@ batched = jax.vmap(
     lambda bb: solve_twice_stateful(values, bb, b2)
 )(jnp.stack([b1, b2]))
 ```
+
+That last example reuses the same operator for both solves, so `grad` only differentiates
+through the reuse of an unchanged factorization. The transform gives the same guarantee for
+a chain of genuinely *different* operators that merely share a pattern and a factorization
+slot: differentiating through one does not corrupt the other, even though the second solve's
+in-place refactor happens between the two solves.
+
+```{.python continuation}
+def solve_two_operators(scale1, scale2):
+    op1 = splx.BCOOLinearOperator(
+        BCOO((values * scale1, indices), shape=(4, 4)), tags=tag
+    )
+    op2 = splx.BCOOLinearOperator(
+        BCOO((values * scale2, indices), shape=(4, 4)), tags=tag
+    )
+    x1 = lx.linear_solve(op1, b1, splx.KLU()).value
+    x2 = lx.linear_solve(op2, b2, splx.KLU()).value
+    return jnp.sum(x1**2) + jnp.sum(x2**2)
+
+
+loss = splx.stateful_solve_transform(solve_two_operators)
+
+
+def dense_loss(scale1, scale2):
+    x1 = jnp.linalg.solve(dense * scale1, b1)
+    x2 = jnp.linalg.solve(dense * scale2, b2)
+    return jnp.sum(x1**2) + jnp.sum(x2**2)
+
+
+gradient = jax.grad(loss, argnums=(0, 1))(jnp.asarray(1.0), jnp.asarray(2.0))
+expected = jax.grad(dense_loss, argnums=(0, 1))(jnp.asarray(1.0), jnp.asarray(2.0))
+assert all(jnp.allclose(g, e) for g, e in zip(gradient, expected))
+```
+
+This holds because `_thread_solve` binds the same ordering-aware primitive
+`splx.linear_solve` uses internally, so the transform inherits the guarantee described in
+[Solving under `jit`, `grad`, and `jvp`](stateful.md#solving-under-jit-grad-and-jvp) without
+needing anything from the function it wraps.
 
 ## Limitations
 

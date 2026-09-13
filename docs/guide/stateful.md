@@ -74,7 +74,8 @@ shares the structure will reuse the analysis. Either way it tracks the solution 
 returning, so the state you get back is safe to release after the loop.
 
 The default solver is `AutoSparseLinearSolver`, which picks a backend for the platform and
-precision. Any splineax solver works in its place.
+precision, and by default refines each solution with [`splineax.IterativeRefinement`][]
+until its residual is within tolerance. Any splineax solver works in its place.
 
 ## Reuse across changing values
 
@@ -128,7 +129,7 @@ There is also a `sparse_indices_sorted` tag. Attaching it to an operator asserts
 indices are already row-major sorted, so `Pardiso` and `Spsolve` skip the sort they would
 otherwise do.
 
-## Solves inside `jax.jit`
+## Solving under `jit`, `grad`, and `jvp`
 
 A factorization handle is an ordinary JAX value, not a native object tied to the Python
 side, so the whole lifecycle composes inside a jitted function. Build the state, solve,
@@ -148,10 +149,55 @@ def solve_under_jit(values, b):
 x = solve_under_jit(sparsity.data, b1)
 ```
 
-`state.track` records the solve as a dependency of the state, and `release` consumes that,
-so XLA orders the native release after the solve. That holds eagerly and inside one trace,
-so there is nothing special to remember here. Use `splineax.linear_solve` and it tracks
-for you.
+`splineax.linear_solve` orders its own native calls under `jit` without help from you: a
+`release` is ordered after the solve it depends on, and a refactor that reuses a shared
+factorization slot is ordered after the last read of that slot, even when that read
+belongs to a different solve's own adjoint. There is nothing to call or remember to keep
+this correct; it holds automatically, whether or not you are inside `jit`.
+
+That correctness carries through differentiation too. `jax.grad` and `jax.jvp` give the
+right answer through a chain of reused solves, even when two solves sharing one
+factorization slot are both differentiated:
+
+```{.python continuation}
+def loss(scale):
+    first = splx.BCOOLinearOperator(
+        BCOO(
+            (sparsity.data * scale, sparsity.indices),
+            shape=sparsity.shape,
+            indices_sorted=True,
+        ),
+        tags=tag,
+    )
+    second = splx.BCOOLinearOperator(
+        BCOO(
+            (sparsity.data * (2.0 * scale), sparsity.indices),
+            shape=sparsity.shape,
+            indices_sorted=True,
+        ),
+        tags=tag,
+    )
+    sol1, state = splx.linear_solve(first, b1, solver)
+    sol2, state = splx.linear_solve(second, b2, solver, state=state)
+    state.release()
+    return jnp.sum(sol1.value**2) + jnp.sum(sol2.value**2)
+
+
+def dense_loss(scale):
+    x1 = jnp.linalg.solve(dense * scale, b1)
+    x2 = jnp.linalg.solve(dense * (2.0 * scale), b2)
+    return jnp.sum(x1**2) + jnp.sum(x2**2)
+
+
+gradient = jax.jit(jax.grad(loss))(jnp.asarray(1.0))
+assert jnp.allclose(gradient, jax.grad(dense_loss)(jnp.asarray(1.0)))
+```
+
+Without this, reusing a slot across a differentiated chain would be a trap: the second
+solve's in-place refactor could run before the first solve's own adjoint has read the
+matrix it needs, silently corrupting that gradient. `KLU` and `Pardiso` avoid this by
+threading an ordering witness through the adjoint chain, so a refactor that reuses a
+slot always waits for whichever later adjoint still needs to read it first.
 
 ## What each solver reuses
 
@@ -170,6 +216,13 @@ updates on the same pattern refactor while reusing that analysis.
 parity. `update` rebuilds the state, `release` frees nothing, and `track` returns the
 state unchanged. Code written against the API runs unchanged on any backend, and
 `AutoSparseLinearSolver` forwards to whichever it picked.
+
+`IterativeRefinement` wraps any of the above and reuses the same factorization for every
+refinement step of a solve, not just across separate calls to `linear_solve`. It exposes
+the same `update`/`release`/`track` API by forwarding to the solver it wraps, so it
+composes with everything on this page without changes: `AutoSparseLinearSolver` returns
+an `IterativeRefinement`-wrapped state by default, and it is still safe to reuse,
+release, and differentiate through exactly as described above.
 
 ## Backend-agnostic code
 
