@@ -185,9 +185,22 @@ wheels = [
 [[package]]
 name = "entangle-jax"
 version = "0.1.0"
-source = { git = "https://github.com/nardi/entangle-jax#3462a08202dcb723d7b569cc0e4ce558a0efeb19" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
+    { name = "jaxtyping" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/90/c1/a6ad9f796d5f4ac5eaea7d1cb1b6ffeeac9fc28a8da6aeac19af8a8cd097/entangle_jax-0.1.0.tar.gz", hash = "sha256:cca69518cd32774dc67c9eb98341e9e1dec10b1a2e83feaec4fa266118094d24", size = 58942, upload-time = "2026-09-13T13:46:11.662Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a9/25/9b55ccfe153982a9961e5011267f2e53ad3ceb33f52c5e78179499bf6582/entangle_jax-0.1.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:fe7e781a0f649d0a5c5b6d1623cb22b690daa1855f74225f7d018b681fa761bc", size = 43201, upload-time = "2026-09-13T13:46:01.128Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/c7/2c0a03709e6b34c78276df046fedc06f7faeb17deec5994ff15f252c44e2/entangle_jax-0.1.0-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:07c10c8413e0c53957832ed907b7ff0ea976f6179ab75b311b34dabf98fc412e", size = 64786, upload-time = "2026-09-13T13:46:02.335Z" },
+    { url = "https://files.pythonhosted.org/packages/22/2a/032c3feb5b39f297072dbec0750fadd5d4348bbbd990d6d0ea0664e3a2d4/entangle_jax-0.1.0-cp311-cp311-win_amd64.whl", hash = "sha256:6faa3383f178a8b4625ad4191886e46d90d4759519ce1dc0defb8ee4e7716a5a", size = 228117, upload-time = "2026-09-13T13:46:03.486Z" },
+    { url = "https://files.pythonhosted.org/packages/01/fb/b0df97e3ce2401ebef02ddddd5732dd00962717be2f2635b27020aae54f4/entangle_jax-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:d62052d8589ec8c340b93bc9bea91fd2a38bbc8830bb61507d6440b9eb0bf1af", size = 44140, upload-time = "2026-09-13T13:46:04.684Z" },
+    { url = "https://files.pythonhosted.org/packages/48/ff/c4eb88e28acaec415cf2c2d034a6111ba7c1762b0384a094d614148e0f6f/entangle_jax-0.1.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f00544883d02f761b4d9bcb9715ade2e06c5cae3ac457fa0e8ca2b7dfa239531", size = 70278, upload-time = "2026-09-13T13:46:05.91Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/6a/8eb75f6d05df1e584bf1626eab191ff10579b9bd7be8621ba3c30b9b7498/entangle_jax-0.1.0-cp312-cp312-win_amd64.whl", hash = "sha256:e9b80e0c5a35d63b1734bebcb5148942834f64988534992c700d97e5791378a1", size = 228811, upload-time = "2026-09-13T13:46:07.045Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/5c/79cb0d16b8499ad799a631d57f9b915f070ea641ba2c1f8ca40e64864a73/entangle_jax-0.1.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:ceaa7be28d3e69ae4cc355ff51c6605ea749c38cf1bb825c9bfe418dc3079f95", size = 43434, upload-time = "2026-09-13T13:46:08.192Z" },
+    { url = "https://files.pythonhosted.org/packages/90/3e/116d5382be56ee9d9516ae72f9a39f733f9876d933b8ce63e1fa07a93722/entangle_jax-0.1.0-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b2d4607840db069fb8296a839d55a48dd664601d758fb59df6588ec45110e597", size = 69645, upload-time = "2026-09-13T13:46:09.254Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/dc/03f72921af53f85aebcf28ed9c473644fd28bdc3b4f50dd109af2a6b10da/entangle_jax-0.1.0-cp313-cp313-win_amd64.whl", hash = "sha256:ee8725f91f1568de4dc237108bfe6ea8f2ed01cd0257a7e5c430cf76fb575501", size = 227985, upload-time = "2026-09-13T13:46:10.532Z" },
 ]
 
 [[package]]
@@ -1149,7 +1162,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "asdex", specifier = ">=0.5.1" },
-    { name = "entangle-jax", git = "https://github.com/nardi/entangle-jax" },
+    { name = "entangle-jax", specifier = ">=0.1.0" },
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4" },
     { name = "jaxtyping", specifier = ">=0.2" },
