@@ -193,3 +193,9 @@ def solve_many(
 
 solve_many(splx.AutoSparseLinearSolver(), operator, [b1, b2])
 ```
+
+## Seeing what a solve does
+
+To debug what a solver actually reuses or rebuilds across a state-sequence, wrap your solves
+in [`splineax.solve_trace`][], which records every analyze, factor, refactor, solve, and
+iterative-refinement step. See [Debugging solves](tracing.md).

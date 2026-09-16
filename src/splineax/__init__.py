@@ -1,6 +1,15 @@
 from ._stateful_transform import (
     stateful_solve_transform as stateful_solve_transform,
 )
+from ._trace import (
+    SolveTrace as SolveTrace,
+)
+from ._trace import (
+    TraceRecord as TraceRecord,
+)
+from ._trace import (
+    solve_trace as solve_trace,
+)
 from .operators import (
     BCOOLinearOperator as BCOOLinearOperator,
 )
@@ -44,7 +53,7 @@ from .solvers import (
     StatefulSolver as StatefulSolver,
 )
 from .solvers import (
-    TrackingState as TrackingState,
+    TrackingSolverState as TrackingSolverState,
 )
 from .solvers import (
     linear_solve as linear_solve,

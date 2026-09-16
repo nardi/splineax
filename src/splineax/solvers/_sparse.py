@@ -3,20 +3,24 @@ from typing import (
     Any,
     Protocol,
     TypeVar,
+    overload,
     runtime_checkable,
 )
 
 import jax
 import jax.core
+import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
 from asdex import ColoredPattern
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import PyTree
 from lineax import AbstractLinearOperator
 from lineax import linear_solve as _lx_linear_solve
-from lineax._solution import Solution
+from lineax._solution import RESULTS, Solution
 from lineax._solve import sentinel
 
+from splineax._trace import sparsity_hash, tracing_active
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -127,6 +131,44 @@ def sparsity_pattern_tag(pattern: "_Sparsity | None" = None) -> object:
     return _ContentPatternTag(indices, shape)
 
 
+def trace_inputs(
+    pattern: Any,
+    tag: object | None,
+    shape: tuple[int, ...] | None = None,
+) -> dict[str, Any]:
+    """Build the `shape`/`nse`/`sparsity_hash` inputs a solve trace records for an operation.
+
+    Reads the pattern's concrete indices (None under `jit`) for `nse`, and hashes `tag` for
+    `sparsity_hash`. Meant to be called lazily (only when a trace is active), since reading
+    the index array is not free.
+    """
+    indices, index_shape = _pattern_indices(pattern)
+    nse = None if indices is None else int(indices.shape[0])
+    return {
+        "shape": shape if shape is not None else index_shape,
+        "nse": nse,
+        "sparsity_hash": sparsity_hash(tag),
+    }
+
+
+def sparsity_reuse_block(
+    state_tag: object | None, operator_tag: object | None
+) -> str | None:
+    """Why a state's analysis cannot be reused for an operator, or None if it can.
+
+    `update` reuses a symbolic analysis only when both the state and the new operator carry
+    the same sparsity-pattern tag. This returns a short reason a solve trace can record when
+    that fails, so a rebuilt-from-scratch analysis is motivated rather than mysterious.
+    """
+    if state_tag is None:
+        return "State has no sparsity tag"
+    if operator_tag is None:
+        return "Operator has no sparsity tag"
+    if state_tag != operator_tag:
+        return "Different sparsity tag"
+    return None
+
+
 def operator_pattern_tag(operator: AbstractLinearOperator) -> object | None:
     """Return the operator's sparsity-pattern tag, or None if it carries none.
 
@@ -161,13 +203,36 @@ class SparseLinearSolver(StatefulSolver[_StateT], Protocol[_StateT]):
         ...
 
 
+@overload
+def linear_solve(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    solver: Any = ...,
+    *,
+    options: dict[str, Any] | None = ...,
+    throw: bool = ...,
+) -> tuple[Solution, Any]: ...
+
+
+@overload
+def linear_solve(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    solver: Any = ...,
+    *,
+    options: dict[str, Any] | None = ...,
+    state: _StateT,
+    throw: bool = ...,
+) -> tuple[Solution, _StateT]: ...
+
+
 def linear_solve(
     operator: AbstractLinearOperator,
     vector: PyTree[Any],
     solver: Any = None,
     *,
     options: dict[str, Any] | None = None,
-    state: PyTree[Any] = sentinel,
+    state: Any = sentinel,
     throw: bool = True,
 ) -> tuple[Solution, Any]:
     """Solve `operator @ x = vector`, returning the solution and an updated state.
@@ -182,7 +247,14 @@ def linear_solve(
     ```
 
     With no `state`, a fresh one is built with `solver.init`. The default solver is
-    `AutoSparseLinearSolver`, which picks a backend for the platform and precision.
+    `AutoSparseLinearSolver`, which picks a backend for the platform and precision. When a
+    `state` is passed, the returned state has the same type, so it can be threaded straight
+    back into the next call.
+
+    A solver that does not implement the stateful API (the `StatefulSolver` protocol),
+    such as a plain dense `lineax.LU()`, has no reusable state to thread. For such a
+    solver this behaves like `lineax.linear_solve`, returning the incoming `state`
+    unchanged alongside the solution so the `(solution, state)` return shape stays stable.
     """
     if solver is None:
         # Imported here to avoid a cycle: `_auto` imports this module.
@@ -190,6 +262,14 @@ def linear_solve(
 
         solver = AutoSparseLinearSolver()
     opts = {} if options is None else options
+    if not isinstance(solver, StatefulSolver):
+        # A non-stateful solver keeps no reusable state, so there is nothing to `init`,
+        # `update`, or `track`. Defer the solve to `lineax.linear_solve` and hand back the
+        # incoming `state` untouched, keeping the `(solution, state)` return shape stable.
+        solution = _lx_linear_solve(
+            operator, vector, solver, options=opts, state=state, throw=throw
+        )
+        return solution, state
     # `init`/`update` build the factorization. The operator is passed through as-is, so
     # `update` can compare it by identity, and the solvers stop gradients on the values
     # themselves before handing them to the native analyze and factor.
@@ -197,11 +277,59 @@ def linear_solve(
         state = solver.init(operator, opts)
     else:
         state = solver.update(state, operator, opts)
-    solution = _lx_linear_solve(
-        operator, vector, solver, options=options, state=state, throw=throw
-    )
+    if tracing_active():
+        # While a `solve_trace` is open, run `compute` directly instead of through lineax's
+        # `linear_solve` primitive, which does not propagate the trace's in-`compute`
+        # `io_callback`s (the solve and iterative-refinement steps). Off the trace path this
+        # is never taken, so ordinary solves keep lineax's full behaviour.
+        solution = _traced_compute(operator, vector, solver, opts, state, throw)
+    else:
+        solution = _lx_linear_solve(
+            operator, vector, solver, options=options, state=state, throw=throw
+        )
     # Order any later `release` after this solve. A no-op for solvers whose state owns
     # nothing, such as `Spsolve`.
     if hasattr(state, "track"):
         state = state.track(solution)
     return solution, state
+
+
+def _any_nonfinite(tree: PyTree[Any]) -> Any:
+    leaves = jtu.tree_leaves(tree)
+    if not leaves:
+        return jnp.bool_(False)
+    return jnp.any(
+        jnp.stack([jnp.any(jnp.invert(jnp.isfinite(leaf))) for leaf in leaves])
+    )
+
+
+def _traced_compute(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    solver: Any,
+    options: dict[str, Any],
+    state: PyTree[Any],
+    throw: bool,
+) -> Solution:
+    """Solve by calling `solver.compute` directly, for use while a solve trace is open.
+
+    Mirrors `lineax._solve._linear_solve_impl` (the non-finite result adjustment and the
+    `throw` check) so the returned `Solution` matches the normal path, but keeps `compute`
+    outside lineax's `linear_solve` primitive so the trace's in-`compute` callbacks run.
+    """
+    solution, result, stats = solver.compute(state, vector, options)
+    result = RESULTS.where(
+        (result == RESULTS.successful) & _any_nonfinite(solution),
+        RESULTS.singular,
+        result,
+    )
+    result = RESULTS.where(
+        (result == RESULTS.singular) & _any_nonfinite(vector),
+        RESULTS.nonfinite_input,
+        result,
+    )
+    if throw:
+        solution, result, stats = result.error_if(
+            (solution, result, stats), result != RESULTS.successful
+        )
+    return Solution(value=solution, result=result, state=state, stats=stats)

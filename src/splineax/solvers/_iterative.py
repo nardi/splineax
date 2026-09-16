@@ -22,8 +22,9 @@ from lineax import AbstractLinearOperator, conj
 from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 
+from splineax._trace import compute_scope, record_event
 from splineax.solvers._sparse import SparseLinearSolver, _Sparsity
-from splineax.solvers._stateful import TrackingState
+from splineax.solvers._stateful import TrackingSolverState
 
 _StateT = TypeVar("_StateT")
 
@@ -80,6 +81,12 @@ def iterative_refinement(
     floor = _CONVERGENCE_FLOOR_ULPS * jnp.finfo(residual_dtype).eps
     threshold = jnp.maximum(tol, floor) * _tree_norm(vector)
 
+    record_event(
+        "refine_start",
+        "IterativeRefinement",
+        dynamic={"residual_norm": _tree_norm(r0), "threshold": threshold},
+    )
+
     def cond(carry: tuple[PyTree[Array], PyTree[Array], Array]) -> Array:
         _, residual_value, step = carry
         return (step < max_steps) & (_tree_norm(residual_value) > threshold)
@@ -90,13 +97,28 @@ def iterative_refinement(
         x, residual_value, step = carry
         correction = solve(residual_value)
         x = _tree_add(x, correction)
-        return x, residual(x), step + 1
+        new_residual = residual(x)
+        record_event(
+            "refine_step",
+            "IterativeRefinement",
+            dynamic={"step": step + 1, "residual_norm": _tree_norm(new_residual)},
+        )
+        return x, new_residual, step + 1
 
-    x, final_residual, _ = jax.lax.while_loop(cond, body, (x0, r0, jnp.array(0)))
+    x, final_residual, steps = jax.lax.while_loop(cond, body, (x0, r0, jnp.array(0)))
     converged = _tree_norm(final_residual) <= threshold
+    record_event(
+        "refine_result",
+        "IterativeRefinement",
+        dynamic={
+            "step": steps,
+            "residual_norm": _tree_norm(final_residual),
+            "converged": converged,
+        },
+    )
+    result = RESULTS.where(converged, RESULTS.successful, RESULTS.max_steps_reached)
     # NaN out a solution that never met the tolerance, so the caller sees the failure.
     solution = jtu.tree_map(lambda leaf: jnp.where(converged, leaf, jnp.nan), x)
-    result = RESULTS.where(converged, RESULTS.successful, RESULTS.max_steps_reached)
     return solution, result
 
 
@@ -117,17 +139,20 @@ class _IterativeRefinementState(eqx.Module, Generic[_StateT]):
     def track(self, solution: Any) -> "_IterativeRefinementState[_StateT]":
         """Order a later `release` after `solution`, delegating to the inner state.
 
-        A no-op for an inner state that owns nothing, matching `TrackingState`.
+        A no-op for an inner state that owns nothing, matching `TrackingSolverState`.
         """
         inner = self.inner_state
-        # Only a `TrackingState` has memory to order a release against; others are a no-op.
-        tracked = inner.track(solution) if isinstance(inner, TrackingState) else inner
+        # Only a `TrackingSolverState` has memory to order a release against; others are a
+        # no-op.
+        tracked = (
+            inner.track(solution) if isinstance(inner, TrackingSolverState) else inner
+        )
         return _IterativeRefinementState(tracked, self.operator)
 
     def release(self) -> None:
         """Release the wrapped inner state, which owns any memory this state holds."""
         inner = self.inner_state
-        if isinstance(inner, TrackingState):
+        if isinstance(inner, TrackingSolverState):
             inner.release()
 
 
@@ -214,9 +239,12 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
             )
             return solution
 
-        solution, result = iterative_refinement(
-            solve, operator, vector, self.tol, self.max_steps
-        )
+        # The outermost `compute`, so it opens the generic `compute` boundary; the inner
+        # solver's per-step solves nest under it (see `compute_scope`).
+        with compute_scope():
+            solution, result = iterative_refinement(
+                solve, operator, vector, self.tol, self.max_steps
+            )
         return solution, result, {}
 
     def transpose(
