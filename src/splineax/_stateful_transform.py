@@ -27,7 +27,7 @@ from lineax import AbstractLinearOperator, AbstractLinearSolver
 from lineax._solution import RESULTS
 from lineax._solve import linear_solve_p
 
-from splineax.solvers._stateful import StatefulSolver, TrackingState
+from splineax.solvers._stateful import StatefulSolver, TrackingSolverState
 
 _OutputT = TypeVar("_OutputT")
 """The return type of the wrapped function."""
@@ -293,7 +293,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
                 throw,
             )
         )
-        tracking_state = cast(TrackingState, self.state)
+        tracking_state = cast(TrackingSolverState, self.state)
         self.state = cast(_StateT, tracking_state.track(solution))
         return _runtime_value_leaves((solution, result_code, stats))
 

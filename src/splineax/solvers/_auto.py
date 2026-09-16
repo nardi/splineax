@@ -12,6 +12,7 @@ from ._klu import KLU, _KLUState
 from ._pardiso import Pardiso, _pardiso_available, _PardisoState
 from ._sparse import SparseLinearSolver, _Sparsity
 from ._spsolve import Spsolve, _SpsolveState
+from ._stateful import TrackingSolverState
 
 _State = _KLUState | _PardisoState | _SpsolveState
 
@@ -106,7 +107,7 @@ class _AutoDispatch(AbstractLinearSolver[_State]):
         return self._chosen_solver.assume_full_rank()
 
 
-class AutoSparseLinearSolver(AbstractLinearSolver[Any]):
+class AutoSparseLinearSolver(AbstractLinearSolver[TrackingSolverState]):
     """Selects a sparse direct solver based on the JAX platform, precision, and what is
     installed, and by default refines its solution with iterative refinement.
 
@@ -173,31 +174,35 @@ class AutoSparseLinearSolver(AbstractLinearSolver[Any]):
 
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
-    ) -> Any:
+    ) -> TrackingSolverState:
         return self._solver.init(operator, options)
 
-    def init_symbolic(self, sparsity: _Sparsity, options: dict[str, Any] = {}) -> Any:
+    def init_symbolic(
+        self, sparsity: _Sparsity, options: dict[str, Any] = {}
+    ) -> TrackingSolverState:
         return self._solver.init_symbolic(sparsity, options)
 
     def update(
         self,
-        state: Any,
+        state: TrackingSolverState,
         operator: AbstractLinearOperator,
         options: dict[str, Any] = {},
-    ) -> Any:
+    ) -> TrackingSolverState:
         return self._solver.update(state, operator, options)
 
     def compute(
-        self, state: Any, vector: PyTree[Array], options: dict[str, Any]
+        self, state: TrackingSolverState, vector: PyTree[Array], options: dict[str, Any]
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
         return self._solver.compute(state, vector, options)
 
     def transpose(
-        self, state: Any, options: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any]]:
+        self, state: TrackingSolverState, options: dict[str, Any]
+    ) -> tuple[TrackingSolverState, dict[str, Any]]:
         return self._solver.transpose(state, options)
 
-    def conj(self, state: Any, options: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    def conj(
+        self, state: TrackingSolverState, options: dict[str, Any]
+    ) -> tuple[TrackingSolverState, dict[str, Any]]:
         return self._solver.conj(state, options)
 
     def assume_full_rank(self) -> bool:
