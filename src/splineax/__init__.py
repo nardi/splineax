@@ -44,7 +44,7 @@ from .solvers import (
     StatefulSolver as StatefulSolver,
 )
 from .solvers import (
-    TrackingState as TrackingState,
+    TrackingSolverState as TrackingSolverState,
 )
 from .solvers import (
     linear_solve as linear_solve,
