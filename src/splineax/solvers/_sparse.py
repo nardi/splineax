@@ -3,6 +3,7 @@ from typing import (
     Any,
     Protocol,
     TypeVar,
+    overload,
     runtime_checkable,
 )
 
@@ -161,13 +162,36 @@ class SparseLinearSolver(StatefulSolver[_StateT], Protocol[_StateT]):
         ...
 
 
+@overload
+def linear_solve(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    solver: Any = ...,
+    *,
+    options: dict[str, Any] | None = ...,
+    throw: bool = ...,
+) -> tuple[Solution, Any]: ...
+
+
+@overload
+def linear_solve(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    solver: Any = ...,
+    *,
+    options: dict[str, Any] | None = ...,
+    state: _StateT,
+    throw: bool = ...,
+) -> tuple[Solution, _StateT]: ...
+
+
 def linear_solve(
     operator: AbstractLinearOperator,
     vector: PyTree[Any],
     solver: Any = None,
     *,
     options: dict[str, Any] | None = None,
-    state: PyTree[Any] = sentinel,
+    state: Any = sentinel,
     throw: bool = True,
 ) -> tuple[Solution, Any]:
     """Solve `operator @ x = vector`, returning the solution and an updated state.
@@ -182,7 +206,9 @@ def linear_solve(
     ```
 
     With no `state`, a fresh one is built with `solver.init`. The default solver is
-    `AutoSparseLinearSolver`, which picks a backend for the platform and precision.
+    `AutoSparseLinearSolver`, which picks a backend for the platform and precision. When a
+    `state` is passed, the returned state has the same type, so it can be threaded straight
+    back into the next call.
     """
     if solver is None:
         # Imported here to avoid a cycle: `_auto` imports this module.
