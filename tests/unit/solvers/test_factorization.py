@@ -56,6 +56,19 @@ def test_reuse_across_vectors_via_update(
     state.release()
 
 
+def test_linear_solve_state_type_is_stable(
+    make_operator: OperatorFactory, solver: splx.SparseLinearSolver
+) -> None:
+    """The state passed into `splineax.linear_solve` comes back as the same type, so it can
+    be threaded straight into the next call (asserted at type-check time by a `TypeVar`)."""
+    operator = make_operator(SQUARE_MATRIX)
+    _, state = splx.linear_solve(operator, RIGHT_HAND_SIDE, solver)
+    first_type = type(state)
+    _, state = splx.linear_solve(operator, RIGHT_HAND_SIDE, solver, state=state)
+    assert type(state) is first_type
+    state.release()
+
+
 def test_init_update_solve(
     make_operator: OperatorFactory, solver: splx.SparseLinearSolver
 ) -> None:
