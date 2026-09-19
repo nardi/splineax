@@ -94,6 +94,9 @@ def test_klu_nests_native_operations_in_order(
     ops = _ops(trace)
     assert ops.index("analyze") < ops.index("factor") < ops.index("solve_with_numeric")
     assert _by_op(trace, "analyze")[0].solver == "KLU"
+    # The solve reports the rebuild reason: the resident factorization was a cache hit.
+    solves = _by_op(trace, "solve_with_numeric", "KLU")
+    assert solves[0].outputs["rebuild"] == 0
     # The native free operations nest under `release`.
     assert _by_op(trace, "free_numeric", "KLU") and _by_op(
         trace, "free_symbolic", "KLU"
@@ -118,6 +121,8 @@ def test_update_reuses_analysis_on_shared_pattern(enable_x64: None) -> None:
     assert refactors[0].outputs["reused"] is True
     assert refactors[0].outputs["rcond"] > 0.0
     assert "stable" in refactors[0].outputs["reason"]
+    # The refactor reports the rebuild reason of the numeric handle it refreshed.
+    assert refactors[0].outputs["rebuild"] == 0
     # Reusing the analysis means no second analyze was recorded.
     assert _ops(trace).count("analyze") == 1
 

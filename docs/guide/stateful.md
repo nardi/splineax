@@ -148,10 +148,12 @@ def solve_under_jit(values, b):
 x = solve_under_jit(sparsity.data, b1)
 ```
 
-`state.track` records the solve as a dependency of the state, and `release` consumes that,
-so XLA orders the native release after the solve. That holds eagerly and inside one trace,
-so there is nothing special to remember here. Use `splineax.linear_solve` and it tracks
-for you.
+`state.track` records the solve as a dependency of the state: it entangles the state's
+factorization tokens with the solution through `entangle-jax`, an ordering dependency
+XLA cannot reorder, so the native release, and any later use of the tokens like a
+`refactor`, stays after the solve. That holds eagerly and inside one trace, traced or
+not, so there is nothing special to remember here. Use `splineax.linear_solve` and it
+tracks for you.
 
 ## What each solver reuses
 

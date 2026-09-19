@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from asdex import ColoredPattern
+from entangle_jax import entangle
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import NumericToken, SymbolToken
@@ -173,16 +174,42 @@ class _KLUState(eqx.Module):
     sparsity_tag: object | None = eqx.field(static=True, default=None)
 
     def track(self, solution: Any) -> "_KLUState":
-        """Return a state whose `release` is ordered after `solution`.
+        """Return a state ordered after `solution`, with or without tracing.
 
-        Accepts the lineax `Solution` or a bare value pytree. The solution arrays become
-        ordering dependencies on the tokens, see klujax `SymbolToken.track`.
+        Accepts the lineax `Solution` or a bare value pytree. The counter stays a plain
+        count of tracked solves, so a state differs observably per tracked solve. The
+        actual ordering comes from `entangle`: the tokens it returns are new values that
+        depend on the solution, so every later use of them, a `refactor`, a solve, or a
+        `release`, cannot be scheduled before the tracked solve. This holds without any
+        trace callbacks, so a traced run and an untraced one order the native calls the
+        same way.
         """
         record_event("track")
         value = getattr(solution, "value", solution)
-        leaves = tuple(jax.tree_util.tree_leaves(value))
-        symbol = self.symbol.track(*leaves)
-        numeric = None if self.numeric is None else self.numeric.track(*leaves)
+        # The witness only establishes an execution-order dependency, so stop its
+        # gradient: a tracked state must stay usable inside `grad` of the solve.
+        witness = jax.lax.stop_gradient(value)
+        counted = self.symbol.n_dependent_solutions + jnp.int32(1)
+        symbol = SymbolToken(
+            self.symbol.id,
+            self.symbol.Ai,
+            self.symbol.Aj,
+            self.symbol.n_col,
+            counted,
+        )
+        symbol = entangle(symbol, witness)
+        numeric = None
+        if self.numeric is not None:
+            counted = self.numeric.n_dependent_solutions + jnp.int32(1)
+            numeric = NumericToken(
+                self.numeric.id,
+                self.numeric.Ai,
+                self.numeric.Aj,
+                self.numeric.Ax,
+                self.numeric.n_col,
+                counted,
+            )
+            numeric = entangle(numeric, witness)
         return _KLUState(
             self.operator,
             self.coo,
@@ -262,7 +289,12 @@ def _reuse_or_refresh_numeric(
     either, `factor` from the symbolic analysis instead. Falling back is always correct,
     only slower.
     """
-    refreshed, status = klujax.refactor_with_status(row, col, values, numeric, symbol)
+    # The third return value is the RebuildReason per left-hand side: it says whether the
+    # numeric handle was rebuilt from the token's carried arrays rather than reused from
+    # the cache. It does not change the reuse decision, but the trace reports it.
+    refreshed, status, rebuild = klujax.refactor_with_status(
+        row, col, values, numeric, symbol
+    )
     dtype = jnp.complex128 if values.dtype in COMPLEX_DTYPES else jnp.float64
     reciprocal_condition = klujax.rcond(symbol, refreshed, dtype=dtype)
     reuse_is_safe = jnp.all(status == klujax.KLUStatus.OK) & jnp.all(
@@ -279,7 +311,7 @@ def _reuse_or_refresh_numeric(
                 "reused": True,
                 "reason": f"Pivots stable: no error and rcond > {floor:g}",
             },
-            dynamic={"rcond": reciprocal_condition},
+            dynamic={"rcond": reciprocal_condition, "rebuild": rebuild},
         )
         return refreshed
 
@@ -494,12 +526,22 @@ class KLU(AbstractLinearSolver[_KLUState]):
                     "factor", "KLU", outputs={"reason": "No prior factorization"}
                 )
                 numeric = klujax.factor(row, col, values, state.symbol)
+            # The `_with_status` variants also report the RebuildReason per numeric handle:
+            # whether the resident factorization was reused or rebuilt from the token's
+            # carried arrays. A rebuild is still correct, only slower, so the trace reports
+            # it rather than the solve branching on it.
             if state.transposed:
-                operation, solve = "tsolve_with_numeric", klujax.tsolve_with_numeric
+                operation, solve = (
+                    "tsolve_with_numeric",
+                    klujax.tsolve_with_numeric_with_status,
+                )
             else:
-                operation, solve = "solve_with_numeric", klujax.solve_with_numeric
-            record_event(operation, "KLU")
-            x = solve(numeric, b, state.symbol)
+                operation, solve = (
+                    "solve_with_numeric",
+                    klujax.solve_with_numeric_with_status,
+                )
+            x, rebuild = solve(numeric, b, state.symbol)
+            record_event(operation, "KLU", dynamic={"rebuild": rebuild})
             solution = unravel_solution(x, state.packed_structures)
             return solution, RESULTS.successful, {}
 
