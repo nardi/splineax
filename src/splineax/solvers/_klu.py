@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from asdex import ColoredPattern
+from entangle_jax import entangle
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import NumericToken, SymbolToken
@@ -173,16 +174,42 @@ class _KLUState(eqx.Module):
     sparsity_tag: object | None = eqx.field(static=True, default=None)
 
     def track(self, solution: Any) -> "_KLUState":
-        """Return a state whose `release` is ordered after `solution`.
+        """Return a state ordered after `solution`, with or without tracing.
 
-        Accepts the lineax `Solution` or a bare value pytree. The solution arrays become
-        ordering dependencies on the tokens, see klujax `SymbolToken.track`.
+        Accepts the lineax `Solution` or a bare value pytree. The counter stays a plain
+        count of tracked solves, so a state differs observably per tracked solve. The
+        actual ordering comes from `entangle`: the tokens it returns are new values that
+        depend on the solution, so every later use of them, a `refactor`, a solve, or a
+        `release`, cannot be scheduled before the tracked solve. This holds without any
+        trace callbacks, so a traced run and an untraced one order the native calls the
+        same way.
         """
         record_event("track")
         value = getattr(solution, "value", solution)
-        leaves = tuple(jax.tree_util.tree_leaves(value))
-        symbol = self.symbol.track(*leaves)
-        numeric = None if self.numeric is None else self.numeric.track(*leaves)
+        # The witness only establishes an execution-order dependency, so stop its
+        # gradient: a tracked state must stay usable inside `grad` of the solve.
+        witness = jax.lax.stop_gradient(value)
+        counted = self.symbol.n_dependent_solutions + jnp.int32(1)
+        symbol = SymbolToken(
+            self.symbol.id,
+            self.symbol.Ai,
+            self.symbol.Aj,
+            self.symbol.n_col,
+            counted,
+        )
+        symbol = entangle(symbol, witness)
+        numeric = None
+        if self.numeric is not None:
+            counted = self.numeric.n_dependent_solutions + jnp.int32(1)
+            numeric = NumericToken(
+                self.numeric.id,
+                self.numeric.Ai,
+                self.numeric.Aj,
+                self.numeric.Ax,
+                self.numeric.n_col,
+                counted,
+            )
+            numeric = entangle(numeric, witness)
         return _KLUState(
             self.operator,
             self.coo,

@@ -12,6 +12,7 @@ dependencies = [
     "jaxtyping>=0.2",
     "splineax-klujax>=0.5.0.post7",
     "asdex>=0.5.1",
+    "entangle-jax>=0.1.0",
 ]
 
 [project.optional-dependencies]
