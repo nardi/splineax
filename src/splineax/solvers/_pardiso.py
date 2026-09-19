@@ -457,7 +457,9 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
                 inputs={"transposed": state.transposed} if state.transposed else None,
             )
             # `solve_stateful` reuses the stored factorization, solving A^T when transposed.
-            solution, _ = primitive.solve_stateful(
+            # The third return value is the RebuildReason, which says whether the factorization
+            # was a cache hit or rebuilt, and does not affect the solve here.
+            solution, _, _ = primitive.solve_stateful(
                 state.token,
                 indptr,
                 indices,

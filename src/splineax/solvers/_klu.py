@@ -262,7 +262,12 @@ def _reuse_or_refresh_numeric(
     either, `factor` from the symbolic analysis instead. Falling back is always correct,
     only slower.
     """
-    refreshed, status = klujax.refactor_with_status(row, col, values, numeric, symbol)
+    # The third return value is the RebuildReason per left-hand side, which the
+    # reuse decision below does not need: it says why the numeric handle was
+    # rebuilt from the token's carried arrays, not whether the refactor succeeded.
+    refreshed, status, _ = klujax.refactor_with_status(
+        row, col, values, numeric, symbol
+    )
     dtype = jnp.complex128 if values.dtype in COMPLEX_DTYPES else jnp.float64
     reciprocal_condition = klujax.rcond(symbol, refreshed, dtype=dtype)
     reuse_is_safe = jnp.all(status == klujax.KLUStatus.OK) & jnp.all(
