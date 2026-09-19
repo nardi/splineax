@@ -451,15 +451,13 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             pmj = _pardiso_mkl_jax()
             primitive = pmj.primitive
             indptr, indices, values = state.csr
-            record_event(
-                "solve_stateful",
-                "Pardiso",
-                inputs={"transposed": state.transposed} if state.transposed else None,
-            )
             # `solve_stateful` reuses the stored factorization, solving A^T when transposed.
-            # The third return value is the RebuildReason, which says whether the factorization
-            # was a cache hit or rebuilt, and does not affect the solve here.
-            solution, _, _ = primitive.solve_stateful(
+            # The third return value is the RebuildReason: whether the factorization was a
+            # cache hit or rebuilt from the token's carried arrays. A rebuild is still
+            # correct, only slower, so the trace reports it rather than the solve branching
+            # on it. The middle value is the final iparm, already decoded into the
+            # `perturbed_pivots`/`zero_pivot` flags the refactor path records.
+            solution, _, rebuild = primitive.solve_stateful(
                 state.token,
                 indptr,
                 indices,
@@ -467,6 +465,12 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
                 b[None, :],
                 matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
                 transpose=state.transposed,
+            )
+            record_event(
+                "solve_stateful",
+                "Pardiso",
+                inputs={"transposed": state.transposed} if state.transposed else None,
+                dynamic={"rebuild": rebuild},
             )
             solution = unravel_solution(solution[0], state.packed_structures)
             return solution, RESULTS.successful, {}

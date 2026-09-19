@@ -105,6 +105,11 @@ _CREATED_OPS = frozenset({"analyze", "reanalyze", "spsolve"})
 _REUSED_OPS = frozenset({"solve_with_numeric", "tsolve_with_numeric", "solve_stateful"})
 # The floating-point output fields shown in scientific notation.
 _SCI_FIELDS = frozenset({"rcond", "residual_norm", "threshold"})
+
+# The rebuild-reason codes, shared by klujax and pardiso_mkl_jax (their RebuildReason
+# enums use the same numbering). Rendered by name so a trace line reads `rebuild="none"`
+# rather than `rebuild=0`; an unknown code falls back to the raw integer.
+_REBUILD_REASON_NAMES = ("none", "evicted", "freed", "superseded", "dtype", "unknown", "stale")
 # Free-text output fields, quoted so a space-joined line stays readable.
 _TEXT_FIELDS = frozenset({"reason", "note"})
 
@@ -120,6 +125,7 @@ _FIELD_ORDER = {
             "transposed",
             "outcome",
             "reused",
+            "rebuild",
             "rcond",
             "perturbed_pivots",
             "zero_pivot",
@@ -170,6 +176,10 @@ def _record_colour(record: TraceRecord) -> str:
 def _format_value(field: str, value: Any) -> str:
     if field in _SCI_FIELDS and isinstance(value, (int, float)):
         return f"{field}={value:.3e}"
+    if field == "rebuild" and isinstance(value, int) and 0 <= value < len(
+        _REBUILD_REASON_NAMES
+    ):
+        return f'{field}="{_REBUILD_REASON_NAMES[value]}"'
     if field in _TEXT_FIELDS:
         return f'{field}="{value}"'
     return f"{field}={value}"
