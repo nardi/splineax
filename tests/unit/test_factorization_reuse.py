@@ -187,7 +187,9 @@ def _trace_reuse(fn: Callable[..., object], *args: object) -> tuple[object, _Reu
     )
 
 
-def _rebuilds(fn: Callable[..., object], *args: object) -> tuple[object, dict[str, int]]:
+def _rebuilds(
+    fn: Callable[..., object], *args: object
+) -> tuple[object, dict[str, int]]:
     """Run `fn` with the native rebuild counter reset, returning output and reasons.
 
     A rebuilt handle is always correct but costs the rebuild: an evicted, freed, or
@@ -200,9 +202,7 @@ def _rebuilds(fn: Callable[..., object], *args: object) -> tuple[object, dict[st
     klujax.reset_rebuild_count()
     output = fn(*args)
     stats = {
-        reason.name: count
-        for reason, count in klujax.rebuild_stats().items()
-        if count
+        reason.name: count for reason, count in klujax.rebuild_stats().items() if count
     }
     return output, stats
 
@@ -223,12 +223,12 @@ def _assert_superseded_rebuild(
 ) -> None:
     """Assert the rebuilds are exactly the benign superseded tangent-solve ones.
 
-    A forward-mode tangent on the matrix values makes lineax's JVP issue a tangent
-    solve against the same numeric handle as the tracked primal solve. Only the primal
-    solution is entangled with the tokens, so the tangent solve can be superseded by
-    the next refactor inside one compiled program: it rebuilds its factorization from
-    the arrays its token carries, correct but slower. Asserted exactly rather than
-    banned.
+    A forward-mode tangent on the matrix values makes `linear_solve`'s custom JVP rule
+    issue a tangent solve against the same numeric handle as the tracked primal solve.
+    Only the primal solution is entangled with the tokens, so the tangent solve can be
+    superseded by the next refactor inside one compiled program: it rebuilds its
+    factorization from the arrays its token carries, correct but slower. Asserted
+    exactly rather than banned.
     """
     assert stats == {"SUPERSEDED": expected}, (
         f"{context}: expected {expected} superseded rebuild(s) from a tangent solve "
@@ -255,7 +255,9 @@ def _assert_full_reuse(reuse: _Reuse, context: str) -> None:
     """Assert the signature of a fully reusing two-solve run: one analysis, one refactor."""
     assert reuse.analyze == 1, f"{context}: expected one analyze, got {reuse.analyze}"
     assert reuse.factor == 1, f"{context}: expected one factor, got {reuse.factor}"
-    assert reuse.refactor == 1, f"{context}: expected one refactor, got {reuse.refactor}"
+    assert reuse.refactor == 1, (
+        f"{context}: expected one refactor, got {reuse.refactor}"
+    )
     assert reuse.rebuilt_updates == 0, f"{context}: unexpected analysis rebuild"
 
 
@@ -324,9 +326,7 @@ def _derivative_suite(
     }
 
 
-def _assert_derivatives_match(
-    got: object, want: object, name: str
-) -> None:
+def _assert_derivatives_match(got: object, want: object, name: str) -> None:
     """Assert two derivative pytrees agree leaf by leaf."""
     leaves_got = jax.tree_util.tree_leaves(got)
     leaves_want = jax.tree_util.tree_leaves(want)
@@ -387,13 +387,18 @@ def test_derivatives_reuse_the_shared_analysis(wrt: str) -> None:
         assert reuse.analyze == 1, f"{name} wrt {wrt}"
         # Rebuilds: the entangled `track` keeps the handle valid across the compiled
         # program for the primal solves. A forward-mode tangent on the matrix values
-        # adds a tangent solve that lineax's JVP issues against the same numeric
-        # handle, and only the primal solution is tracked, so exactly one tangent
-        # solve can still be superseded. Everything else rebuilds nothing.
+        # adds a tangent solve that `linear_solve`'s custom JVP rule issues against
+        # the same numeric handle, and only the primal solution is tracked, so
+        # exactly one tangent solve can still be superseded. Everything else
+        # rebuilds nothing.
         derivative(*args)  # warm the compiled cache first
         _, stats = _rebuilds(derivative, *args)
-        if wrt == "values" and name in ("jacfwd", "jacfwd_jacfwd", "jacrev_jacrev",
-                                        "jacfwd_jacrev"):
+        if wrt == "values" and name in (
+            "jacfwd",
+            "jacfwd_jacfwd",
+            "jacrev_jacrev",
+            "jacfwd_jacrev",
+        ):
             _assert_superseded_rebuild(stats, f"{name} wrt {wrt}")
         else:
             _assert_no_rebuilds(stats, f"{name} wrt {wrt}")
@@ -438,7 +443,9 @@ def test_transform_before_or_after_the_derivative_agrees() -> None:
     values1, values2 = _values(), _values2()
     b1, b2 = _b1(), _b2()
 
-    def loss(fn: Callable[..., tuple[jax.Array, jax.Array]]) -> Callable[..., jax.Array]:
+    def loss(
+        fn: Callable[..., tuple[jax.Array, jax.Array]],
+    ) -> Callable[..., jax.Array]:
         def wrapped(v1: jax.Array, v2: jax.Array) -> jax.Array:
             x1, x2 = fn(v1, v2, b1, b2)
             return jnp.sum(x1) + jnp.sum(x2**2)
@@ -447,10 +454,14 @@ def test_transform_before_or_after_the_derivative_agrees() -> None:
 
     # Transform first, then differentiate: the derivative flows through the threaded
     # solves and reuses their factorization.
-    derivative_of_transform = jax.jit(jax.grad(loss(splx.stateful_solve_transform(plain))))
+    derivative_of_transform = jax.jit(
+        jax.grad(loss(splx.stateful_solve_transform(plain)))
+    )
     # Differentiate first, then transform: the transform threads the derivative's own
     # solves.
-    transform_of_derivative = splx.stateful_solve_transform(jax.jit(jax.grad(loss(plain))))
+    transform_of_derivative = splx.stateful_solve_transform(
+        jax.jit(jax.grad(loss(plain)))
+    )
     got = derivative_of_transform(values1, values2)
     want = transform_of_derivative(values1, values2)
     _assert_derivatives_match(got, want, "transform-before vs transform-after")
