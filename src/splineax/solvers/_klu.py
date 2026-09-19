@@ -262,7 +262,12 @@ def _reuse_or_refresh_numeric(
     either, `factor` from the symbolic analysis instead. Falling back is always correct,
     only slower.
     """
-    refreshed, status = klujax.refactor_with_status(row, col, values, numeric, symbol)
+    # The third return value is the RebuildReason per left-hand side: it says whether the
+    # numeric handle was rebuilt from the token's carried arrays rather than reused from
+    # the cache. It does not change the reuse decision, but the trace reports it.
+    refreshed, status, rebuild = klujax.refactor_with_status(
+        row, col, values, numeric, symbol
+    )
     dtype = jnp.complex128 if values.dtype in COMPLEX_DTYPES else jnp.float64
     reciprocal_condition = klujax.rcond(symbol, refreshed, dtype=dtype)
     reuse_is_safe = jnp.all(status == klujax.KLUStatus.OK) & jnp.all(
@@ -279,7 +284,7 @@ def _reuse_or_refresh_numeric(
                 "reused": True,
                 "reason": f"Pivots stable: no error and rcond > {floor:g}",
             },
-            dynamic={"rcond": reciprocal_condition},
+            dynamic={"rcond": reciprocal_condition, "rebuild": rebuild},
         )
         return refreshed
 
@@ -494,12 +499,22 @@ class KLU(AbstractLinearSolver[_KLUState]):
                     "factor", "KLU", outputs={"reason": "No prior factorization"}
                 )
                 numeric = klujax.factor(row, col, values, state.symbol)
+            # The `_with_status` variants also report the RebuildReason per numeric handle:
+            # whether the resident factorization was reused or rebuilt from the token's
+            # carried arrays. A rebuild is still correct, only slower, so the trace reports
+            # it rather than the solve branching on it.
             if state.transposed:
-                operation, solve = "tsolve_with_numeric", klujax.tsolve_with_numeric
+                operation, solve = (
+                    "tsolve_with_numeric",
+                    klujax.tsolve_with_numeric_with_status,
+                )
             else:
-                operation, solve = "solve_with_numeric", klujax.solve_with_numeric
-            record_event(operation, "KLU")
-            x = solve(numeric, b, state.symbol)
+                operation, solve = (
+                    "solve_with_numeric",
+                    klujax.solve_with_numeric_with_status,
+                )
+            x, rebuild = solve(numeric, b, state.symbol)
+            record_event(operation, "KLU", dynamic={"rebuild": rebuild})
             solution = unravel_solution(x, state.packed_structures)
             return solution, RESULTS.successful, {}
 

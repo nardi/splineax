@@ -66,12 +66,12 @@ sequence 0
     KLU.analyze
     KLU.factor
   compute
-    KLU.solve_with_numeric
+    KLU.solve_with_numeric => (rebuild="none")
   track
   update[shape=(4, 4), nse=10, sparsity_hash=0x60347] => (outcome=reused, reason="Identical sparsity tag")
-    KLU.refactor => (reused=True, rcond=8.329e-01, reason="Pivots stable: no error and rcond > 1e-08")
+    KLU.refactor => (reused=True, rebuild="none", rcond=8.329e-01, reason="Pivots stable: no error and rcond > 1e-08")
   compute
-    KLU.solve_with_numeric
+    KLU.solve_with_numeric => (rebuild="none")
   track
   release
     KLU.free_numeric
@@ -114,7 +114,12 @@ assert update.outputs["reason"] == "Different sparsity tag"
 - `KLU` records `KLU.analyze`, `KLU.factor`, `KLU.refactor` (with the reciprocal condition
   estimate and whether the factorization was reused), `KLU.solve_with_numeric` (or
   `KLU.tsolve_with_numeric` when transposed), and `KLU.free_numeric` / `KLU.free_symbolic`
-  under `release`. `Pardiso` is analogous, with `Pardiso.reanalyze` and pivot-stability flags.
+  under `release`. The solves go through the status-reporting variants
+  (`solve_with_numeric_with_status`, ...), and together with the refactor they record a
+  `rebuild` field saying why a factorization was rebuilt from the carried arrays rather
+  than reused from the cache (`"none"` is a cache hit). `Pardiso` is analogous, with
+  `Pardiso.reanalyze`, pivot-stability flags, and the same `rebuild` field on its
+  `solve_stateful`.
 - `Spsolve` factors and solves in one fused call, so under `compute` it records a single
   `Spsolve.spsolve`; its reuse API is a set of no-ops.
 - `IterativeRefinement` records `IterativeRefinement.refine_start`, a `refine_step` per
