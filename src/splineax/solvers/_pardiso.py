@@ -390,7 +390,7 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         primitive = pmj.primitive
         indptr, indices, values = state.csr
         # `solve_stateful` reuses the stored factorization, solving A^T when transposed.
-        solution, _ = primitive.solve_stateful(
+        solution, _, _ = primitive.solve_stateful(
             state.token,
             indptr,
             indices,
