@@ -7,15 +7,18 @@ from typing import (
     runtime_checkable,
 )
 
+import equinox as eqx
 import jax
 import jax.core
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
 from asdex import ColoredPattern
+from equinox.internal import ω
+from jax._src.ad_util import SymbolicZero  # noqa: PLC2701
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import PyTree
-from lineax import AbstractLinearOperator
+from lineax import AbstractLinearOperator, TangentLinearOperator, linearise
 from lineax import linear_solve as _lx_linear_solve
 from lineax._solution import RESULTS, Solution
 from lineax._solve import sentinel
@@ -186,6 +189,245 @@ def operator_pattern_tag(operator: AbstractLinearOperator) -> object | None:
 _StateT = TypeVar("_StateT")
 
 
+def _tangent_zeros(primal: Any) -> Any:
+    """The all-zero tangent pytree matching `primal`, one `SymbolicZero` per leaf.
+
+    A custom JVP rule must return tangent outputs with the same container structure as
+    the primal outputs, and a solve returns a rich pytree: the solution value, the
+    RESULTS code, the stats, and the solver state. `SymbolicZero` leaves keep both
+    structures equal (unlike `Zero`, which is itself a pytree node and would change the
+    structure) while telling JAX no tangent flows there. Only the solution value carries
+    a real tangent.
+    """
+    return jtu.tree_map(lambda x: SymbolicZero(jax.typeof(x).to_tangent_aval()), primal)
+
+
+def _has_tangent(tangent: Any) -> bool:
+    """Whether a tangent pytree holds any leaf that is not a symbolic zero."""
+    return any(type(t) is not SymbolicZero for t in jtu.tree_leaves(tangent))
+
+
+def _assert_zero_tangent(tangent: Any, name: str) -> None:
+    """Raise if a tangent pytree holds any leaf that is not a symbolic zero.
+
+    The solver, the options, and the state are constants of the differentiation: the
+    factorization does not depend differentiably on anything, so a tangent on them
+    means the caller differentiated something the solve cannot thread through.
+    """
+    if _has_tangent(tangent):
+        raise ValueError(
+            f"`splineax.linear_solve` received a tangent for `{name}`, which is a "
+            "constant of the solve and cannot be differentiated."
+        )
+
+
+def _instantiate_tangent(primal: Any, tangent: Any) -> Any:
+    """Replace symbolic-zero leaves with concrete zero arrays, keeping real tangents."""
+    return jtu.tree_map(
+        lambda _, t: (
+            jnp.zeros(t.aval.shape, t.aval.dtype) if type(t) is SymbolicZero else t
+        ),
+        primal,
+        tangent,
+    )
+
+
+def _zero_leaves_as_none(tangent: Any) -> Any:
+    """Replace symbolic-zero leaves with `None`, as equinox's filter JVP expects."""
+    return jtu.tree_map(lambda t: None if type(t) is SymbolicZero else t, tangent)
+
+
+def _prepare_state(
+    operator: AbstractLinearOperator,
+    state: Any,
+    solver: Any,
+    opts: dict[str, Any],
+) -> Any:
+    """Fold the operator into the state: `init` with no state, `update` with one."""
+    if state is None:
+        return solver.init(operator, opts)
+    return solver.update(state, operator, opts)
+
+
+def _solve_only(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    solver: Any,
+    opts: dict[str, Any],
+    state: Any,
+    throw: bool,
+    traced_compute: bool = True,
+) -> Solution:
+    """Solve against `state` without tracking, shared by the impl and the JVP rule.
+
+    The rule solves both the primal and the tangent right-hand side through this body
+    with the same operator object, so the tangent solve's `update` is an identity no-op
+    and it reuses the primal's factorization. That is the reuse the custom rule exists
+    to create.
+
+    A tangent solve must keep the `lineax.linear_solve` primitive boundary even under a
+    `solve_trace`: the primitive's own JVP absorbs a higher-order differentiation, while
+    `compute` staged directly exposes the raw klujax solve, whose second-order tangent is
+    then silently dropped. So the rule passes `traced_compute=False` for its tangent
+    solves, trading away the tangent solve's in-`compute` trace records for correctness.
+    The primal solve has no tangent flowing into it, so it keeps the traced `compute`
+    and its records.
+    """
+    if tracing_active() and traced_compute:
+        # While a `solve_trace` is open, run `compute` directly instead of through
+        # lineax's `linear_solve` primitive, which does not propagate the trace's
+        # in-`compute` `io_callback`s (the solve and iterative-refinement steps). Off the
+        # trace path this is never taken, so ordinary solves keep lineax's behaviour.
+        # The `throw` check is applied by `linear_solve` outside the custom-JVP boundary.
+        return _traced_compute(operator, vector, solver, opts, state)
+    return _lx_linear_solve(
+        operator, vector, solver, options=opts, state=state, throw=throw
+    )
+
+
+def _stateful_solve_impl(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    state: Any,
+    *,
+    solver: Any,
+    options: dict[str, Any] | None,
+    throw: bool,
+) -> tuple[Solution, Any]:
+    """The solve body shared by `linear_solve` and its custom JVP rule.
+
+    Runs `init` or `update`, solves, and tracks the solution, exactly as `linear_solve`
+    does for a stateful solver.
+    """
+    opts = {} if options is None else options
+    state = _prepare_state(operator, state, solver, opts)
+    solution = _solve_only(operator, vector, solver, opts, state, throw)
+    # Order any later `release` after this solve. A no-op for solvers whose state owns
+    # nothing, such as `Spsolve`.
+    if hasattr(state, "track"):
+        state = state.track(solution)
+    return solution, state
+
+
+def _stateful_solve_jvp(
+    primals: tuple[Any, ...],
+    tangents: tuple[Any, ...],
+    *,
+    solver: Any,
+    options: dict[str, Any] | None,
+    throw: bool,
+) -> tuple[tuple[Solution, Any], tuple[Solution, Any]]:
+    """Tie the primal and tangent solves into one factorization, sharing the state.
+
+    The tangent of `x = A^(-1) b` for a square nonsingular `A` is
+    `x' = A^(-1) (b' - A'x)`, so both systems share the matrix and its factorization.
+    Rather than letting lineax's own JVP issue the tangent solve against a stopped
+    state, this rule runs the primal solve and then issues the tangent solve through
+    the same body with the same operator, so the tangent solve's `update` is an identity
+    no-op and it reuses the primal's factorization.
+
+    Both solves are issued against the prepared state and the track happens last,
+    after the tangent solve. This staging matters: the tracked state's tokens are
+    entangled with the primal solution, which orders a later refactor after it, but
+    only after the track. A tangent solve scheduled after the track could be overtaken
+    by the next solve's refactor, re-keying the handle it reads and forcing a rebuild
+    (the benign SUPERSEDED). Solving first and tracking once after both keeps the
+    tangent solve inside the primal's factorization window, and its solution is a
+    witness of the same track, so a later refactor waits for both solves.
+
+    Higher derivatives need no separate rule: taking a derivative of this rule's tangent
+    solve hits lineax's own JVP on the staged solves (which shares the state), and
+    reverse mode transposes the staged equations through JAX's built-in `custom_jvp`
+    transpose, so no custom transpose rule is required either.
+    """
+    operator, vector, state = primals
+    t_operator, t_vector, t_state = tangents
+    _assert_zero_tangent(t_state, "state")
+    if not solver.assume_full_rank():
+        raise NotImplementedError(
+            "`splineax.linear_solve` cannot differentiate a solve whose solver does "
+            "not assume a full-rank (square, nonsingular) operator."
+        )
+    opts = {} if options is None else options
+    prepared = _prepare_state(operator, state, solver, opts)
+    # Both solves inside the rule keep the `lineax.linear_solve` primitive boundary even
+    # under a `solve_trace`: the rule's own staging may be differentiated again (a
+    # second-order derivative), and the primitive's JVP absorbs that, while `compute`
+    # staged directly exposes the raw klujax solve, whose higher-order tangent is
+    # silently dropped. The trace still records these solves: the primitive's impl runs
+    # `compute`, whose io_callbacks fire the in-`compute` records at execution time.
+    solution = _solve_only(
+        operator, vector, solver, opts, prepared, throw, traced_compute=False
+    )
+
+    # Build the tangent right-hand side `b' - A'x`. With no tangent on the vector or
+    # the operator, the tangent solve is skipped entirely: the tangent outputs are
+    # symbolic zeros, so nothing is staged beyond the primal.
+    has_vector_tangent = _has_tangent(t_vector)
+    has_operator_tangent = _has_tangent(t_operator)
+    if not (has_vector_tangent or has_operator_tangent):
+        out_state = prepared
+        if hasattr(out_state, "track"):
+            out_state = out_state.track(solution)
+        return (solution, out_state), (
+            _tangent_zeros(solution),
+            _tangent_zeros(out_state),
+        )
+
+    vecs = []
+    if has_vector_tangent:
+        vecs.append(_instantiate_tangent(vector, t_vector))
+    if has_operator_tangent:
+        t_operator_op = linearise(
+            TangentLinearOperator(operator, _zero_leaves_as_none(t_operator))
+        )
+        # The `-A'x` term, conjugated the way lineax's own JVP does.
+        vecs.append((-(t_operator_op.mv(solution.value) ** ω)).ω)
+    t_rhs = vecs[0]
+    for vec in vecs[1:]:
+        t_rhs = jtu.tree_map(lambda a, b: a + b, t_rhs, vec)
+
+    # The tangent solve: the same operator object and the same prepared state, so
+    # `update` is a no-op and the factorization is shared with the primal solve. It keeps
+    # the lineax primitive boundary even under a trace, so a higher-order differentiation
+    # is absorbed by the primitive's own JVP instead of hitting the raw klujax solve.
+    t_solution = _solve_only(
+        operator, t_rhs, solver, opts, prepared, throw, traced_compute=False
+    )
+
+    # Track the primal solution onto the state once, after both solves. Only the
+    # primal solution can be a witness: JAX requires a custom-JVP rule's primal
+    # outputs to depend only on the primal inputs, and under `jacfwd`'s vmap the
+    # tangent solution is batched, so tracking it would batch the returned state.
+    # The tangent solve still reads the prepared state's tokens, which the track
+    # chains from, keeping it inside the primal's factorization window.
+    out_state = prepared
+    if hasattr(out_state, "track"):
+        out_state = out_state.track(solution)
+
+    # Only the solution value carries a tangent. The result code, the stats, and the
+    # states are constants of the differentiation, so their tangents are symbolic zeros
+    # with the primal's structure.
+    tangent_solution = Solution(
+        value=t_solution.value,
+        result=_tangent_zeros(solution.result),
+        stats=_tangent_zeros(solution.stats),
+        state=_tangent_zeros(solution.state),
+    )
+    return (solution, out_state), (tangent_solution, _tangent_zeros(out_state))
+
+
+# The filtered variant keeps every non-array argument (the solver, the options, the
+# `throw` flag) static across the boundary, which plain `jax.custom_jvp` cannot: it
+# flattens all arguments as pytrees, so a solver holding a non-array leaf (such as
+# `AutoSparseLinearSolver`'s `iterative_refinement` bool) would come back as a traced
+# array and break. Keyword arguments are always nondifferentiable here, so the rule
+# sees only the operator, the vector, and the state as differentiable, exactly the
+# arguments whose tangents the rule consumes.
+_stateful_solve = eqx.filter_custom_jvp(_stateful_solve_impl)
+_stateful_solve.def_jvp(_stateful_solve_jvp)
+
+
 @runtime_checkable
 class SparseLinearSolver(StatefulSolver[_StateT], Protocol[_StateT]):
     """Structural type for the sparse stateful solvers in this package.
@@ -270,28 +512,37 @@ def linear_solve(
             operator, vector, solver, options=opts, state=state, throw=throw
         )
         return solution, state
-    # `init`/`update` build the factorization. The operator is passed through as-is, so
-    # `update` can compare it by identity, and the solvers stop gradients on the values
-    # themselves before handing them to the native analyze and factor.
+    # `sentinel` is a plain marker object that cannot cross the custom_jvp boundary as
+    # a JAX value, and the impl treats `None` as "no state" anyway, so translate here.
     if state is sentinel:
-        state = solver.init(operator, opts)
-    else:
-        state = solver.update(state, operator, opts)
-    if tracing_active():
-        # While a `solve_trace` is open, run `compute` directly instead of through lineax's
-        # `linear_solve` primitive, which does not propagate the trace's in-`compute`
-        # `io_callback`s (the solve and iterative-refinement steps). Off the trace path this
-        # is never taken, so ordinary solves keep lineax's full behaviour.
-        solution = _traced_compute(operator, vector, solver, opts, state, throw)
-    else:
-        solution = _lx_linear_solve(
-            operator, vector, solver, options=options, state=state, throw=throw
+        state = None
+    # The state is a physical thread, not a differentiable quantity: a threaded state
+    # carries the previous operator's values in its token arrays, but the next `update`
+    # refactors from the new operator's values, so no solution genuinely depends on
+    # the old ones through it. Stop its gradient here so those token tangents (and the
+    # tangents of the entanglement edges) are dropped before crossing the boundary.
+    # The primal pass is unchanged, so the ordering the entanglement provides holds.
+    state = jax.lax.stop_gradient(state)
+    # Route through the custom-JVP solve, whose rule ties the primal and tangent
+    # solves into one factorization and threads the state between them. The solver, the
+    # options, and the `throw` flag cross as static keyword arguments, so they stay
+    # Python objects across the boundary rather than traced pytrees.
+    solution, out_state = _stateful_solve(
+        operator, vector, state, solver=solver, options=opts, throw=throw
+    )
+    # On the traced path the impl cannot apply the `throw` check itself: the check is
+    # an `error_if` cond, and staging a cond inside the custom-JVP boundary breaks
+    # JAX's cond transpose under reverse mode. Apply it here, outside the boundary,
+    # exactly as lineax's own primitive does at its top level.
+    if tracing_active() and throw:
+        value, result, stats = solution.value, solution.result, solution.stats
+        value, result, stats = result.error_if(
+            (value, result, stats), result != RESULTS.successful
         )
-    # Order any later `release` after this solve. A no-op for solvers whose state owns
-    # nothing, such as `Spsolve`.
-    if hasattr(state, "track"):
-        state = state.track(solution)
-    return solution, state
+        solution = Solution(
+            value=value, result=result, state=solution.state, stats=stats
+        )
+    return solution, out_state
 
 
 def _any_nonfinite(tree: PyTree[Any]) -> Any:
@@ -309,13 +560,16 @@ def _traced_compute(
     solver: Any,
     options: dict[str, Any],
     state: PyTree[Any],
-    throw: bool,
 ) -> Solution:
     """Solve by calling `solver.compute` directly, for use while a solve trace is open.
 
-    Mirrors `lineax._solve._linear_solve_impl` (the non-finite result adjustment and the
-    `throw` check) so the returned `Solution` matches the normal path, but keeps `compute`
-    outside lineax's `linear_solve` primitive so the trace's in-`compute` callbacks run.
+    Mirrors `lineax._solve._linear_solve_impl`'s non-finite result adjustment so the
+    returned `Solution` matches the normal path, but keeps `compute` outside lineax's
+    `linear_solve` primitive so the trace's in-`compute` callbacks run.
+
+    The `throw` check is deliberately absent: it is an `error_if` cond, and staging a
+    cond inside the custom-JVP boundary's jaxpr breaks JAX's cond transpose under
+    reverse mode. `linear_solve` applies the check itself, outside the boundary.
     """
     solution, result, stats = solver.compute(state, vector, options)
     result = RESULTS.where(
@@ -328,8 +582,4 @@ def _traced_compute(
         RESULTS.nonfinite_input,
         result,
     )
-    if throw:
-        solution, result, stats = result.error_if(
-            (solution, result, stats), result != RESULTS.successful
-        )
     return Solution(value=solution, result=result, state=state, stats=stats)

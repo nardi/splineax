@@ -105,6 +105,11 @@ _CREATED_OPS = frozenset({"analyze", "reanalyze", "spsolve"})
 _REUSED_OPS = frozenset({"solve_with_numeric", "tsolve_with_numeric", "solve_stateful"})
 # The floating-point output fields shown in scientific notation.
 _SCI_FIELDS = frozenset({"rcond", "residual_norm", "threshold"})
+
+# The rebuild-reason codes, shared by klujax and pardiso_mkl_jax (their RebuildReason
+# enums use the same numbering). Rendered by name so a trace line reads `rebuild="none"`
+# rather than `rebuild=0`; an unknown code falls back to the raw integer.
+_REBUILD_REASON_NAMES = ("none", "evicted", "freed", "superseded", "dtype", "unknown", "stale")
 # Free-text output fields, quoted so a space-joined line stays readable.
 _TEXT_FIELDS = frozenset({"reason", "note"})
 
@@ -120,6 +125,7 @@ _FIELD_ORDER = {
             "transposed",
             "outcome",
             "reused",
+            "rebuild",
             "rcond",
             "perturbed_pivots",
             "zero_pivot",
@@ -170,6 +176,10 @@ def _record_colour(record: TraceRecord) -> str:
 def _format_value(field: str, value: Any) -> str:
     if field in _SCI_FIELDS and isinstance(value, (int, float)):
         return f"{field}={value:.3e}"
+    if field == "rebuild" and isinstance(value, int) and 0 <= value < len(
+        _REBUILD_REASON_NAMES
+    ):
+        return f'{field}="{_REBUILD_REASON_NAMES[value]}"'
     if field in _TEXT_FIELDS:
         return f'{field}="{value}"'
     return f"{field}={value}"
@@ -340,7 +350,7 @@ def record_event(
     solver: str | None = None,
     *,
     inputs: Mapping[str, Any] | Callable[[], Mapping[str, Any]] | None = None,
-    outputs: Mapping[str, Any] | None = None,
+    outputs: Mapping[str, Any] | Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     dynamic: Mapping[str, Any] | None = None,
 ) -> None:
     """Append one operation to the active trace, or do nothing when tracing is off.
@@ -350,8 +360,11 @@ def record_event(
     arrays (rcond, residual norms, step, ...) read on the host through an unordered
     `io_callback` and merged into the outputs. `inputs` may be a callable, evaluated only when
     a trace is active, so a caller can defer work (like reading index arrays) that would
-    otherwise cost something when tracing is off. When no trace is active this returns before
-    emitting any callback, so it leaves the traced program untouched.
+    otherwise cost something when tracing is off. `outputs` may also be a callable taking the
+    converted dynamic values, so fields that depend on a runtime branch (like a `reason`
+    chosen by a `lax.cond`) can be built on the host, keeping the callback outside the cond.
+    When no trace is active this returns before emitting any callback, so it leaves the
+    traced program untouched.
     """
     trace = _active()
     if trace is None:
@@ -363,15 +376,19 @@ def record_event(
         input_fields = dict(inputs)
     else:
         input_fields = dict(inputs())
-    static_outputs = dict(outputs or {})
+    static_outputs = outputs if callable(outputs) else dict(outputs or {})
     dynamic_values = {
         key: jax.lax.stop_gradient(value) for key, value in (dynamic or {}).items()
     }
 
     def _callback(values: Mapping[str, Any]) -> None:
-        merged = dict(static_outputs)
+        merged: dict[str, Any] = {}
         for key, value in values.items():
             merged[key] = _to_python(value)
+        if callable(outputs):
+            merged.update(outputs(merged))
+        else:
+            merged.update(static_outputs)
         trace._append(
             TraceRecord(
                 operation=operation,

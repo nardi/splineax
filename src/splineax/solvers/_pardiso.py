@@ -4,6 +4,7 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from entangle_jax import entangle
 from jax.experimental.sparse import BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from lineax import AbstractLinearOperator, materialise
@@ -151,10 +152,6 @@ def _reanalyze_if_unstable(
     unstable = (iparm[13] > 0) | (iparm[29] != 0)
 
     def refresh() -> Any:
-        # Record the branch actually taken: the reused matching was unstable, so the analysis
-        # is rebuilt for these values and factored again.
-        reason = "Unstable pivots"
-        record_event("reanalyze", "Pardiso", outputs={"reason": reason})
         reanalyzed, _ = primitive.reanalyze(
             token,
             indptr,
@@ -162,7 +159,6 @@ def _reanalyze_if_unstable(
             values,
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
-        record_event("factor", "Pardiso", outputs={"reason": reason})
         refactored, _ = primitive.factor(
             reanalyzed,
             indptr,
@@ -172,6 +168,10 @@ def _reanalyze_if_unstable(
         )
         return refactored
 
+    # The cond picks only the token, so no record callback sits inside it (an IO effect in
+    # a cond breaks `vmap`-of-cond under a jitted forward-mode derivative). The caller
+    # records the branch through the `perturbed_pivots`/`zero_pivot` flags it already
+    # carries, building the reason on the host.
     return jax.lax.cond(unstable, refresh, lambda: token)
 
 
@@ -196,20 +196,30 @@ class _PardisoState(eqx.Module):
     sparsity_tag: object | None = eqx.field(static=True, default=None)
 
     def track(self, solution: Any) -> "_PardisoState":
-        """Return a state whose `release` is ordered after `solution`.
+        """Return a state ordered after `solution`, with or without tracing.
 
         Accepts the lineax `Solution` or a bare value pytree. A no-op when no analysis
-        has run yet, see `pardiso_mkl_jax` FactorizationToken.track.
+        has run yet. The counter stays a plain count of tracked solves, so a state
+        differs observably per tracked solve. The actual ordering comes from `entangle`:
+        the token it returns is a new value that depends on the solution, so a later
+        `release` (or any other use of the token) cannot be scheduled before the tracked
+        solve. This holds without any trace callbacks, so a traced run and an untraced
+        one order the native calls the same way.
         """
         if self.token is None:
             return self
         record_event("track")
         value = getattr(solution, "value", solution)
-        leaves = tuple(jax.tree_util.tree_leaves(value))
+        # The witness only establishes an execution-order dependency, so stop its
+        # gradient: a tracked state must stay usable inside `grad` of the solve.
+        witness = jax.lax.stop_gradient(value)
+        pmj = _pardiso_mkl_jax()
+        counted = self.token.n_dependent_solutions + jnp.int32(1)
+        token = pmj.FactorizationToken(self.token.id, counted)
         return _PardisoState(
             self.operator,
             self.csr,
-            self.token.track(*leaves),
+            entangle(token, witness),
             self.packed_structures,
             self.shape,
             self.transposed,
@@ -408,17 +418,25 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
         # `perturbed_pivots`/`zero_pivot` (iparm[13]/iparm[29]) drive the reanalyze fallback;
-        # `reused` is True when the reused matching factored stably. See
-        # `_reanalyze_if_unstable`.
+        # `reused` is True when the reused matching factored stably, and `reanalyzed` says
+        # the fallback rebuilt the analysis for these values. See `_reanalyze_if_unstable`,
+        # which runs after this record so the flags stay honest for both branches.
         unstable = (iparm[13] > 0) | (iparm[29] != 0)
         record_event(
             "refactor",
             "Pardiso",
-            outputs={"reason": "Reused matching"},
             dynamic={
                 "reused": ~unstable,
+                "reanalyzed": unstable,
                 "perturbed_pivots": iparm[13],
                 "zero_pivot": iparm[29] != 0,
+            },
+            outputs=lambda values: {
+                "reason": (
+                    "Reused matching"
+                    if values["reused"]
+                    else "Unstable pivots: reanalyzed for these values"
+                )
             },
         )
         token = _reanalyze_if_unstable(pmj, token, iparm, indptr, indices, values)
@@ -451,13 +469,13 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             pmj = _pardiso_mkl_jax()
             primitive = pmj.primitive
             indptr, indices, values = state.csr
-            record_event(
-                "solve_stateful",
-                "Pardiso",
-                inputs={"transposed": state.transposed} if state.transposed else None,
-            )
             # `solve_stateful` reuses the stored factorization, solving A^T when transposed.
-            solution, _ = primitive.solve_stateful(
+            # The third return value is the RebuildReason: whether the factorization was a
+            # cache hit or rebuilt from the token's carried arrays. A rebuild is still
+            # correct, only slower, so the trace reports it rather than the solve branching
+            # on it. The middle value is the final iparm, already decoded into the
+            # `perturbed_pivots`/`zero_pivot` flags the refactor path records.
+            solution, _, rebuild = primitive.solve_stateful(
                 state.token,
                 indptr,
                 indices,
@@ -465,6 +483,12 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
                 b[None, :],
                 matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
                 transpose=state.transposed,
+            )
+            record_event(
+                "solve_stateful",
+                "Pardiso",
+                inputs={"transposed": state.transposed} if state.transposed else None,
+                dynamic={"rebuild": rebuild},
             )
             solution = unravel_solution(solution[0], state.packed_structures)
             return solution, RESULTS.successful, {}
