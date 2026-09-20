@@ -303,32 +303,32 @@ def _reuse_or_refresh_numeric(
     floor = _REFACTOR_RCOND_FLOOR
 
     def reuse() -> NumericToken:
-        # Record the branch actually taken, so the log shows a refactor was reused and why.
-        record_event(
-            "refactor",
-            "KLU",
-            outputs={
-                "reused": True,
-                "reason": f"Pivots stable: no error and rcond > {floor:g}",
-            },
-            dynamic={"rcond": reciprocal_condition, "rebuild": rebuild},
-        )
         return refreshed
 
     def factor_fresh() -> NumericToken:
-        # A fresh factor rather than a refactor: motivate why the reuse was rejected.
-        record_event(
-            "factor",
-            "KLU",
-            outputs={
-                "reused": False,
-                "reason": f"Pivots unstable: error or rcond <= {floor:g}",
-            },
-            dynamic={"rcond": reciprocal_condition},
-        )
         return klujax.factor(row, col, values, symbol)
 
-    return jax.lax.cond(reuse_is_safe, reuse, factor_fresh)
+    # The cond picks only the token, so no record callback sits inside it (an IO effect in
+    # a cond breaks `vmap`-of-cond under a jitted forward-mode derivative). The branch flag
+    # rides out as a dynamic value, and the host callback picks the reason below.
+    chosen = jax.lax.cond(reuse_is_safe, reuse, factor_fresh)
+    record_event(
+        "refactor",
+        "KLU",
+        dynamic={
+            "reused": reuse_is_safe,
+            "rcond": reciprocal_condition,
+            "rebuild": rebuild,
+        },
+        outputs=lambda values: {
+            "reason": (
+                f"Pivots stable: no error and rcond > {floor:g}"
+                if values["reused"]
+                else f"Pivots unstable: error or rcond <= {floor:g}, factored fresh"
+            )
+        },
+    )
+    return chosen
 
 
 class KLU(AbstractLinearSolver[_KLUState]):

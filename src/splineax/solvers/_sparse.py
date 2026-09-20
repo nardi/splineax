@@ -256,6 +256,7 @@ def _solve_only(
     opts: dict[str, Any],
     state: Any,
     throw: bool,
+    traced_compute: bool = True,
 ) -> Solution:
     """Solve against `state` without tracking, shared by the impl and the JVP rule.
 
@@ -263,8 +264,16 @@ def _solve_only(
     with the same operator object, so the tangent solve's `update` is an identity no-op
     and it reuses the primal's factorization. That is the reuse the custom rule exists
     to create.
+
+    A tangent solve must keep the `lineax.linear_solve` primitive boundary even under a
+    `solve_trace`: the primitive's own JVP absorbs a higher-order differentiation, while
+    `compute` staged directly exposes the raw klujax solve, whose second-order tangent is
+    then silently dropped. So the rule passes `traced_compute=False` for its tangent
+    solves, trading away the tangent solve's in-`compute` trace records for correctness.
+    The primal solve has no tangent flowing into it, so it keeps the traced `compute`
+    and its records.
     """
-    if tracing_active():
+    if tracing_active() and traced_compute:
         # While a `solve_trace` is open, run `compute` directly instead of through
         # lineax's `linear_solve` primitive, which does not propagate the trace's
         # in-`compute` `io_callback`s (the solve and iterative-refinement steps). Off the
@@ -341,7 +350,15 @@ def _stateful_solve_jvp(
         )
     opts = {} if options is None else options
     prepared = _prepare_state(operator, state, solver, opts)
-    solution = _solve_only(operator, vector, solver, opts, prepared, throw)
+    # Both solves inside the rule keep the `lineax.linear_solve` primitive boundary even
+    # under a `solve_trace`: the rule's own staging may be differentiated again (a
+    # second-order derivative), and the primitive's JVP absorbs that, while `compute`
+    # staged directly exposes the raw klujax solve, whose higher-order tangent is
+    # silently dropped. The trace still records these solves: the primitive's impl runs
+    # `compute`, whose io_callbacks fire the in-`compute` records at execution time.
+    solution = _solve_only(
+        operator, vector, solver, opts, prepared, throw, traced_compute=False
+    )
 
     # Build the tangent right-hand side `b' - A'x`. With no tangent on the vector or
     # the operator, the tangent solve is skipped entirely: the tangent outputs are
@@ -371,8 +388,12 @@ def _stateful_solve_jvp(
         t_rhs = jtu.tree_map(lambda a, b: a + b, t_rhs, vec)
 
     # The tangent solve: the same operator object and the same prepared state, so
-    # `update` is a no-op and the factorization is shared with the primal solve.
-    t_solution = _solve_only(operator, t_rhs, solver, opts, prepared, throw)
+    # `update` is a no-op and the factorization is shared with the primal solve. It keeps
+    # the lineax primitive boundary even under a trace, so a higher-order differentiation
+    # is absorbed by the primitive's own JVP instead of hitting the raw klujax solve.
+    t_solution = _solve_only(
+        operator, t_rhs, solver, opts, prepared, throw, traced_compute=False
+    )
 
     # Track the primal solution onto the state once, after both solves. Only the
     # primal solution can be a witness: JAX requires a custom-JVP rule's primal

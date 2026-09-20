@@ -152,10 +152,6 @@ def _reanalyze_if_unstable(
     unstable = (iparm[13] > 0) | (iparm[29] != 0)
 
     def refresh() -> Any:
-        # Record the branch actually taken: the reused matching was unstable, so the analysis
-        # is rebuilt for these values and factored again.
-        reason = "Unstable pivots"
-        record_event("reanalyze", "Pardiso", outputs={"reason": reason})
         reanalyzed, _ = primitive.reanalyze(
             token,
             indptr,
@@ -163,7 +159,6 @@ def _reanalyze_if_unstable(
             values,
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
-        record_event("factor", "Pardiso", outputs={"reason": reason})
         refactored, _ = primitive.factor(
             reanalyzed,
             indptr,
@@ -173,6 +168,10 @@ def _reanalyze_if_unstable(
         )
         return refactored
 
+    # The cond picks only the token, so no record callback sits inside it (an IO effect in
+    # a cond breaks `vmap`-of-cond under a jitted forward-mode derivative). The caller
+    # records the branch through the `perturbed_pivots`/`zero_pivot` flags it already
+    # carries, building the reason on the host.
     return jax.lax.cond(unstable, refresh, lambda: token)
 
 
@@ -419,17 +418,25 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
         # `perturbed_pivots`/`zero_pivot` (iparm[13]/iparm[29]) drive the reanalyze fallback;
-        # `reused` is True when the reused matching factored stably. See
-        # `_reanalyze_if_unstable`.
+        # `reused` is True when the reused matching factored stably, and `reanalyzed` says
+        # the fallback rebuilt the analysis for these values. See `_reanalyze_if_unstable`,
+        # which runs after this record so the flags stay honest for both branches.
         unstable = (iparm[13] > 0) | (iparm[29] != 0)
         record_event(
             "refactor",
             "Pardiso",
-            outputs={"reason": "Reused matching"},
             dynamic={
                 "reused": ~unstable,
+                "reanalyzed": unstable,
                 "perturbed_pivots": iparm[13],
                 "zero_pivot": iparm[29] != 0,
+            },
+            outputs=lambda values: {
+                "reason": (
+                    "Reused matching"
+                    if values["reused"]
+                    else "Unstable pivots: reanalyzed for these values"
+                )
             },
         )
         token = _reanalyze_if_unstable(pmj, token, iparm, indptr, indices, values)
