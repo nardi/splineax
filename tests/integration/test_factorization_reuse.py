@@ -189,6 +189,48 @@ def _profile_reuse(fn: Callable[..., object], *args: object) -> tuple[object, _R
     )
 
 
+def _rebuilds(fn: Callable[..., object], *args: object) -> tuple[object, dict[str, int]]:
+    """Run `fn` with the native rebuild counter reset, returning output and reasons.
+
+    A rebuilt handle is always correct but costs the rebuild: an evicted, freed, or
+    superseded factorization is rebuilt from the arrays its token carries. The returned
+    mapping holds the nonzero per-reason counts, so a test can assert both how many
+    rebuilds happened and why.
+    """
+    import klujax
+
+    klujax.reset_rebuild_count()
+    output = fn(*args)
+    stats = {
+        reason.name: count
+        for reason, count in klujax.rebuild_stats().items()
+        if count
+    }
+    return output, stats
+
+
+def _assert_superseded_rebuild(
+    stats: dict[str, int], context: str, expected: int = 1
+) -> None:
+    """Assert a jitted run's rebuilds are exactly the benign superseded ones.
+
+    Inside one compiled program, `refactor` re-keys the numeric handle while the first
+    solve's `solve_with_numeric` still names the pre-refactor one. With no profile open
+    there is no callback edge forcing the solve first, so XLA may schedule the refactor
+    before it, and the solve rebuilds its factorization from the arrays its token
+    carries: one SUPERSEDED rebuild. That is the self-healing stale-alias case, correct
+    but slower, so it is asserted exactly rather than banned.
+    """
+    assert stats == {"SUPERSEDED": expected}, (
+        f"{context}: expected {expected} superseded rebuild(s) from XLA scheduling the "
+        f"refactor ahead of the first solve, got {stats}"
+    )
+
+
+def _args() -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    return _values(), _values2(), _b1(), _b2()
+
+
 def _dense_reference(values1: jax.Array, values2: jax.Array) -> tuple[np.ndarray, ...]:
     """The dense reference solutions and their Jacobians, built from the same arrays."""
     indices = _sparsity().indices
@@ -221,6 +263,10 @@ def test_two_matrix_solve_reuses_analysis_eagerly() -> None:
     _assert_full_reuse(reuse, "eager two-solve")
     assert reuse.solves == 2
     assert reuse.reused_updates == 1
+    # Eagerly nothing is rebuilt: each call runs to completion before the next, so the
+    # refactor cannot overtake the first solve.
+    _, rebuilds = _rebuilds(fn, _values(), _values2(), _b1(), _b2())
+    assert rebuilds == {}
 
 
 def test_two_matrix_solve_reuses_analysis_under_jit() -> None:
@@ -233,6 +279,15 @@ def test_two_matrix_solve_reuses_analysis_under_jit() -> None:
     _assert_full_reuse(reuse, "jitted two-solve")
     assert reuse.solves == 2
     assert reuse.reused_updates == 1
+    # Inside one compiled program the refactor may be scheduled ahead of the first
+    # solve, re-keying the handle it uses, so exactly one benign superseded rebuild.
+    # The profile itself forces solve-before-refactor ordering, so rebuilds are counted
+    # on a fresh unprofiled call of the same jitted function.
+    unprofiled = jax.jit(_explicit_two_matrix_fn(_tag(), splx.KLU()))
+    # Warm the cache, so the count reflects a steady-state call.
+    unprofiled(*_args())
+    _, stats = _rebuilds(unprofiled, *_args())
+    _assert_superseded_rebuild(stats, "jitted two-solve")
 
 
 def _derivative_suite(
@@ -326,6 +381,12 @@ def test_derivatives_reuse_the_shared_analysis(wrt: str) -> None:
         # A reverse-mode derivative reuses the same factorization for its transposed
         # solve too, so it never re-analyzes.
         assert reuse.analyze == 1, f"{name} wrt {wrt}"
+        # Rebuilds: exactly the one benign superseded case from the compiled program's
+        # refactor overtaking the first solve, never an eviction or an unknown handle.
+        # Warm the compiled cache first, so the count reflects a steady-state call.
+        derivative(*args)
+        _, stats = _rebuilds(derivative, *args)
+        _assert_superseded_rebuild(stats, f"{name} wrt {wrt}")
 
 
 def test_transform_reuses_as_much_as_the_explicit_threading() -> None:
@@ -346,6 +407,11 @@ def test_transform_reuses_as_much_as_the_explicit_threading() -> None:
     _, reuse_run = _profile_reuse(transformed, values1, values2, b1, b2)
     _, reuse_explicit = _profile_reuse(explicit, values1, values2, b1, b2)
     assert reuse_run == reuse_explicit
+    # And neither order silently rebuilds a factorization from a carried-away handle
+    # when run eagerly.
+    for candidate in (transformed, explicit):
+        _, stats = _rebuilds(candidate, values1, values2, b1, b2)
+        assert stats == {}
 
 
 def test_transform_before_or_after_the_derivative_agrees() -> None:
@@ -379,11 +445,22 @@ def test_transform_before_or_after_the_derivative_agrees() -> None:
     want = transform_of_derivative(values1, values2)
     _assert_derivatives_match(got, want, "transform-before vs transform-after")
     # The transform-first order reuses: one analyze, one factor, one refactor in its
-    # compiled program. The transform-after order threads the derivative's own solves,
-    # which came from unthreaded tangent solves, so its reuse differs; both orders are
-    # recorded here so a change in either is noticed.
+    # compiled program, and no native rebuilds.
     reuse_before = _jaxpr_reuse(derivative_of_transform, values1, values2)
     _assert_full_reuse(reuse_before, "derivative of transformed")
+    # Rebuilds: the transform-first order compiles the refactor and the first solve into
+    # one program, so it shows the one benign superseded rebuild. The transform-after
+    # order threads the derivative's already-unthreaded tangent solves, whose factor
+    # handles were released before the threading sees them, so it rebuilds nothing new.
+    # Warm both caches, so the counts reflect steady-state calls.
+    derivative_of_transform(values1, values2)
+    _, stats = _rebuilds(derivative_of_transform, values1, values2)
+    _assert_superseded_rebuild(stats, "derivative of transformed")
+    transform_of_derivative(values1, values2)
+    _, stats = _rebuilds(transform_of_derivative, values1, values2)
+    assert stats == {}, "transform of derivative rebuilt a factorization"
+    # The transform-after order threads the derivative's own solves, so its reuse
+    # differs; it is still recorded so a change in either order is noticed.
     reuse_after = _jaxpr_reuse(transform_of_derivative, values1, values2)
     assert reuse_after.analyze >= 1
 
