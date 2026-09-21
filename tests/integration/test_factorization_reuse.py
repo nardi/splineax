@@ -209,21 +209,32 @@ def _rebuilds(fn: Callable[..., object], *args: object) -> tuple[object, dict[st
     return output, stats
 
 
+def _assert_no_rebuilds(stats: dict[str, int], context: str) -> None:
+    """Assert a jitted run rebuilds nothing.
+
+    `track` entangles the factorization tokens with the tracked solution, an ordering
+    dependency XLA cannot reorder away, so the refactor for the next update cannot be
+    scheduled before the solve that uses the previous handle, and no handle ever goes
+    stale. A rebuild is always correct, only slower, so zero is asserted exactly.
+    """
+    assert stats == {}, f"{context}: expected no rebuilds, got {stats}"
+
+
 def _assert_superseded_rebuild(
     stats: dict[str, int], context: str, expected: int = 1
 ) -> None:
-    """Assert a jitted run's rebuilds are exactly the benign superseded ones.
+    """Assert the rebuilds are exactly the benign superseded tangent-solve ones.
 
-    Inside one compiled program, `refactor` re-keys the numeric handle while the first
-    solve's `solve_with_numeric` still names the pre-refactor one. With no profile open
-    there is no callback edge forcing the solve first, so XLA may schedule the refactor
-    before it, and the solve rebuilds its factorization from the arrays its token
-    carries: one SUPERSEDED rebuild. That is the self-healing stale-alias case, correct
-    but slower, so it is asserted exactly rather than banned.
+    A forward-mode tangent on the matrix values makes lineax's JVP issue a tangent
+    solve against the same numeric handle as the tracked primal solve. Only the primal
+    solution is entangled with the tokens, so the tangent solve can be superseded by
+    the next refactor inside one compiled program: it rebuilds its factorization from
+    the arrays its token carries, correct but slower. Asserted exactly rather than
+    banned.
     """
     assert stats == {"SUPERSEDED": expected}, (
-        f"{context}: expected {expected} superseded rebuild(s) from XLA scheduling the "
-        f"refactor ahead of the first solve, got {stats}"
+        f"{context}: expected {expected} superseded rebuild(s) from a tangent solve "
+        f"sharing the tracked primal handle, got {stats}"
     )
 
 
@@ -279,15 +290,13 @@ def test_two_matrix_solve_reuses_analysis_under_jit() -> None:
     _assert_full_reuse(reuse, "jitted two-solve")
     assert reuse.solves == 2
     assert reuse.reused_updates == 1
-    # Inside one compiled program the refactor may be scheduled ahead of the first
-    # solve, re-keying the handle it uses, so exactly one benign superseded rebuild.
-    # The profile itself forces solve-before-refactor ordering, so rebuilds are counted
-    # on a fresh unprofiled call of the same jitted function.
+    # The entangled `track` orders the solve before the next refactor inside one
+    # compiled program, so the handle never goes stale and nothing is rebuilt.
     unprofiled = jax.jit(_explicit_two_matrix_fn(_tag(), splx.KLU()))
     # Warm the cache, so the count reflects a steady-state call.
     unprofiled(*_args())
     _, stats = _rebuilds(unprofiled, *_args())
-    _assert_superseded_rebuild(stats, "jitted two-solve")
+    _assert_no_rebuilds(stats, "jitted two-solve")
 
 
 def _derivative_suite(
@@ -381,12 +390,19 @@ def test_derivatives_reuse_the_shared_analysis(wrt: str) -> None:
         # A reverse-mode derivative reuses the same factorization for its transposed
         # solve too, so it never re-analyzes.
         assert reuse.analyze == 1, f"{name} wrt {wrt}"
-        # Rebuilds: exactly the one benign superseded case from the compiled program's
-        # refactor overtaking the first solve, never an eviction or an unknown handle.
+        # Rebuilds: the entangled `track` keeps the handle valid across the compiled
+        # program for the primal solves. A forward-mode tangent on the matrix values
+        # adds a tangent solve that lineax's JVP issues against the same numeric
+        # handle, and only the primal solution is tracked, so exactly one tangent
+        # solve can still be superseded. Everything else rebuilds nothing.
         # Warm the compiled cache first, so the count reflects a steady-state call.
         derivative(*args)
         _, stats = _rebuilds(derivative, *args)
-        _assert_superseded_rebuild(stats, f"{name} wrt {wrt}")
+        if wrt == "values" and name in ("jacfwd", "jacfwd_jacfwd", "jacrev_jacrev",
+                                        "jacfwd_jacrev"):
+            _assert_superseded_rebuild(stats, f"{name} wrt {wrt}")
+        else:
+            _assert_no_rebuilds(stats, f"{name} wrt {wrt}")
 
 
 def test_transform_reuses_as_much_as_the_explicit_threading() -> None:
@@ -448,14 +464,12 @@ def test_transform_before_or_after_the_derivative_agrees() -> None:
     # compiled program, and no native rebuilds.
     reuse_before = _jaxpr_reuse(derivative_of_transform, values1, values2)
     _assert_full_reuse(reuse_before, "derivative of transformed")
-    # Rebuilds: the transform-first order compiles the refactor and the first solve into
-    # one program, so it shows the one benign superseded rebuild. The transform-after
-    # order threads the derivative's already-unthreaded tangent solves, whose factor
-    # handles were released before the threading sees them, so it rebuilds nothing new.
+    # Rebuilds: the entangled `track` orders the solves before the refactor in both
+    # orders, so neither rebuilds a factorization from a stale handle.
     # Warm both caches, so the counts reflect steady-state calls.
     derivative_of_transform(values1, values2)
     _, stats = _rebuilds(derivative_of_transform, values1, values2)
-    _assert_superseded_rebuild(stats, "derivative of transformed")
+    _assert_no_rebuilds(stats, "derivative of transformed")
     transform_of_derivative(values1, values2)
     _, stats = _rebuilds(transform_of_derivative, values1, values2)
     assert stats == {}, "transform of derivative rebuilt a factorization"
