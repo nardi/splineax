@@ -22,6 +22,7 @@ from lineax import AbstractLinearOperator, conj
 from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 
+from splineax._profile import compute_scope, record_operation
 from splineax.solvers._sparse import SparseLinearSolver, _Sparsity
 from splineax.solvers._stateful import TrackingSolverState
 
@@ -80,6 +81,20 @@ def iterative_refinement(
     floor = _CONVERGENCE_FLOOR_ULPS * jnp.finfo(residual_dtype).eps
     threshold = jnp.maximum(tol, floor) * _tree_norm(vector)
 
+    # A solve that is already within the tolerance runs no correction at all. `started`
+    # then stays False and the refinement records below are gated off, leaving a profile
+    # that looks as if refinement was not used. The gate rides out as a dynamic value
+    # rather than placing the record callbacks inside a `lax.cond`, where an IO effect
+    # breaks `vmap`-of-cond under a jitted forward-mode derivative.
+    started = (_tree_norm(r0) > threshold) & (max_steps > 0)
+
+    record_operation(
+        "refine_start",
+        "IterativeRefinement",
+        dynamic={"residual_norm": _tree_norm(r0), "threshold": threshold},
+        condition=started,
+    )
+
     def cond(carry: tuple[PyTree[Array], PyTree[Array], Array]) -> Array:
         _, residual_value, step = carry
         return (step < max_steps) & (_tree_norm(residual_value) > threshold)
@@ -90,13 +105,29 @@ def iterative_refinement(
         x, residual_value, step = carry
         correction = solve(residual_value)
         x = _tree_add(x, correction)
-        return x, residual(x), step + 1
+        new_residual = residual(x)
+        record_operation(
+            "refine_step",
+            "IterativeRefinement",
+            dynamic={"step": step + 1, "residual_norm": _tree_norm(new_residual)},
+        )
+        return x, new_residual, step + 1
 
-    x, final_residual, _ = jax.lax.while_loop(cond, body, (x0, r0, jnp.array(0)))
+    x, final_residual, steps = jax.lax.while_loop(cond, body, (x0, r0, jnp.array(0)))
     converged = _tree_norm(final_residual) <= threshold
+    record_operation(
+        "refine_result",
+        "IterativeRefinement",
+        dynamic={
+            "step": steps,
+            "residual_norm": _tree_norm(final_residual),
+            "converged": converged,
+        },
+        condition=started,
+    )
+    result = RESULTS.where(converged, RESULTS.successful, RESULTS.max_steps_reached)
     # NaN out a solution that never met the tolerance, so the caller sees the failure.
     solution = jtu.tree_map(lambda leaf: jnp.where(converged, leaf, jnp.nan), x)
-    result = RESULTS.where(converged, RESULTS.successful, RESULTS.max_steps_reached)
     return solution, result
 
 
@@ -217,9 +248,12 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
             )
             return solution
 
-        solution, result = iterative_refinement(
-            solve, operator, vector, self.tol, self.max_steps
-        )
+        # The outermost `compute`, so it opens the generic `compute` boundary. The inner
+        # solver's per-step solves nest under it (see `compute_scope`).
+        with compute_scope():
+            solution, result = iterative_refinement(
+                solve, operator, vector, self.tol, self.max_steps
+            )
         return solution, result, {}
 
     def transpose(

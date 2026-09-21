@@ -1,9 +1,10 @@
 """KLU-specific tests for factorization reuse and token lifecycle.
 
 These check behaviour unique to `KLU`: `init` analyzes and factorizes so `compute` reuses
-the numeric factorization through `solve_with_numeric`, `update` on a matching pattern
-reuses the symbolic token and refactors, `transpose` reuses the factorization through
-`tsolve_with_numeric`, `conj` reuses the symbolic token, and `release` frees both handles.
+the numeric factorization through `solve_with_numeric_with_status`, `update` on a matching
+pattern reuses the symbolic token and refactors, `transpose` reuses the factorization
+through `tsolve_with_numeric_with_status`, `conj` reuses the symbolic token, and `release`
+frees both handles.
 
 The solver-agnostic contract lives in [test_factorization.py](test_factorization.py) and
 the basic solve suite in [test_solvers.py](test_solvers.py).
@@ -36,7 +37,7 @@ def _spy(function_name: str) -> Generator[list[bool], None, None]:
     """Record every call to a named function on the `klujax` module.
 
     `KLU` reaches its klujax functions through `_klujax()` (the module) at call time, so
-    replacing a module attribute intercepts both eager and traced paths. A `list[bool]`
+    replacing a module attribute intercepts both eager and profiled paths. A `list[bool]`
     keeps the log truthful under jit, where each trace-time call appends one entry.
     """
     import klujax as klu
@@ -58,11 +59,14 @@ def _spy(function_name: str) -> Generator[list[bool], None, None]:
 def test_init_computes_with_solve_with_numeric(
     make_operator: OperatorFactory,
 ) -> None:
-    """`init` factorizes eagerly, so `compute` reuses it through `solve_with_numeric`
-    rather than the one-shot `solve`."""
+    """`init` factorizes eagerly, so `compute` reuses it through the status-reporting
+    `solve_with_numeric_with_status` rather than the one-shot `solve`."""
     operator = make_operator(SQUARE_MATRIX)
     solver = KLU()
-    with _spy("solve_with_numeric") as numeric_calls, _spy("solve") as solve_calls:
+    with (
+        _spy("solve_with_numeric_with_status") as numeric_calls,
+        _spy("solve") as solve_calls,
+    ):
         state = solver.init(operator, {})
         solver.compute(state, RIGHT_HAND_SIDE, {})
     assert numeric_calls, "compute did not reuse the numeric factorization"
@@ -140,19 +144,23 @@ def test_update_falls_back_when_reused_pivots_go_bad() -> None:
 
 
 def test_transpose_reuses_factorization_via_tsolve() -> None:
-    """`transpose` reuses the same tokens and solves A^T through `tsolve_with_numeric`."""
+    """`transpose` reuses the same tokens and solves A^T through
+    `tsolve_with_numeric_with_status`."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = KLU()
     expected = jnp.linalg.solve(
         np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
     )
-    with _spy("tsolve_with_numeric") as tsolve_calls, _spy("analyze") as analyze_calls:
+    with (
+        _spy("tsolve_with_numeric_with_status") as tsolve_calls,
+        _spy("analyze") as analyze_calls,
+    ):
         state = solver.init(operator, {})
         transposed, _ = solver.transpose(state, {})
         assert transposed.symbol is state.symbol
         assert transposed.numeric is state.numeric
         solution = solver.compute(transposed, RIGHT_HAND_SIDE, {})[0]
-    assert tsolve_calls, "transpose did not use tsolve_with_numeric"
+    assert tsolve_calls, "transpose did not use tsolve_with_numeric_with_status"
     assert len(analyze_calls) == 1, "transpose re-analyzed the pattern"
     assert jnp.allclose(solution, expected, atol=1e-5)
 
