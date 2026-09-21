@@ -4,6 +4,7 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from entangle_jax import entangle
 from jax.experimental.sparse import BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from lineax import AbstractLinearOperator, materialise
@@ -195,20 +196,27 @@ class _PardisoState(eqx.Module):
     sparsity_tag: object | None = eqx.field(static=True, default=None)
 
     def track(self, solution: Any) -> "_PardisoState":
-        """Return a state whose `release` is ordered after `solution`.
+        """Return a copy of the state dependent on `solution`.
 
         Accepts the lineax `Solution` or a bare value pytree. A no-op when no analysis
-        has run yet, see `pardiso_mkl_jax` FactorizationToken.track.
+        has run yet. The state becomes dependent on the solution values, so that further
+        operations on it will be ordered after this call.
         """
         if self.token is None:
             return self
         record_operation("track")
         value = getattr(solution, "value", solution)
-        leaves = tuple(jax.tree_util.tree_leaves(value))
+        # The witness only establishes an execution-order dependency, so stop its
+        # gradient: a tracked state must stay usable inside `grad` of the solve.
+        witness = jax.lax.stop_gradient(value)
+        counted = self.token.n_dependent_solutions + jnp.int32(1)
+        token = eqx.tree_at(
+            lambda token: token.n_dependent_solutions, self.token, counted
+        )
         return _PardisoState(
             self.operator,
             self.csr,
-            self.token.track(*leaves),
+            entangle(token, witness),
             self.packed_structures,
             self.shape,
             self.transposed,

@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from asdex import ColoredPattern
+from entangle_jax import entangle
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import NumericToken, SymbolToken
@@ -173,16 +174,29 @@ class _KLUState(eqx.Module):
     sparsity_tag: object | None = eqx.field(static=True, default=None)
 
     def track(self, solution: Any) -> "_KLUState":
-        """Return a state whose `release` is ordered after `solution`.
+        """Return a copy of the state dependent on `solution`.
 
-        Accepts the lineax `Solution` or a bare value pytree. The solution arrays become
-        ordering dependencies on the tokens, see klujax `SymbolToken.track`.
+        Accepts the lineax `Solution` or a bare value pytree. The state becomes dependent
+        on the solution values, so that further operations on it will be ordered after
+        this call.
         """
         record_operation("track")
         value = getattr(solution, "value", solution)
-        leaves = tuple(jax.tree_util.tree_leaves(value))
-        symbol = self.symbol.track(*leaves)
-        numeric = None if self.numeric is None else self.numeric.track(*leaves)
+        # The witness only establishes an execution-order dependency, so stop its
+        # gradient: a tracked state must stay usable inside `grad` of the solve.
+        witness = jax.lax.stop_gradient(value)
+        counted = self.symbol.n_dependent_solutions + jnp.int32(1)
+        symbol = eqx.tree_at(
+            lambda token: token.n_dependent_solutions, self.symbol, counted
+        )
+        symbol = entangle(symbol, witness)
+        numeric = None
+        if self.numeric is not None:
+            counted = self.numeric.n_dependent_solutions + jnp.int32(1)
+            numeric = eqx.tree_at(
+                lambda token: token.n_dependent_solutions, self.numeric, counted
+            )
+            numeric = entangle(numeric, witness)
         return _KLUState(
             self.operator,
             self.coo,
