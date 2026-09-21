@@ -17,6 +17,7 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
+from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -26,8 +27,10 @@ from splineax.solvers._klu import COMPLEX_DTYPES, _extract_pattern
 from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
+    profile_inputs,
     sparse_indices_sorted,
     sparsity_pattern_tag,
+    sparsity_reuse_block,
     warn_if_unsorted,
 )
 
@@ -164,6 +167,10 @@ def _reanalyze_if_unstable(
         )
         return refactored
 
+    # The cond picks only the token, so no record callback sits inside it (an IO effect in
+    # a cond breaks `vmap`-of-cond under a jitted forward-mode derivative). The caller
+    # records the branch through the `perturbed_pivots`/`zero_pivot` flags it already
+    # carries, building the reason on the host.
     return jax.lax.cond(unstable, refresh, lambda: token)
 
 
@@ -195,6 +202,7 @@ class _PardisoState(eqx.Module):
         """
         if self.token is None:
             return self
+        record_operation("track")
         value = getattr(solution, "value", solution)
         leaves = tuple(jax.tree_util.tree_leaves(value))
         return _PardisoState(
@@ -211,6 +219,8 @@ class _PardisoState(eqx.Module):
         """Free the native factorization, ordered after any tracked solves."""
         if self.token is None:
             return
+        record_operation("release")
+        record_operation("release", "Pardiso")
         _pardiso_mkl_jax().primitive.release(self.token)
 
 
@@ -257,9 +267,11 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         primitive = pmj.primitive
         # `analyze` and `factor` return `(token, final_iparm)`. Only the token is kept;
         # the diagnostics iparm is dropped.
+        record_operation("analyze", "Pardiso")
         token, _ = primitive.analyze(
             indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
         )
+        record_operation("factor", "Pardiso")
         token, _ = primitive.factor(
             token,
             indptr,
@@ -285,6 +297,14 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             raise ValueError(
                 "`Pardiso` may only be used for linear solves with square matrices"
             )
+        record_operation(
+            "init",
+            inputs=lambda: profile_inputs(
+                operator,
+                operator_pattern_tag(operator),
+                (operator.out_size(), operator.in_size()),
+            ),
+        )
         return self._analyze_and_factor(operator, operator_pattern_tag(operator))
 
     def init_symbolic(
@@ -303,6 +323,14 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             raise ValueError(
                 f"`Pardiso.init_symbolic` requires a square matrix; got shape {shape}."
             )
+        # Deferred: no analyze runs here, only the pattern is recorded (see the docstring).
+        record_operation(
+            "init_symbolic",
+            inputs=lambda: profile_inputs(
+                sparsity, sparsity_pattern_tag(sparsity), shape
+            ),
+            outputs={"note": "deferred"},
+        )
         return _PardisoState(
             None,
             None,
@@ -328,18 +356,36 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         del options
         if operator is state.operator:
             # Nothing changed, so this is a no-op.
+            record_operation(
+                "update",
+                inputs=lambda: profile_inputs(
+                    operator, operator_pattern_tag(operator), state.shape
+                ),
+                outputs={"outcome": "noop", "reason": "Same operator"},
+            )
             return state
         tag = operator_pattern_tag(operator)
-        same_pattern = (
-            state.token is not None
-            and state.sparsity_tag is not None
-            and tag is not None
-            and state.sparsity_tag == tag
-        )
-        if same_pattern:
+        if state.token is None:
+            # A symbolic-only state from `init_symbolic` deferred the analysis, so the first
+            # update must analyze from scratch regardless of the tag.
+            reuse_block: str | None = "Symbolic-only state"
+        else:
+            reuse_block = sparsity_reuse_block(state.sparsity_tag, tag)
+        if reuse_block is None:
             # Same pattern, new values. Refactor against the stored analysis.
+            record_operation(
+                "update",
+                inputs=lambda: profile_inputs(operator, tag, state.shape),
+                outputs={"outcome": "reused", "reason": "Identical sparsity tag"},
+            )
             return self._refactor(state, operator, tag)
-        # New pattern, or no analysis yet, so analyze from scratch.
+        # Cannot reuse the analysis, so analyze from scratch. Recorded as a rebuild, with the
+        # reason, so the analyze below is attributed to it rather than read as a first init.
+        record_operation(
+            "update",
+            inputs=lambda: profile_inputs(operator, tag, state.shape),
+            outputs={"outcome": "rebuilt", "reason": reuse_block},
+        )
         return self._analyze_and_factor(operator, tag)
 
     def _refactor(
@@ -359,6 +405,28 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             indices,
             values,
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+        )
+        # `perturbed_pivots`/`zero_pivot` (iparm[13]/iparm[29]) are used to decide whether
+        # the factorization is still usable, or whether it needs to be rebuilt. `reused` is True
+        # when the reused matching factored stably, and `reanalyzed` says the fallback
+        # rebuilt the analysis for these values. See `_reanalyze_if_unstable` for the concrete logic.
+        unstable = (iparm[13] > 0) | (iparm[29] != 0)
+        record_operation(
+            "refactor",
+            "Pardiso",
+            dynamic={
+                "reused": ~unstable,
+                "reanalyzed": unstable,
+                "perturbed_pivots": iparm[13],
+                "zero_pivot": iparm[29] != 0,
+            },
+            outputs=lambda values: {
+                "reason": (
+                    "Reused matching"
+                    if values["reused"]
+                    else "Unstable pivots: reanalyzed for these values"
+                )
+            },
         )
         token = _reanalyze_if_unstable(pmj, token, iparm, indptr, indices, values)
         return _PardisoState(
@@ -383,24 +451,36 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
                 "`Pardiso` cannot solve with a symbolic-only state; call `update` with "
                 "an operator first."
             )
-        b = ravel_vector(vector, state.packed_structures)
-        b = _ensure_cpu(b)
-        b = b.astype(jnp.float64)
-        pmj = _pardiso_mkl_jax()
-        primitive = pmj.primitive
-        indptr, indices, values = state.csr
-        # `solve_stateful` reuses the stored factorization, solving A^T when transposed.
-        solution, _, _ = primitive.solve_stateful(
-            state.token,
-            indptr,
-            indices,
-            values,
-            b[None, :],
-            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
-            transpose=state.transposed,
-        )
-        solution = unravel_solution(solution[0], state.packed_structures)
-        return solution, RESULTS.successful, {}
+        with compute_scope():
+            b = ravel_vector(vector, state.packed_structures)
+            b = _ensure_cpu(b)
+            b = b.astype(jnp.float64)
+            pmj = _pardiso_mkl_jax()
+            primitive = pmj.primitive
+            indptr, indices, values = state.csr
+            # `solve_stateful` reuses the stored factorization, solving A^T when transposed.
+            # The third return value is the RebuildReason: whether the factorization was a
+            # cache hit or rebuilt from the token's carried arrays. A rebuild is still
+            # correct, only slower, so the profile reports it rather than the solve branching
+            # on it. The middle value is the final iparm, already decoded into the
+            # `perturbed_pivots`/`zero_pivot` flags the refactor path records.
+            solution, _, rebuild = primitive.solve_stateful(
+                state.token,
+                indptr,
+                indices,
+                values,
+                b[None, :],
+                matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+                transpose=state.transposed,
+            )
+            record_operation(
+                "solve_stateful",
+                "Pardiso",
+                inputs={"transposed": state.transposed} if state.transposed else None,
+                dynamic={"rebuild": rebuild},
+            )
+            solution = unravel_solution(solution[0], state.packed_structures)
+            return solution, RESULTS.successful, {}
 
     def transpose(
         self, state: _PardisoState, options: dict[str, Any]

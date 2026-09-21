@@ -17,6 +17,7 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
+from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -24,6 +25,8 @@ from splineax.operators._jacobian import (
 )
 from splineax.solvers._sparse import (
     _Sparsity,
+    operator_pattern_tag,
+    profile_inputs,
     sparse_indices_sorted,
     warn_if_unsorted,
 )
@@ -47,10 +50,12 @@ class _SpsolveState(eqx.Module):
     def track(self, solution: Any) -> "_SpsolveState":
         """No-op, since a Spsolve state owns no memory to order a release after."""
         del solution
+        record_operation("track")
         return self
 
     def release(self) -> None:
         """No-op, since a Spsolve state owns nothing to free."""
+        record_operation("release")
 
 
 class ReorderingScheme(IntEnum):
@@ -111,6 +116,25 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _SpsolveState:
+        record_operation(
+            "init",
+            inputs=lambda: profile_inputs(
+                operator,
+                operator_pattern_tag(operator),
+                (operator.out_size(), operator.in_size()),
+            ),
+        )
+        return self._build(operator, options)
+
+    def _build(
+        self, operator: AbstractLinearOperator, options: dict[str, Any]
+    ) -> _SpsolveState:
+        """Sort `operator` into a solvable CSR state, no factorization.
+
+        Shared by `init` and `update`'s rebuild path, so a rebuild does not re-emit an `init`
+        boundary. `Spsolve` factors and solves in one fused call, so there is no analyze or
+        factor to record here.
+        """
         if operator.in_size() != operator.out_size():
             raise ValueError(
                 "`Spsolve` may only be used for linear solves with square matrices"
@@ -123,7 +147,7 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         sorted_asserted = sparse_indices_sorted in getattr(operator, "tags", ())
         match operator:
             case SparseJacobianLinearOperator():
-                return self.init(materialise(operator), options)
+                return self._build(materialise(operator), options)
             case BCSRLinearOperator(matrix):
                 # Round-trip an unsorted `BCSR` through `BCOO`, since `BCSR.from_bcoo`
                 # sorts.
@@ -158,6 +182,7 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         that `update` fills with the first real operator.
         """
         del sparsity, options
+        record_operation("init_symbolic", outputs={"note": "no-op"})
         return _SpsolveState(None, None, None)
 
     def update(
@@ -170,9 +195,25 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
 
         Repeated calls with the same operator object are a no-op.
         """
+        shape = state.matrix.shape if state.matrix is not None else None
         if operator is state.operator:
+            record_operation(
+                "update",
+                inputs=lambda: profile_inputs(
+                    operator, operator_pattern_tag(operator), shape
+                ),
+                outputs={"outcome": "noop", "reason": "Same operator"},
+            )
             return state
-        return self.init(operator, options)
+        # `Spsolve` reuses nothing, so every changed operator is a full rebuild.
+        record_operation(
+            "update",
+            inputs=lambda: profile_inputs(
+                operator, operator_pattern_tag(operator), shape
+            ),
+            outputs={"outcome": "rebuilt", "reason": "No factorization to reuse"},
+        )
+        return self._build(operator, options)
 
     def compute(
         self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]
@@ -183,21 +224,24 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
                 "`Spsolve` cannot solve with a symbolic-only state; call `update` with "
                 "an operator first."
             )
-        matrix = state.matrix
-        packed_structures = state.packed_structures
-        vector = ravel_vector(vector, packed_structures)
-        # `spsolve` requires the right-hand side to share the matrix dtype.
-        vector = vector.astype(matrix.dtype)
-        solution = _spsolve(
-            matrix.data,
-            matrix.indices,
-            matrix.indptr,
-            vector,
-            tol=self.tol,
-            reorder=self.reorder,
-        )
-        solution = unravel_solution(solution, packed_structures)
-        return solution, RESULTS.successful, {}
+        with compute_scope():
+            matrix = state.matrix
+            packed_structures = state.packed_structures
+            vector = ravel_vector(vector, packed_structures)
+            # `spsolve` requires the right-hand side to share the matrix dtype.
+            vector = vector.astype(matrix.dtype)
+            # Fused analyze+factor+solve, so no separate factorization is reused.
+            record_operation("spsolve", "Spsolve", outputs={"note": "fused"})
+            solution = _spsolve(
+                matrix.data,
+                matrix.indices,
+                matrix.indptr,
+                vector,
+                tol=self.tol,
+                reorder=self.reorder,
+            )
+            solution = unravel_solution(solution, packed_structures)
+            return solution, RESULTS.successful, {}
 
     def transpose(
         self, state: _SpsolveState, options: dict[str, Any]

@@ -19,6 +19,7 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
+from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._jacobian import (
@@ -29,7 +30,9 @@ from splineax.operators._jacobian import (
 from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
+    profile_inputs,
     sparsity_pattern_tag,
+    sparsity_reuse_block,
 )
 
 # `Ai` (row indices), `Aj` (column indices), `Ax` (values): the matrix in COO form.
@@ -175,6 +178,7 @@ class _KLUState(eqx.Module):
         Accepts the lineax `Solution` or a bare value pytree. The solution arrays become
         ordering dependencies on the tokens, see klujax `SymbolToken.track`.
         """
+        record_operation("track")
         value = getattr(solution, "value", solution)
         leaves = tuple(jax.tree_util.tree_leaves(value))
         symbol = self.symbol.track(*leaves)
@@ -192,9 +196,12 @@ class _KLUState(eqx.Module):
 
     def release(self) -> None:
         """Free the cache slots this state owns, ordered after any tracked solves."""
+        record_operation("release")
         klujax = _klujax()
         if self.numeric is not None:
+            record_operation("free_numeric", "KLU")
             klujax.free_numeric(self.numeric)
+        record_operation("free_symbolic", "KLU")
         klujax.free_symbolic(self.symbol)
 
 
@@ -255,10 +262,10 @@ def _reuse_or_refresh_numeric(
     either, `factor` from the symbolic analysis instead. Falling back is always correct,
     only slower.
     """
-    # The third return value is the RebuildReason per left-hand side, which the
-    # reuse decision below does not need: it says why the numeric handle was
-    # rebuilt from the token's carried arrays, not whether the refactor succeeded.
-    refreshed, status, _ = klujax.refactor_with_status(
+    # The third return value is the RebuildReason per left-hand side: it says whether the
+    # numeric handle was rebuilt from the token's carried arrays rather than reused from
+    # the cache. It does not change the reuse decision, but the profile reports it.
+    refreshed, status, rebuild = klujax.refactor_with_status(
         row, col, values, numeric, symbol
     )
     dtype = jnp.complex128 if values.dtype in COMPLEX_DTYPES else jnp.float64
@@ -266,11 +273,35 @@ def _reuse_or_refresh_numeric(
     reuse_is_safe = jnp.all(status == klujax.KLUStatus.OK) & jnp.all(
         reciprocal_condition > _REFACTOR_RCOND_FLOOR
     )
-    return jax.lax.cond(
-        reuse_is_safe,
-        lambda: refreshed,
-        lambda: klujax.factor(row, col, values, symbol),
+    floor = _REFACTOR_RCOND_FLOOR
+
+    def reuse() -> NumericToken:
+        return refreshed
+
+    def factor_fresh() -> NumericToken:
+        return klujax.factor(row, col, values, symbol)
+
+    # The cond picks only the token, so no record callback sits inside it (an IO effect in
+    # a cond breaks `vmap`-of-cond under a jitted forward-mode derivative). The branch flag
+    # rides out as a dynamic value, and the host callback picks the reason below.
+    chosen = jax.lax.cond(reuse_is_safe, reuse, factor_fresh)
+    record_operation(
+        "refactor",
+        "KLU",
+        dynamic={
+            "reused": reuse_is_safe,
+            "rcond": reciprocal_condition,
+            "rebuild": rebuild,
+        },
+        outputs=lambda values: {
+            "reason": (
+                f"Pivots stable: no error and rcond > {floor:g}"
+                if values["reused"]
+                else f"Pivots unstable: error or rcond <= {floor:g}, factored fresh"
+            )
+        },
     )
+    return chosen
 
 
 class KLU(AbstractLinearSolver[_KLUState]):
@@ -291,6 +322,24 @@ class KLU(AbstractLinearSolver[_KLUState]):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _KLUState:
+        record_operation(
+            "init",
+            inputs=lambda: profile_inputs(
+                operator,
+                operator_pattern_tag(operator),
+                (operator.out_size(), operator.in_size()),
+            ),
+        )
+        return self._analyze_and_factor(operator, options)
+
+    def _analyze_and_factor(
+        self, operator: AbstractLinearOperator, options: dict[str, Any]
+    ) -> _KLUState:
+        """Analyze and factor `operator` into a ready-to-solve state.
+
+        Shared by `init` and by `update`'s rebuild path, so the profile records the analyze and
+        factor without a second `init` boundary when a changed pattern forces a rebuild.
+        """
         del options
         if operator.in_size() != operator.out_size():
             raise ValueError(
@@ -298,10 +347,12 @@ class KLU(AbstractLinearSolver[_KLUState]):
             )
         row, col, values, shape = _extract_coo(operator)
         klujax = _klujax()
-        # `init` analyzes and factorizes right away, so the state is ready to solve and
+        # This analyzes and factorizes right away, so the state is ready to solve and
         # reusable across right-hand sides. `factor` needs the real `SymbolToken`, which
         # `analyze` returns and the state then carries.
+        record_operation("analyze", "KLU")
         symbol = klujax.analyze(row, col, shape[1])
+        record_operation("factor", "KLU")
         numeric = klujax.factor(row, col, values, symbol)
         return _KLUState(
             operator,
@@ -330,6 +381,13 @@ class KLU(AbstractLinearSolver[_KLUState]):
             raise ValueError(
                 f"`KLU.init_symbolic` requires a square matrix; got shape {shape}."
             )
+        record_operation(
+            "init_symbolic",
+            inputs=lambda: profile_inputs(
+                sparsity, sparsity_pattern_tag(sparsity), shape
+            ),
+        )
+        record_operation("analyze", "KLU")
         symbol = _klujax().analyze(row, col, shape[1])
         return _KLUState(
             None,
@@ -356,17 +414,32 @@ class KLU(AbstractLinearSolver[_KLUState]):
         """
         if operator is state.operator:
             # Nothing changed, so this is a no-op.
+            record_operation(
+                "update",
+                inputs=lambda: profile_inputs(
+                    operator, operator_pattern_tag(operator), state.shape
+                ),
+                outputs={"outcome": "noop", "reason": "Same operator"},
+            )
             return state
         tag = operator_pattern_tag(operator)
-        if (
-            state.sparsity_tag is not None
-            and tag is not None
-            and state.sparsity_tag == tag
-        ):
+        reuse_block = sparsity_reuse_block(state.sparsity_tag, tag)
+        if reuse_block is None:
             # Same pattern, new values. Reuse the symbolic analysis.
+            record_operation(
+                "update",
+                inputs=lambda: profile_inputs(operator, tag, state.shape),
+                outputs={"outcome": "reused", "reason": "Identical sparsity tag"},
+            )
             return self._refactor(state, operator, tag, options)
-        # New pattern, so analyze from scratch.
-        return self.init(operator, options)
+        # Cannot reuse the analysis, so analyze from scratch. Recorded as a rebuild, with the
+        # reason, so the analyze below is attributed to it rather than read as a first init.
+        record_operation(
+            "update",
+            inputs=lambda: profile_inputs(operator, tag, state.shape),
+            outputs={"outcome": "rebuilt", "reason": reuse_block},
+        )
+        return self._analyze_and_factor(operator, options)
 
     def _refactor(
         self,
@@ -381,7 +454,11 @@ class KLU(AbstractLinearSolver[_KLUState]):
         # Reuse the stored symbolic analysis. The tag asserts the indices match the ones
         # `symbol` was analyzed with.
         if state.numeric is None:
-            # No previous numeric factorization to reuse, so build one fresh.
+            # No previous numeric factorization to reuse (a symbolic-only state from
+            # `init_symbolic`), so build one fresh against the reused analysis.
+            record_operation(
+                "factor", "KLU", outputs={"reason": "No prior factorization"}
+            )
             numeric = klujax.factor(row, col, values, state.symbol)
         else:
             numeric = _reuse_or_refresh_numeric(
@@ -410,24 +487,38 @@ class KLU(AbstractLinearSolver[_KLUState]):
                 "`KLU` cannot solve with a symbolic-only state; call `update` with an "
                 "operator first."
             )
-        row, col, values = state.coo
-        b = ravel_vector(vector, state.packed_structures)
-        row, col, values, b = _ensure_cpu((row, col, values, b))
-        klujax = _klujax()
-        b = _upcast(b)
-        # A symbolic-only tier is possible if `update` reused an analysis but the numeric
-        # token was dropped, so factor here as a fallback. Normally `numeric` is present.
-        numeric = state.numeric
-        if numeric is None:
-            numeric = klujax.factor(row, col, values, state.symbol)
-        solve = (
-            klujax.tsolve_with_numeric
-            if state.transposed
-            else klujax.solve_with_numeric
-        )
-        x = solve(numeric, b, state.symbol)
-        solution = unravel_solution(x, state.packed_structures)
-        return solution, RESULTS.successful, {}
+        with compute_scope():
+            row, col, values = state.coo
+            b = ravel_vector(vector, state.packed_structures)
+            row, col, values, b = _ensure_cpu((row, col, values, b))
+            klujax = _klujax()
+            b = _upcast(b)
+            # A symbolic-only tier is possible if `update` reused an analysis but the numeric
+            # token was dropped, so factor here as a fallback. Normally `numeric` is present.
+            numeric = state.numeric
+            if numeric is None:
+                record_operation(
+                    "factor", "KLU", outputs={"reason": "No prior factorization"}
+                )
+                numeric = klujax.factor(row, col, values, state.symbol)
+            # The `_with_status` variants also report the RebuildReason per numeric handle:
+            # whether the resident factorization was reused or rebuilt from the token's
+            # carried arrays. A rebuild is still correct, only slower, so the profile reports
+            # it rather than the solve branching on it.
+            if state.transposed:
+                operation, solve = (
+                    "tsolve_with_numeric",
+                    klujax.tsolve_with_numeric_with_status,
+                )
+            else:
+                operation, solve = (
+                    "solve_with_numeric",
+                    klujax.solve_with_numeric_with_status,
+                )
+            x, rebuild = solve(numeric, b, state.symbol)
+            record_operation(operation, "KLU", dynamic={"rebuild": rebuild})
+            solution = unravel_solution(x, state.packed_structures)
+            return solution, RESULTS.successful, {}
 
     def transpose(
         self, state: _KLUState, options: dict[str, Any]
@@ -462,6 +553,8 @@ class KLU(AbstractLinearSolver[_KLUState]):
         # Complex: conjugate the values and refactor, reusing the symbolic analysis since
         # the sparsity is unchanged.
         conjugated = values.conj()
+        if state.numeric is not None:
+            record_operation("factor", "KLU", outputs={"reason": "Conjugated values"})
         numeric = (
             None
             if state.numeric is None

@@ -1,3 +1,15 @@
+from ._profile import (
+    ProfileRecord as ProfileRecord,
+)
+from ._profile import (
+    SolveProfile as SolveProfile,
+)
+from ._profile import (
+    create_solve_profile as create_solve_profile,
+)
+from ._profile import (
+    profile_solves as profile_solves,
+)
 from ._stateful_transform import (
     stateful_solve_transform as stateful_solve_transform,
 )

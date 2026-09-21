@@ -193,3 +193,10 @@ def solve_many(
 
 solve_many(splx.AutoSparseLinearSolver(), operator, [b1, b2])
 ```
+
+## Profiling a stateful solve sequence
+
+To debug what a solver actually reuses or rebuilds across a state-sequence, wrap
+your solves in [`splineax.create_solve_profile`][] (or [`splineax.profile_solves`][]
+for a jitted function), which records every analyze, factor, refactor, and solve
+step. See [the solve profile guide](profiling.md) for details.
