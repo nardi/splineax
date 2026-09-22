@@ -136,6 +136,7 @@ def test_materialised_bcoo_inherits_the_pattern_tag() -> None:
     recognises it as sharing the Jacobian's pattern."""
     operator = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
     materialised = lx.materialise(operator)
+    assert isinstance(materialised, BCOOLinearOperator)
     assert sparsity_pattern_tag(operator) in materialised.tags
 
 
