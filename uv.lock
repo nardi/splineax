@@ -184,23 +184,23 @@ wheels = [
 
 [[package]]
 name = "entangle-jax"
-version = "0.1.0"
+version = "0.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
     { name = "jaxtyping" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/90/c1/a6ad9f796d5f4ac5eaea7d1cb1b6ffeeac9fc28a8da6aeac19af8a8cd097/entangle_jax-0.1.0.tar.gz", hash = "sha256:cca69518cd32774dc67c9eb98341e9e1dec10b1a2e83feaec4fa266118094d24", size = 58942, upload-time = "2026-09-13T13:46:11.662Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/ec/a15e770a7e92876dd8f4c6fd876eec9ffd829107f34a395d44e7baab431a/entangle_jax-0.1.1.tar.gz", hash = "sha256:abda134ca5d412dad34e8ee9e6ace30bfbccc5a4fc4b44531bd55537bf852c17", size = 59570, upload-time = "2026-09-27T17:30:45.199Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a9/25/9b55ccfe153982a9961e5011267f2e53ad3ceb33f52c5e78179499bf6582/entangle_jax-0.1.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:fe7e781a0f649d0a5c5b6d1623cb22b690daa1855f74225f7d018b681fa761bc", size = 43201, upload-time = "2026-09-13T13:46:01.128Z" },
-    { url = "https://files.pythonhosted.org/packages/a6/c7/2c0a03709e6b34c78276df046fedc06f7faeb17deec5994ff15f252c44e2/entangle_jax-0.1.0-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:07c10c8413e0c53957832ed907b7ff0ea976f6179ab75b311b34dabf98fc412e", size = 64786, upload-time = "2026-09-13T13:46:02.335Z" },
-    { url = "https://files.pythonhosted.org/packages/22/2a/032c3feb5b39f297072dbec0750fadd5d4348bbbd990d6d0ea0664e3a2d4/entangle_jax-0.1.0-cp311-cp311-win_amd64.whl", hash = "sha256:6faa3383f178a8b4625ad4191886e46d90d4759519ce1dc0defb8ee4e7716a5a", size = 228117, upload-time = "2026-09-13T13:46:03.486Z" },
-    { url = "https://files.pythonhosted.org/packages/01/fb/b0df97e3ce2401ebef02ddddd5732dd00962717be2f2635b27020aae54f4/entangle_jax-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:d62052d8589ec8c340b93bc9bea91fd2a38bbc8830bb61507d6440b9eb0bf1af", size = 44140, upload-time = "2026-09-13T13:46:04.684Z" },
-    { url = "https://files.pythonhosted.org/packages/48/ff/c4eb88e28acaec415cf2c2d034a6111ba7c1762b0384a094d614148e0f6f/entangle_jax-0.1.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f00544883d02f761b4d9bcb9715ade2e06c5cae3ac457fa0e8ca2b7dfa239531", size = 70278, upload-time = "2026-09-13T13:46:05.91Z" },
-    { url = "https://files.pythonhosted.org/packages/bd/6a/8eb75f6d05df1e584bf1626eab191ff10579b9bd7be8621ba3c30b9b7498/entangle_jax-0.1.0-cp312-cp312-win_amd64.whl", hash = "sha256:e9b80e0c5a35d63b1734bebcb5148942834f64988534992c700d97e5791378a1", size = 228811, upload-time = "2026-09-13T13:46:07.045Z" },
-    { url = "https://files.pythonhosted.org/packages/2d/5c/79cb0d16b8499ad799a631d57f9b915f070ea641ba2c1f8ca40e64864a73/entangle_jax-0.1.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:ceaa7be28d3e69ae4cc355ff51c6605ea749c38cf1bb825c9bfe418dc3079f95", size = 43434, upload-time = "2026-09-13T13:46:08.192Z" },
-    { url = "https://files.pythonhosted.org/packages/90/3e/116d5382be56ee9d9516ae72f9a39f733f9876d933b8ce63e1fa07a93722/entangle_jax-0.1.0-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b2d4607840db069fb8296a839d55a48dd664601d758fb59df6588ec45110e597", size = 69645, upload-time = "2026-09-13T13:46:09.254Z" },
-    { url = "https://files.pythonhosted.org/packages/c1/dc/03f72921af53f85aebcf28ed9c473644fd28bdc3b4f50dd109af2a6b10da/entangle_jax-0.1.0-cp313-cp313-win_amd64.whl", hash = "sha256:ee8725f91f1568de4dc237108bfe6ea8f2ed01cd0257a7e5c430cf76fb575501", size = 227985, upload-time = "2026-09-13T13:46:10.532Z" },
+    { url = "https://files.pythonhosted.org/packages/68/f8/b1f5921117c4ac71d4ef5947f5302cd31687d3cdfb01b0238def62718753/entangle_jax-0.1.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:a0741fa2a9977ddd895f0d1f27b9ef554a117ae6f856f929bc5e043a0272a1c4", size = 43206, upload-time = "2026-09-27T17:30:34.415Z" },
+    { url = "https://files.pythonhosted.org/packages/de/63/71ffee02ac9a1b8d30d14c5144d535dc71faa67483726caf89c69e142f69/entangle_jax-0.1.1-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a5273788746aa2ae759521c526f62ed70f3b5443e9128405f43daf752746b307", size = 64790, upload-time = "2026-09-27T17:30:35.767Z" },
+    { url = "https://files.pythonhosted.org/packages/82/c1/a069000021691357ad45f20d56f0e713f089999189f22fa9e1d8a70ff66a/entangle_jax-0.1.1-cp311-cp311-win_amd64.whl", hash = "sha256:32761ff64f98c9d64fffc0fc546027929bf3aab20e90060f44d930106d193964", size = 228117, upload-time = "2026-09-27T17:30:36.826Z" },
+    { url = "https://files.pythonhosted.org/packages/97/fa/8a29f11f157d29b4f0d470f10cdf66e4afb90d63f10dedad518a385279d5/entangle_jax-0.1.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:5e6556ed66ccd4d83fc284f27bc06901073c032debe015c29b39948cf852b6f9", size = 43511, upload-time = "2026-09-27T17:30:37.99Z" },
+    { url = "https://files.pythonhosted.org/packages/24/0a/bf2bd02e6a238849f077faa4f9bdcb09f3354a1c9c82aaaf8295e4f6fe9e/entangle_jax-0.1.1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9f62edefd93387c33008cbcb4996ab2d22581f5a14255505b8ec84bdc2b805cc", size = 65510, upload-time = "2026-09-27T17:30:39.088Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/89/15d898aa39494eb389d9a85dd27a1b59b968ab5cf6899d197663e675ab49/entangle_jax-0.1.1-cp312-cp312-win_amd64.whl", hash = "sha256:9437e36982b9331fd81b0a255ddc468d9f40a373c01249fac8e6114bf5d2e5cd", size = 228346, upload-time = "2026-09-27T17:30:40.188Z" },
+    { url = "https://files.pythonhosted.org/packages/51/7d/aa489f2e29eef4db048620ffdaa54b0bd5f93edbc35db43929e5819587a8/entangle_jax-0.1.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:aa1b3759813eb7244b9bd48239adc8b3b5dbfbf56e593ee848d23f2a01fb5bfe", size = 42798, upload-time = "2026-09-27T17:30:41.479Z" },
+    { url = "https://files.pythonhosted.org/packages/12/84/1fadefb54fa4b335b480418bc1b1ba84d173bfcca1ac0e975a45338966c5/entangle_jax-0.1.1-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c5ba4d58ee0c02c945f6ae03f98703d65088692fff88fdd85c644b92207b5afa", size = 64875, upload-time = "2026-09-27T17:30:42.541Z" },
+    { url = "https://files.pythonhosted.org/packages/63/cd/293efe42cd437376f6d49b109b3913030460c3fefff128bf7131e6b4e3e8/entangle_jax-0.1.1-cp313-cp313-win_amd64.whl", hash = "sha256:32f520b561f100ea3aa02a46de17d608232bbb1b93cc65f56056ef7186de2698", size = 227517, upload-time = "2026-09-27T17:30:43.826Z" },
 ]
 
 [[package]]
@@ -1162,7 +1162,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "asdex", specifier = ">=0.5.1" },
-    { name = "entangle-jax", specifier = ">=0.1.0" },
+    { name = "entangle-jax", specifier = ">=0.1.1" },
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4" },
     { name = "jaxtyping", specifier = ">=0.2" },
