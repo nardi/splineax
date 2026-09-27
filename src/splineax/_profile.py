@@ -27,7 +27,7 @@ import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from types import TracebackType
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, ParamSpec, TypeVar, overload
 
 import jax
 import jax.numpy as jnp
@@ -370,21 +370,48 @@ _P = ParamSpec("_P")
 _ReturnT = TypeVar("_ReturnT")
 
 
+@overload
 def profile_solves(
     fn: Callable[_P, _ReturnT],
-) -> Callable[_P, tuple[_ReturnT, SolveProfile | None]]:
+    *,
+    enabled: bool = True,
+) -> Callable[_P, tuple[_ReturnT, SolveProfile | None]]: ...
+
+
+@overload
+def profile_solves(
+    fn: None = None,
+    *,
+    enabled: bool = True,
+) -> Callable[
+    [Callable[_P, _ReturnT]], Callable[_P, tuple[_ReturnT, SolveProfile | None]]
+]: ...
+
+
+def profile_solves(
+    fn: Callable[_P, _ReturnT] | None = None,
+    *,
+    enabled: bool = True,
+) -> (
+    Callable[_P, tuple[_ReturnT, SolveProfile | None]]
+    | Callable[
+        [Callable[_P, _ReturnT]], Callable[_P, tuple[_ReturnT, SolveProfile | None]]
+    ]
+):
     """Wrap `fn` so every call profiles its solves into a fresh `SolveProfile`.
 
-    Returns `(result, profile)` instead of `fn`'s own return value. Pass `enabled=False` on
-    a call to skip profiling it, returning `(result, None)` and calling `fn` directly.
+    The wrapped function returns `(result, profile)` instead of `fn`'s own return value.
+    Use it bare as `@profile_solves`, or with arguments as `@profile_solves(enabled=False)`.
+    With `enabled=False`, every call runs `fn` directly and returns `(result, None)`. This
+    lets you switch profiling off in one place without changing the call sites.
 
     Apply this directly to a `jax.jit`/`equinox.filter_jit`-decorated function, and always
-    call it through the decorated name: used this way, the very first call for a given
-    input shape necessarily happens through this wrapper, with a profile active, so that
-    shape's compiled executable is guaranteed to carry its profiling hooks. Calling the
-    undecorated jit function separately, or making the first call for a shape with
-    `enabled=False`, permanently forfeits profiling for that shape, since the hooks are
-    only ever built in at compile time.
+    call it through the decorated name. Used this way, the very first call for a given
+    input shape happens through this wrapper with a profile active, so that shape's
+    compiled executable is guaranteed to carry its profiling hooks. The hooks are only
+    built in at compile time. Calling the undecorated jit function separately, or through
+    a second wrapper with `enabled=False`, will forfeit profiling for any shape it compiles
+    first.
 
     ```{.python notest}
     @splineax.profile_solves
@@ -398,22 +425,29 @@ def profile_solves(
     ```
     """
 
-    @functools.wraps(fn)
-    def wrapper(
-        # `enabled` sits between the paramspec halves, which PEP 612 disallows even
-        # though it works fine at runtime.
-        *args: _P.args,
-        enabled: bool = True,  # ty: ignore[invalid-paramspec]
-        **kwargs: _P.kwargs,
-    ) -> tuple[_ReturnT, SolveProfile | None]:
-        if not enabled:
-            return fn(*args, **kwargs), None
-        profile = create_solve_profile()
-        with profile:
-            result = fn(*args, **kwargs)
-        return result, profile
+    def decorate(
+        fn: Callable[_P, _ReturnT],
+    ) -> Callable[_P, tuple[_ReturnT, SolveProfile | None]]:
+        """Wrap one function according to the `enabled` flag of the enclosing call."""
 
-    return wrapper
+        @functools.wraps(fn)
+        def wrapper(
+            *args: _P.args, **kwargs: _P.kwargs
+        ) -> tuple[_ReturnT, SolveProfile | None]:
+            if not enabled:
+                return fn(*args, **kwargs), None
+            profile = create_solve_profile()
+            with profile:
+                result = fn(*args, **kwargs)
+            return result, profile
+
+        return wrapper
+
+    # A bare `@profile_solves` passes the function in directly. The called form
+    # `@profile_solves(enabled=...)` passes nothing and returns the decorator instead.
+    if fn is None:
+        return decorate
+    return decorate(fn)
 
 
 @contextlib.contextmanager
