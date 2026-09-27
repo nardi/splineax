@@ -16,6 +16,10 @@
 
 ---
 
+::: splineax.CuDSS
+
+---
+
 ::: splineax.Spsolve
 
 ---
@@ -29,6 +33,14 @@
 ---
 
 ::: splineax.solvers.ReorderingScheme
+
+---
+
+::: splineax.solvers.CuDSSReordering
+
+---
+
+::: splineax.solvers.CuDSSMemory
 
 ## Stateful solve transform
 
