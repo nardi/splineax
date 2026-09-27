@@ -266,6 +266,7 @@ def _assert_full_reuse(reuse: _Reuse, context: str) -> None:
     assert reuse.rebuilt_updates == 0, f"{context}: unexpected analysis rebuild"
 
 
+@pytest.mark.cpu_only
 def test_two_matrix_solve_reuses_analysis_eagerly() -> None:
     """Two matrices sharing a pattern analyze once and refactor for the second values."""
     fn = _explicit_two_matrix_fn(_tag(), splx.KLU())
@@ -285,6 +286,7 @@ def test_two_matrix_solve_reuses_analysis_eagerly() -> None:
     assert rebuilds == {}
 
 
+@pytest.mark.cpu_only
 def test_two_matrix_solve_reuses_analysis_under_jit() -> None:
     """The same reuse holds when the whole two-solve function is JIT-compiled."""
     fn = jax.jit(_explicit_two_matrix_fn(_tag(), splx.KLU()))
@@ -341,6 +343,7 @@ def _assert_derivatives_match(got: object, want: object, name: str) -> None:
         assert np.allclose(leaf_got, leaf_want, atol=1e-6), name
 
 
+@pytest.mark.cpu_only
 @pytest.mark.parametrize("wrt", ["values", "vectors"])
 def test_first_and_second_order_derivatives_are_correct(wrt: str) -> None:
     """Every derivative of the two-solve function matches the plain lineax function.
@@ -364,6 +367,7 @@ def test_first_and_second_order_derivatives_are_correct(wrt: str) -> None:
         _assert_derivatives_match(got, want, f"{name} wrt {wrt}")
 
 
+@pytest.mark.cpu_only
 @pytest.mark.xfail(
     reason="`jacrev` over `jacfwd` through a sparse-operator JVP raises a cotangent "
     "shape mismatch in lineax's TangentLinearOperator; a known limitation, also "
@@ -377,6 +381,7 @@ def test_second_order_jacrev_of_jacfwd_wrt_values() -> None:
     derivatives["jacrev_jacfwd"](_values(), _values2())
 
 
+@pytest.mark.cpu_only
 @pytest.mark.parametrize("wrt", ["values", "vectors"])
 def test_derivatives_reuse_the_shared_analysis(wrt: str) -> None:
     """Each derivative's compiled program performs one analyze, factor, and refactor."""
@@ -413,6 +418,7 @@ def test_derivatives_reuse_the_shared_analysis(wrt: str) -> None:
             _assert_no_rebuilds(stats, f"{name} wrt {wrt}")
 
 
+@pytest.mark.cpu_only
 def test_transform_reuses_as_much_as_the_explicit_threading() -> None:
     """The stateful transform matches the hand-threaded function's factorization reuse.
 
@@ -438,6 +444,7 @@ def test_transform_reuses_as_much_as_the_explicit_threading() -> None:
         assert stats == {}
 
 
+@pytest.mark.cpu_only
 def test_transform_before_or_after_the_derivative_agrees() -> None:
     """Differentiating the transform and transforming the derivative agree, both jitted.
 
@@ -493,6 +500,7 @@ def test_transform_before_or_after_the_derivative_agrees() -> None:
     assert reuse_after.analyze >= 1
 
 
+@pytest.mark.cpu_only
 def test_transformed_function_matches_plain_values() -> None:
     """The transformed function returns the plain function's solutions."""
     tag = _tag()

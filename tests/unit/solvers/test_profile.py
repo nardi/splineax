@@ -98,6 +98,7 @@ def test_records_generic_operations(
     assert any(record.solver is not None for record in profile.records)
 
 
+@pytest.mark.cpu_only
 def test_klu_nests_native_operations_in_order(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
@@ -120,6 +121,7 @@ def test_klu_nests_native_operations_in_order(
     )
 
 
+@pytest.mark.cpu_only
 def test_update_reuses_analysis_on_shared_pattern(enable_x64: None) -> None:
     """`update` on a shared `sparsity_pattern_tag` records a `reused` outcome and a
     `KLU.refactor` carrying a finite `rcond`, rather than a fresh analyze."""
@@ -145,6 +147,7 @@ def test_update_reuses_analysis_on_shared_pattern(enable_x64: None) -> None:
     assert _ops(profile).count("analyze") == 1
 
 
+@pytest.mark.cpu_only
 def test_symbolic_state_records_factor_reason(enable_x64: None) -> None:
     """A first `update` on a symbolic-only state factors (there is no numeric to refactor),
     and the profile says so."""
@@ -162,6 +165,7 @@ def test_symbolic_state_records_factor_reason(enable_x64: None) -> None:
     assert factors[0].outputs["reason"] == "No prior factorization"
 
 
+@pytest.mark.cpu_only
 def test_update_rebuilds_on_changed_pattern(enable_x64: None) -> None:
     """`update` with a different sparsity pattern records a `rebuilt` outcome and re-analyzes,
     so a lost reuse is explicit in the log."""
@@ -182,6 +186,91 @@ def test_update_rebuilds_on_changed_pattern(enable_x64: None) -> None:
     assert len(profile.sequences) == 1
 
 
+@pytest.mark.cudss_gpu
+def test_cudss_nests_native_operations_in_order(make_operator: OperatorFactory) -> None:
+    """`CuDSS`'s analyze, factorize, and solve are recorded as `CuDSS.*` operations, in
+    that order, and an eager `release` really frees the cache entry."""
+    operator = make_operator(SQUARE_MATRIX)
+    profile = splx.create_solve_profile()
+    with profile:
+        _, state = splx.linear_solve(operator, RIGHT_HAND_SIDE, splx.CuDSS())
+        state.release()
+    ops = _ops(profile)
+    assert ops.index("analyze") < ops.index("factorize") < ops.index("solve")
+    assert _by_op(profile, "analyze")[0].solver == "CuDSS"
+    releases = _by_op(profile, "release", "CuDSS")
+    assert len(releases) == 1
+    # Outside `jit` the release runs, so it carries no "skipped" note.
+    assert "note" not in releases[0].outputs
+
+
+@pytest.mark.cudss_gpu
+def test_cudss_update_reuses_or_rebuilds_the_analysis() -> None:
+    """`update` on a shared sparsity tag keeps the analysis and only factorizes again,
+    while `update` with a different pattern records a rebuild and analyzes again."""
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    tag = splx.sparsity_pattern_tag(sparsity)
+    first = splx.BCOOLinearOperator(sparsity, tags=tag)
+    second = splx.BCOOLinearOperator(BCOO.fromdense(2.0 * SQUARE_MATRIX), tags=tag)
+    # A different sparsity pattern (reversed rows), so the tags cannot match.
+    reversed_rows = BCOO.fromdense(SQUARE_MATRIX[::-1])
+    third = splx.BCOOLinearOperator(
+        reversed_rows, tags=splx.sparsity_pattern_tag(reversed_rows)
+    )
+    solver = splx.CuDSS()
+    profile = splx.create_solve_profile()
+    with profile:
+        _, state = splx.linear_solve(first, RIGHT_HAND_SIDE, solver)
+        _, state = splx.linear_solve(second, RIGHT_HAND_SIDE, solver, state=state)
+        _, state = splx.linear_solve(third, RIGHT_HAND_SIDE, solver, state=state)
+        state.release()
+    updates = _by_op(profile, "update")
+    assert [update.outputs["outcome"] for update in updates] == ["reused", "rebuilt"]
+    assert updates[1].outputs["reason"] == "Different sparsity tag"
+    # One analyze for the first two operators, and a second for the changed pattern.
+    assert len(_by_op(profile, "analyze", "CuDSS")) == 2
+    factorizations = _by_op(profile, "factorize", "CuDSS")
+    assert len(factorizations) == 3
+    assert factorizations[1].outputs["reason"] == "Reused analysis"
+
+
+@pytest.mark.cudss_gpu
+def test_cudss_records_under_jit() -> None:
+    """Profiling a jitted `CuDSS` solve records every operation in program order, and the
+    `release` traced inside `jit` is recorded as skipped."""
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    indices, shape = sparsity.indices, sparsity.shape
+
+    @eqx.filter_jit
+    def run(data: Array) -> Array:
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=shape, indices_sorted=True)
+        )
+        solution, state = splx.linear_solve(operator, RIGHT_HAND_SIDE, splx.CuDSS())
+        state.release()
+        return solution.value
+
+    profile = splx.create_solve_profile()
+    with profile:
+        solution = run(sparsity.data)
+    expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
+    assert jnp.allclose(solution, expected, atol=1e-4)
+    ops = _ops(profile)
+    assert (
+        ops.index("init")
+        < ops.index("analyze")
+        < ops.index("factorize")
+        < ops.index("solve")
+        < ops.index("track")
+        < ops.index("release")
+    )
+    releases = _by_op(profile, "release", "CuDSS")
+    assert [release.outputs.get("note") for release in releases] == [
+        "skipped under jit"
+    ]
+
+
+@pytest.mark.cpu_only
 def test_two_lineages_are_separate_sequences(enable_x64: None) -> None:
     """Two independent `init` ... `release` lineages in one block are two sequences."""
     operator = splx.BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
@@ -195,6 +284,7 @@ def test_two_lineages_are_separate_sequences(enable_x64: None) -> None:
     assert all(sequence[0].operation == "init" for sequence in profile.sequences)
 
 
+@pytest.mark.cpu_only
 def test_independent_profiles_do_not_cross_talk(enable_x64: None) -> None:
     """Entering a second profile after the first has exited only ever adds to the second."""
     operator = splx.BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
@@ -214,6 +304,7 @@ def test_independent_profiles_do_not_cross_talk(enable_x64: None) -> None:
     assert len(profile2.records) > 0
 
 
+@pytest.mark.cpu_only
 def test_reentering_same_profile_accumulates(enable_x64: None) -> None:
     """Entering the same `SolveProfile` object a second time adds further records to it."""
     operator = splx.BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
@@ -228,6 +319,7 @@ def test_reentering_same_profile_accumulates(enable_x64: None) -> None:
     assert len(profile.records) > first_count
 
 
+@pytest.mark.cpu_only
 def test_call_outside_block_after_entering_records_nothing_further(
     enable_x64: None,
 ) -> None:
@@ -351,6 +443,7 @@ def test_iterative_refinement_records_steps(enable_x64: None) -> None:
     assert result.outputs["converged"] is True
 
 
+@pytest.mark.cpu_only
 def test_refinement_needing_no_correction_records_nothing(enable_x64: None) -> None:
     """A refinement whose initial solve already meets the tolerance records no
     `IterativeRefinement` operations at all, so the profile looks as if refinement
@@ -388,6 +481,7 @@ def test_refinement_exhausting_steps_still_records(enable_x64: None) -> None:
     assert _by_op(profile, "refine_result")[0].outputs["converged"] is False
 
 
+@pytest.mark.cpu_only
 def test_profile_of_vmap_and_grad_plain_solve(enable_x64: None) -> None:
     """A plain solve under `jax.vmap`, `jax.grad`, `jax.jacfwd`, and `jax.jacrev` runs
     and records its operations, so the callbacks compose with batching and both
@@ -420,6 +514,7 @@ def test_profile_of_vmap_and_grad_plain_solve(enable_x64: None) -> None:
         assert len(profile.records) > 0, f"{name} recorded nothing"
 
 
+@pytest.mark.cpu_only
 def test_records_under_jit(enable_x64: None) -> None:
     """Profiling works through `jax.jit`: every expected operation is recorded, and the
     trace-time order key keeps the printed tree in program order."""
@@ -487,6 +582,7 @@ def _make_chained_solves(sparsity: BCOO) -> Callable[[Array, Array], Array]:
     return chained_solves
 
 
+@pytest.mark.cpu_only
 @pytest.mark.parametrize(
     ("transform", "batch_rhs", "expected_ops"),
     [
@@ -561,6 +657,7 @@ def test_generic_operations_in_program_order_under_transforms(
     assert generic_ops == expected_ops
 
 
+@pytest.mark.cpu_only
 def test_function_compiled_outside_context_records_nothing(enable_x64: None) -> None:
     """Tracing is applied at profile time, so a function compiled before the block emits
     nothing when later called inside it (a documented limitation)."""
@@ -603,6 +700,7 @@ def _make_solve(
     return splx.profile_solves(enabled=enabled)(_make_jitted_solve(indices, shape))
 
 
+@pytest.mark.cpu_only
 def test_profile_solves_returns_result_and_profile(enable_x64: None) -> None:
     """A default call returns `(result, profile)`, with the profile populated as usual."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
@@ -613,6 +711,7 @@ def test_profile_solves_returns_result_and_profile(enable_x64: None) -> None:
     assert "init" in _ops(profile)
 
 
+@pytest.mark.cpu_only
 def test_profile_solves_enabled_false_skips_profiling(enable_x64: None) -> None:
     """A function decorated with `enabled=False` returns `(result, None)` and profiles
     nothing."""
@@ -623,6 +722,7 @@ def test_profile_solves_enabled_false_skips_profiling(enable_x64: None) -> None:
     assert profile is None
 
 
+@pytest.mark.cpu_only
 def test_profile_solves_profiles_repeated_calls(enable_x64: None) -> None:
     """Calling a `profile_solves`-wrapped jitted function twice with the same input shape
     profiles both calls, not just the first. The first call compiles the function while its
@@ -643,6 +743,7 @@ def test_profile_solves_profiles_repeated_calls(enable_x64: None) -> None:
     assert profile1.records is not profile2.records
 
 
+@pytest.mark.cpu_only
 def test_profile_solves_bare_decorator(enable_x64: None) -> None:
     """The bare `@profile_solves` form profiles like `@profile_solves()`."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
@@ -653,6 +754,7 @@ def test_profile_solves_bare_decorator(enable_x64: None) -> None:
     assert "init" in _ops(profile)
 
 
+@pytest.mark.cpu_only
 def test_profile_solves_first_call_disabled_forfeits_profiling(
     enable_x64: None,
 ) -> None:

@@ -5,7 +5,8 @@ the benchmark is exact: same output, plus a threaded state that reuses a factori
 covers correctness, factorization reuse, composition with `jit`/`vmap`/`jacfwd`/`jacrev`,
 per-signature caching, the filter-primitive round-trip, threading through a `cond`, `scan`,
 `while_loop`, and `remat`, the opt-in custom-diff pass-through, the lifecycle paths, and the
-solver filter.
+solver filter. The tests solve through the CPU-only `KLU`, and a GPU pair repeats the
+threading and reuse checks through `CuDSS`.
 """
 
 from __future__ import annotations
@@ -50,26 +51,34 @@ def _data() -> jax.Array:
     return BCOO.fromdense(_dense()).data
 
 
-def _two_solve_fn(tag: object):
-    """A function that solves one matrix against two right-hand sides, sharing a pattern."""
+def _two_solve_fn(tag: object, solver: lx.AbstractLinearSolver | None = None):
+    """A function that solves one matrix against two right-hand sides, sharing a pattern.
+
+    Solves with `KLU` unless another `solver` is given.
+    """
     indices = _indices()
+    solver = splx.KLU() if solver is None else solver
 
     def fn(data: jax.Array, b1: jax.Array, b2: jax.Array):
         operator = splx.BCOOLinearOperator(
             BCOO((data, indices), shape=(3, 3)), tags=tag
         )
-        x1 = lx.linear_solve(operator, b1, splx.KLU()).value
-        x2 = lx.linear_solve(operator, b2, splx.KLU()).value
+        x1 = lx.linear_solve(operator, b1, solver).value
+        x2 = lx.linear_solve(operator, b2, solver).value
         return x1, x2
 
     return fn
 
 
 def _count_primitive(jaxpr, needle: str) -> int:
-    """Count equations whose primitive name contains `needle`, recursing into sub-jaxprs."""
+    """Count equations whose primitive name, or the `name` of the FFI target the equation
+    calls, contains `needle`, recursing into sub-jaxprs."""
     total = 0
     for eqn in jaxpr.eqns:
-        if needle in eqn.primitive.name:
+        target = eqn.params.get("name")
+        if needle in eqn.primitive.name or (
+            isinstance(target, str) and needle in target
+        ):
             total += 1
         for value in eqn.params.values():
             inner = getattr(value, "jaxpr", value)
@@ -78,6 +87,7 @@ def _count_primitive(jaxpr, needle: str) -> int:
     return total
 
 
+@pytest.mark.cpu_only
 def test_output_matches_untransformed() -> None:
     """The transform reproduces the function's output, with no state in or out by default."""
     fn = _two_solve_fn(splx.sparsity_pattern_tag(BCOO.fromdense(_dense())))
@@ -88,6 +98,7 @@ def test_output_matches_untransformed() -> None:
     assert jnp.allclose(got[1], expected[1], atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_reuses_factorization_across_solves() -> None:
     """Two solves sharing a pattern analyze once, so the pruned jaxpr holds one analysis."""
     tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
@@ -100,6 +111,7 @@ def test_reuses_factorization_across_solves() -> None:
     assert _count_primitive(threaded.jaxpr, "analyze") == 1
 
 
+@pytest.mark.cpu_only
 def test_composes_with_jit_vmap_and_diff() -> None:
     """`jit`, `vmap`, `jacfwd`, and `jacrev` of the wrapped function match the plain one."""
     tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
@@ -124,6 +136,7 @@ def test_composes_with_jit_vmap_and_diff() -> None:
     )
 
 
+@pytest.mark.cpu_only
 def test_differentiates_through_the_matrix() -> None:
     """A gradient with respect to the matrix values matches the untransformed function."""
     tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
@@ -138,6 +151,7 @@ def test_differentiates_through_the_matrix() -> None:
     assert jnp.allclose(grad_run, grad_plain, atol=1e-6)
 
 
+@pytest.mark.cpu_only
 def test_vmap_over_operators_agrees_both_ways() -> None:
     """Transforming a vmap and vmapping a transform agree, threading one non-batched state."""
     tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
@@ -163,6 +177,7 @@ def test_vmap_over_operators_agrees_both_ways() -> None:
     assert jnp.allclose(inner, reference, atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_caches_the_staged_jaxpr_per_signature() -> None:
     """Repeated calls with one signature stage the interpreter once; a new signature stages
     again."""
@@ -187,6 +202,7 @@ def test_caches_the_staged_jaxpr_per_signature() -> None:
     assert len(traces) == 2, "a new signature did not stage exactly once"
 
 
+@pytest.mark.cpu_only
 def test_filter_primitive_round_trip() -> None:
     """Reconstructing and rebinding a `linear_solve_p` equation reproduces the solve, so a
     change in equinox's private encoding is caught here."""
@@ -244,6 +260,7 @@ def _cond_fn(tag: object):
     return fn
 
 
+@pytest.mark.cpu_only
 def test_threads_a_solve_inside_cond() -> None:
     """A solve inside a `cond` branch is threaded, so both branches match the plain run."""
     tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
@@ -254,6 +271,7 @@ def test_threads_a_solve_inside_cond() -> None:
         assert jnp.allclose(got, fn(_data(), _b1(), flag), atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_reuses_factorization_across_a_cond() -> None:
     """The branch solve reuses the state from the solve before the `cond`, so the taken
     branch analyzes zero extra times and the pruned jaxpr holds one analysis."""
@@ -264,6 +282,7 @@ def test_reuses_factorization_across_a_cond() -> None:
     assert _count_primitive(threaded.jaxpr, "analyze") == 1
 
 
+@pytest.mark.cpu_only
 def test_cond_composes_with_jit_vmap_and_grad() -> None:
     """`jit`, `vmap`, and `grad` of a function whose `cond` threads a solve match the plain
     one, so the branch rewrite composes with the outer transforms."""
@@ -293,6 +312,7 @@ def test_cond_composes_with_jit_vmap_and_grad() -> None:
     )
 
 
+@pytest.mark.cpu_only
 def test_cond_without_prior_state_raises() -> None:
     """Threading into a `cond` needs a state already, so a first solve inside a branch with
     no prior state raises a clear error."""
@@ -310,18 +330,22 @@ def test_cond_without_prior_state_raises() -> None:
         splx.stateful_solve_transform(fn)(_data(), _b1(), jnp.array(1.0))
 
 
-def _scan_fn(tag: object):
-    """A function that solves once, then solves each step of a `scan` over right-hand sides."""
+def _scan_fn(tag: object, solver: lx.AbstractLinearSolver | None = None):
+    """A function that solves once, then solves each step of a `scan` over right-hand sides.
+
+    Solves with `KLU` unless another `solver` is given.
+    """
     indices = _indices()
+    solver = splx.KLU() if solver is None else solver
 
     def fn(data: jax.Array, b: jax.Array):
         operator = splx.BCOOLinearOperator(
             BCOO((data, indices), shape=(3, 3)), tags=tag
         )
-        start = lx.linear_solve(operator, b, splx.KLU()).value
+        start = lx.linear_solve(operator, b, solver).value
 
         def body(carry: jax.Array, rhs: jax.Array):
-            solution = lx.linear_solve(operator, carry + rhs, splx.KLU()).value
+            solution = lx.linear_solve(operator, carry + rhs, solver).value
             return solution, solution
 
         final, _ = jax.lax.scan(body, start, jnp.stack([b, b * 2.0, b * 3.0]))
@@ -350,6 +374,7 @@ def _while_fn(tag: object):
     return fn
 
 
+@pytest.mark.cpu_only
 def test_threads_a_solve_inside_scan() -> None:
     """A solve in a `scan` body is threaded, so the output matches and the shared pattern
     analyzes once across the prior solve and every iteration."""
@@ -361,6 +386,7 @@ def test_threads_a_solve_inside_scan() -> None:
     assert _count_primitive(threaded.jaxpr, "analyze") == 1
 
 
+@pytest.mark.cpu_only
 def test_threads_a_solve_inside_while() -> None:
     """A solve in a `while_loop` body is threaded, so the output matches and the shared
     pattern analyzes once across the prior solve and every iteration."""
@@ -372,6 +398,7 @@ def test_threads_a_solve_inside_while() -> None:
     assert _count_primitive(threaded.jaxpr, "analyze") == 1
 
 
+@pytest.mark.cpu_only
 def test_scan_composes_with_jit_and_grad() -> None:
     """`jit` and `grad` of a function whose `scan` threads a solve match the plain one, so
     the loop-carry rewrite composes with the outer transforms."""
@@ -379,6 +406,50 @@ def test_scan_composes_with_jit_and_grad() -> None:
     fn = _scan_fn(tag)
     run = splx.stateful_solve_transform(fn)
     data = _data()
+    assert jnp.allclose(
+        jax.jit(lambda b: run(data, b))(_b1()), fn(data, _b1()), atol=1e-8
+    )
+    assert jnp.allclose(
+        jax.grad(lambda b: jnp.sum(run(data, b) ** 2))(_b1()),
+        jax.grad(lambda b: jnp.sum(fn(data, b) ** 2))(_b1()),
+        atol=1e-6,
+    )
+
+
+_CUDSS_ANALYZE = "spineax_token_analyze"
+"""The FFI target name prefix of cuDSS's analysis phase, one per dtype."""
+
+
+@pytest.mark.cudss_gpu
+def test_cudss_state_threads_through_the_transform() -> None:
+    """On a GPU the transform threads a `CuDSS` state like any other. The output matches
+    the plain function, and two solves sharing a pattern analyze once."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _two_solve_fn(tag, splx.CuDSS())
+    run = splx.stateful_solve_transform(fn)
+    got = run(_data(), _b1(), _b2())
+    expected = fn(_data(), _b1(), _b2())
+    assert jnp.allclose(got[0], expected[0], atol=1e-8)
+    assert jnp.allclose(got[1], expected[1], atol=1e-8)
+
+    b1, b2 = _b1(), _b2()
+    threaded = make_jaxpr(lambda d: run(d, b1, b2))(_data())
+    plain = make_jaxpr(lambda d: fn(d, b1, b2))(_data())
+    assert _count_primitive(plain.jaxpr, _CUDSS_ANALYZE) == 2
+    assert _count_primitive(threaded.jaxpr, _CUDSS_ANALYZE) == 1
+
+
+@pytest.mark.cudss_gpu
+def test_cudss_state_threads_through_a_scan_under_jit_and_grad() -> None:
+    """A `CuDSS` solve in a `scan` body is threaded, analyzing once across the prior solve
+    and every iteration, and `jit` and `grad` of the transformed function match the plain
+    one."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _scan_fn(tag, splx.CuDSS())
+    run = splx.stateful_solve_transform(fn)
+    data = _data()
+    threaded = make_jaxpr(lambda d: run(d, _b1()))(data)
+    assert _count_primitive(threaded.jaxpr, _CUDSS_ANALYZE) == 1
     assert jnp.allclose(
         jax.jit(lambda b: run(data, b))(_b1()), fn(data, _b1()), atol=1e-8
     )
@@ -427,6 +498,7 @@ def _loop_only_while_fn(tag: object):
     return fn
 
 
+@pytest.mark.cpu_only
 def test_scan_without_prior_state_threads() -> None:
     """A `scan` whose only solves are inside it has its first iteration unrolled to create the
     state, so the output matches and the shared pattern analyzes once."""
@@ -438,6 +510,7 @@ def test_scan_without_prior_state_threads() -> None:
     assert _count_primitive(threaded.jaxpr, "analyze") == 1
 
 
+@pytest.mark.cpu_only
 def test_while_without_prior_state_threads() -> None:
     """A `while_loop` whose only solves are inside it unrolls its first iteration behind a
     guard, so the output matches and the shared pattern analyzes once."""
@@ -449,6 +522,7 @@ def test_while_without_prior_state_threads() -> None:
     assert _count_primitive(threaded.jaxpr, "analyze") == 1
 
 
+@pytest.mark.cpu_only
 def test_while_that_runs_zero_times_keeps_its_carry() -> None:
     """When the loop condition is false at once, the unrolled solve is discarded and the
     original carry is returned, matching the untransformed function."""
@@ -471,6 +545,7 @@ def test_while_that_runs_zero_times_keeps_its_carry() -> None:
     assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_incompatible_seed_state_raises_a_clear_error() -> None:
     """A state whose structure differs from the loop-carry structure, such as one from
     `init_symbolic`, cannot be carried, so threading it into a loop raises a clear error."""
@@ -481,6 +556,7 @@ def test_incompatible_seed_state_raises_a_clear_error() -> None:
         run(_data(), _b1(), state=symbolic_state)
 
 
+@pytest.mark.cpu_only
 def test_remat_without_a_solve_passes_through() -> None:
     """`remat` is not inlined, so a `remat` with no matched solve rebinds and stays intact."""
     tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
@@ -519,6 +595,7 @@ def _remat_fn(tag: object):
     return fn
 
 
+@pytest.mark.cpu_only
 def test_threads_a_solve_inside_remat() -> None:
     """A solve inside a `jax.checkpoint` is threaded, so the output matches, the shared
     pattern analyzes once, and the rematerialisation boundary survives."""
@@ -531,6 +608,7 @@ def test_threads_a_solve_inside_remat() -> None:
     assert _count_primitive(threaded.jaxpr, "remat2") == 1
 
 
+@pytest.mark.cpu_only
 def test_remat_threads_a_first_solve_without_prior_state() -> None:
     """A `remat` runs once, so a first solve inside it may create the state, unlike a loop.
     With no prior solve the output still matches the untransformed function."""
@@ -547,6 +625,7 @@ def test_remat_threads_a_first_solve_without_prior_state() -> None:
     assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_remat_composes_with_grad() -> None:
     """`grad` of a function whose `remat` threads a solve matches the plain one, so the
     rewrite keeps working under the rematerialising backward pass."""
@@ -561,6 +640,7 @@ def test_remat_composes_with_grad() -> None:
     )
 
 
+@pytest.mark.cpu_only
 def test_return_final_state_paths() -> None:
     """`return_final_state` controls whether the state is handed back or released.
 
@@ -601,6 +681,7 @@ def test_return_final_state_paths() -> None:
     assert jnp.allclose(out_false, expected, atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_custom_jvp_solve_raises_by_default() -> None:
     """A matched solve inside a `custom_jvp` raises by default, since the state cannot cross
     the custom rule."""
@@ -620,6 +701,7 @@ def test_custom_jvp_solve_raises_by_default() -> None:
         splx.stateful_solve_transform(solve)(_data(), _b1())
 
 
+@pytest.mark.cpu_only
 def test_custom_jvp_solve_passes_through_when_opted_in() -> None:
     """With `pass_through_custom_diff`, a solve inside a `custom_jvp` runs unthreaded, so the
     output matches and the primitive is left in the jaxpr rather than rewritten."""
@@ -641,6 +723,7 @@ def test_custom_jvp_solve_passes_through_when_opted_in() -> None:
     assert _count_primitive(threaded.jaxpr, "custom_jvp_call") >= 1
 
 
+@pytest.mark.cpu_only
 def test_custom_vjp_solve_passes_through_when_opted_in() -> None:
     """The pass-through covers `custom_vjp` too, so a solve inside one runs unthreaded and
     the primitive is left in the jaxpr."""
@@ -665,6 +748,7 @@ def test_custom_vjp_solve_passes_through_when_opted_in() -> None:
     assert _count_primitive(threaded.jaxpr, "custom_vjp_call") >= 1
 
 
+@pytest.mark.cpu_only
 def test_filter_solver_skips_a_dense_solve() -> None:
     """The default filter threads only stateful solvers, so a dense `lineax.LU()` passes
     through, and a predicate filter works too."""
@@ -685,6 +769,7 @@ def test_filter_solver_skips_a_dense_solve() -> None:
     assert jnp.allclose(out[0], _two_solve_fn(tag)(_data(), _b1(), _b2())[0], atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_explicit_state_is_replaced_for_a_matched_solve() -> None:
     """A `state=` the function passes to `lineax.linear_solve` is discarded for a threaded
     solve, and the transform substitutes its own state built from the operator.

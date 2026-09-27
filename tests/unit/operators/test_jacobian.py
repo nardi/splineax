@@ -329,7 +329,13 @@ def test_conflicting_precomputation_arguments_are_rejected() -> None:
 
 
 @pytest.mark.parametrize(
-    "solver", [KLU(), Spsolve(), AutoSparseLinearSolver()], ids=type
+    "solver",
+    [
+        pytest.param(KLU(), marks=pytest.mark.cpu_only),
+        Spsolve(),
+        AutoSparseLinearSolver(),
+    ],
+    ids=type,
 )
 def test_linear_solve_matches_numpy(solver, enable_x64: None) -> None:
     """End-to-end integration proof: handing the Jacobian operator straight to
@@ -344,6 +350,7 @@ def test_linear_solve_matches_numpy(solver, enable_x64: None) -> None:
     assert np.allclose(np.asarray(solution), expected, atol=1e-5)
 
 
+@pytest.mark.cpu_only
 def test_init_symbolic_round_trip(enable_x64: None) -> None:
     """`KLU.init_symbolic` must accept the operator, a bound
     `SparseJacobianLinearOperatorColoring`, a bare `JacobianColoring`, and a bare
@@ -437,6 +444,7 @@ def test_from_jacobian_coloring_accepts_a_colored_pattern() -> None:
     )
 
 
+@pytest.mark.cpu_only
 def test_jacobian_coloring_through_jit_and_solver(enable_x64: None) -> None:
     """A `JacobianColoring` is passed as an argument into a
     jitted function, which builds a `SparseJacobianLinearOperator` from it and
