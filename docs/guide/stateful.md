@@ -154,6 +154,13 @@ artificial data dependency of the state on the solution (via
 that uses the state will have to be ordered after the solve. This is handled by
 `splineax.linear_solve` automatically.
 
+`CuDSS` tracks its state the same way, but for a different reason. Each `factorize`
+renames the token's cache entry, so a solve that still holds the old token has to run
+before the `update` that factorizes new values. Otherwise the solve finds no entry and
+rebuilds the factorization from the token's arrays. `CuDSS` has no traced release, so
+`jit` skips a `release` inside it. The cache evicts old factorizations by itself, and a
+solve whose factorization was evicted rebuilds it. That is slower but still correct.
+
 ## What each solver reuses
 
 The API is the same across solvers, but what they reuse differs.
@@ -166,6 +173,17 @@ for the new values. `transpose` reuses both and solves the transposed system dir
 that ignores the values is not sound, so `init_symbolic` defers the analysis. It records
 the pattern only, and the first `update` with real values runs analyze and factor. Later
 updates on the same pattern refactor while reusing that analysis.
+
+`CuDSS` keeps one token that carries its analysis forward. `init` analyzes and factorizes,
+`init_symbolic` analyzes only, and `update` on a matching pattern reruns the numeric factor
+from the stored token. cuDSS renames the token's cache entry as it advances a phase rather
+than dropping the analysis, so `update` reuses the analysis without re-running it. With
+`CuDSSReordering.COLAMD` or `CuDSSReordering.BTF_COLAMD`, `update` also reuses the
+previous pivots through cuDSS's refactorization, and factorizes fresh when the reused
+pivots come out badly scaled, the same guard `KLU` uses. Under the other reorderings
+cuDSS has no cheaper refactorization, so `update` always factorizes. `transpose` reuses
+the factors for a symmetric matrix, and builds a genuine `A^T`
+factorization for a general one, since cuDSS has no transpose solve.
 
 `Spsolve` has no separate factorization phase, so the reuse API is a set of no-ops for
 parity. `update` rebuilds the state, `release` frees nothing, and `track` returns the

@@ -11,8 +11,9 @@ plugs straight into `lineax.linear_solve`. It also interfaces with [asdex](https
 - **Stateful solver protocols**: `StatefulSolver` and `SparseLinearSolver` for writing
   solver-agnostic code that reuses factorizations over many solves and operators.
 - **Solver library bindings**: `Spsolve` (any backend), `KLU` (CPU-only, SuiteSparse KLU),
-  and `Pardiso` (CPU-only, Intel oneMKL Pardiso, installed as extra). `KLU` and `Pardiso`
-  reuse their factorization across solves.
+  `Pardiso` (CPU-only, Intel oneMKL Pardiso, installed as extra), and `CuDSS` (CUDA
+  GPU-only, NVIDIA cuDSS, installed as extra). `KLU`, `Pardiso`, and `CuDSS` reuse their
+  factorization across solves.
 - **Higher-level solvers**: `AutoSparseLinearSolver`, which picks an appropriate solver
   based on platform and settings, and `IterativeRefinement`, which wraps any solver and
   refines its solution to a target residual.
@@ -67,6 +68,19 @@ assert jnp.allclose(matrix @ solution.value, vectors[1], atol=1e-4)
 # Free the factorization when you are done with it.
 state.release()
 ```
+
+## Testing on a GPU
+
+`CuDSS` wraps NVIDIA's cuDSS library, which is CUDA-only, so its tests skip on ordinary
+(CPU) CI. The easiest way to run them for real is
+[`notebooks/colab_gpu_tests.ipynb`](notebooks/colab_gpu_tests.ipynb):
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/nardi/splineax/blob/main/notebooks/colab_gpu_tests.ipynb)
+
+Open it, pick a GPU runtime, and choose *Run all*. It clones a branch, installs the
+locked environment with the `cudss` extra, and runs the test suite. On any other machine
+with a CUDA 13 GPU, the same run is `uv run --python 3.12 --extra cudss pytest tests`. On
+a GPU, the tests marked `cpu_only` skip, since they solve through `KLU` or `Pardiso`.
 
 ## Documentation
 
