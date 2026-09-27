@@ -130,9 +130,16 @@ _REUSED = "\033[32m"
 _BOLD = "\033[1m"
 
 # Solver-specific operations colored as building a factorization anew.
-_CREATED_OPS = frozenset({"analyze", "reanalyze", "spsolve"})
+_CREATED_OPS = frozenset({"analyze", "reanalyze", "spsolve", "factorize"})
 # Solver-specific operations colored as reusing an existing factorization.
-_REUSED_OPS = frozenset({"solve_with_numeric", "tsolve_with_numeric", "solve_stateful"})
+_REUSED_OPS = frozenset(
+    {
+        "solve_with_numeric",
+        "tsolve_with_numeric",
+        "solve_stateful",
+        "solve",
+    }
+)
 # The floating-point output fields shown in scientific notation.
 _SCI_FIELDS = frozenset({"rcond", "residual_norm", "threshold"})
 
@@ -203,7 +210,7 @@ def _record_color(record: ProfileRecord) -> str:
     if operation in _CREATED_OPS:
         return _CREATED
     match operation:
-        case "refactor":
+        case "refactor" | "refactorize":
             return _CREATED if record.outputs.get("reused") is False else _REUSED
         case "factor":
             return _REUSED if record.outputs.get("reused") is True else _CREATED
