@@ -111,11 +111,15 @@ def solve(operator, vector, solver):
 solution, profile = solve(operator, vector, solver)
 ```
 
+To switch profiling off without touching the call sites, decorate with
+`@splx.profile_solves(enabled=False)` instead. The function still returns a pair, but the
+profile is `None` and no profile is active during the call.
+
 One edge remains, and it comes from JAX compiling once per shape rather than from
-anything `profile_solves` gets wrong. If the first call for a shape happens with
-`enabled=False`, or you call the undecorated jitted function directly instead of going
-through `profile_solves`, that shape's compiled executable never gets profiling hooks, and
-no later call for it will ever be profiled, even with `enabled=True`.
+anything `profile_solves` gets wrong. If you call the undecorated jitted function directly,
+or through a second wrapper made with `enabled=False`, the first call for a shape may
+compile without profiling hooks. No later call for that shape will ever be profiled, even
+through an enabled wrapper.
 
 ## Reuse mechanics
 

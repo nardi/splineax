@@ -584,10 +584,7 @@ def test_function_compiled_outside_context_records_nothing(enable_x64: None) -> 
     assert profile.records == []
 
 
-def _make_solve(
-    indices: Array, shape: tuple[int, ...]
-) -> Callable[..., tuple[int, splx.SolveProfile | None]]:
-    @splx.profile_solves
+def _make_jitted_solve(indices: Array, shape: tuple[int, ...]) -> Callable[..., int]:
     @eqx.filter_jit
     def solve(data: Array) -> Array:
         operator = splx.BCOOLinearOperator(
@@ -597,7 +594,13 @@ def _make_solve(
         state.release()
         return state.shape[0]  # type: ignore[return-value]
 
-    return solve
+    return solve  # type: ignore[return-value]
+
+
+def _make_solve(
+    indices: Array, shape: tuple[int, ...], *, enabled: bool = True
+) -> Callable[..., tuple[int, splx.SolveProfile | None]]:
+    return splx.profile_solves(enabled=enabled)(_make_jitted_solve(indices, shape))
 
 
 def test_profile_solves_returns_result_and_profile(enable_x64: None) -> None:
@@ -611,10 +614,11 @@ def test_profile_solves_returns_result_and_profile(enable_x64: None) -> None:
 
 
 def test_profile_solves_enabled_false_skips_profiling(enable_x64: None) -> None:
-    """`enabled=False` returns `(result, None)` and profiles nothing."""
+    """A function decorated with `enabled=False` returns `(result, None)` and profiles
+    nothing."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
-    solve = _make_solve(sparsity.indices, sparsity.shape)
-    result, profile = solve(sparsity.data, enabled=False)
+    solve = _make_solve(sparsity.indices, sparsity.shape, enabled=False)
+    result, profile = solve(sparsity.data)
     assert result == SQUARE_MATRIX.shape[0]
     assert profile is None
 
@@ -639,20 +643,34 @@ def test_profile_solves_profiles_repeated_calls(enable_x64: None) -> None:
     assert profile1.records is not profile2.records
 
 
+def test_profile_solves_bare_decorator(enable_x64: None) -> None:
+    """The bare `@profile_solves` form profiles like `@profile_solves()`."""
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    solve = splx.profile_solves(_make_jitted_solve(sparsity.indices, sparsity.shape))
+    result, profile = solve(sparsity.data)
+    assert result == SQUARE_MATRIX.shape[0]
+    assert isinstance(profile, splx.SolveProfile)
+    assert "init" in _ops(profile)
+
+
 def test_profile_solves_first_call_disabled_forfeits_profiling(
     enable_x64: None,
 ) -> None:
-    """If the very first call for a shape happens with `enabled=False`, that shape's
-    compiled executable never gets profiling hooks, so a later `enabled=True` call for the
-    same shape returns an empty profile. This is the one sharp edge `profile_solves` cannot
-    remove, inherent to JAX compiling once per shape: always let the first call for a shape
-    go through with profiling enabled (the default) if you might ever want to profile it."""
+    """If the very first call for a shape goes through a wrapper with `enabled=False`,
+    that shape's compiled executable never gets profiling hooks. A later call for the same
+    shape through an enabled wrapper around the same jitted function then returns an empty
+    profile. This is the one sharp edge `profile_solves` cannot remove, inherent to JAX
+    compiling once per shape: always let the first call for a shape go through with
+    profiling enabled if you might ever want to profile it."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
-    solve = _make_solve(sparsity.indices, sparsity.shape)
+    jitted = _make_jitted_solve(sparsity.indices, sparsity.shape)
+    disabled = splx.profile_solves(enabled=False)(jitted)
+    enabled = splx.profile_solves(jitted)
 
     # First call for this shape, so no profiling hooks are ever compiled into it.
-    solve(sparsity.data, enabled=False)
-    # Same shape, so this is a cache hit against the executable built above.
-    _, profile = solve(sparsity.data)
+    disabled(sparsity.data)
+    # Same shape and same jitted function, so this is a cache hit against the executable
+    # built above.
+    _, profile = enabled(sparsity.data)
     assert profile is not None
     assert profile.records == []
