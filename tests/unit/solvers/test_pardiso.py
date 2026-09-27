@@ -36,6 +36,7 @@ from .conftest import (
 pytestmark = pytest.mark.usefixtures("enable_x64")
 
 
+@pytest.mark.cpu_only
 def test_pardiso_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """`Pardiso()` raises `ImportError` when `pardiso_mkl_jax` is not installed.
 
@@ -73,6 +74,7 @@ def _spy(name: str) -> Generator[list[bool], None, None]:
         setattr(primitive, name, original)
 
 
+@pytest.mark.cpu_only
 def test_init_factors_then_solves_stateful(make_operator: OperatorFactory) -> None:
     """`init` analyzes and factorizes once, then `compute` reuses the factorization
     through `solve_stateful`."""
@@ -90,6 +92,7 @@ def test_init_factors_then_solves_stateful(make_operator: OperatorFactory) -> No
     assert len(solve_calls) == 1
 
 
+@pytest.mark.cpu_only
 def test_update_same_pattern_reuses_analysis() -> None:
     """`update` on an operator sharing the sparsity tag refactors while reusing the
     analysis, so `analyze` runs once, `factor` runs per matrix, and the native
@@ -114,6 +117,7 @@ def test_update_same_pattern_reuses_analysis() -> None:
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 
+@pytest.mark.cpu_only
 def test_init_symbolic_defers_analysis() -> None:
     """Under Pardiso's default weighted matching, `init_symbolic` defers analysis: it
     carries no token, and the first `update` runs analyze and factor."""
@@ -128,6 +132,7 @@ def test_init_symbolic_defers_analysis() -> None:
     assert updated.token is not None
 
 
+@pytest.mark.cpu_only
 def test_transpose_reuses_factorization() -> None:
     """`transpose` reuses the same token and solves A^T through `solve_stateful`, with no
     extra analyze or factor."""
@@ -146,6 +151,7 @@ def test_transpose_reuses_factorization() -> None:
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 
+@pytest.mark.cpu_only
 def test_conj_real_is_a_no_op() -> None:
     """`Pardiso` is real-only, so `conj` returns the state unchanged."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
@@ -155,6 +161,7 @@ def test_conj_real_is_a_no_op() -> None:
     assert conjugated is state
 
 
+@pytest.mark.cpu_only
 def test_release_frees_the_handle() -> None:
     """`release` calls `primitive.release` once, freeing the native factorization."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
@@ -165,6 +172,7 @@ def test_release_frees_the_handle() -> None:
     assert len(release_calls) == 1
 
 
+@pytest.mark.cpu_only
 def test_zero_diagonal_matrix_solves_accurately() -> None:
     """A matrix with zeros on its diagonal must solve to a small residual.
 
@@ -198,6 +206,7 @@ def test_zero_diagonal_matrix_solves_accurately() -> None:
     assert residual(symbolic) < 1e-10, "deferred symbolic path perturbed its pivots"
 
 
+@pytest.mark.cpu_only
 def test_update_reuse_stays_accurate_on_matching_sensitive_values() -> None:
     """Reusing the analysis for values that break the previous weighted matching must
     still solve accurately, because `update` reanalyzes when the reused factorization

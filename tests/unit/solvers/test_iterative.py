@@ -101,6 +101,7 @@ def _relative_residual(
     return jnp.linalg.norm(vector - operator.mv(solution)) / jnp.linalg.norm(vector)
 
 
+@pytest.mark.cpu_only
 def test_wraps_direct_solver_matches_numpy(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
@@ -112,6 +113,7 @@ def test_wraps_direct_solver_matches_numpy(
     assert jnp.allclose(solution, _EXPECTED, atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_result_successful_and_residual_within_tol(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
@@ -172,6 +174,7 @@ def test_tighter_tol_reduces_the_residual(
     assert fine_residual < coarse_residual
 
 
+@pytest.mark.cpu_only
 def test_symbolic_state_cannot_solve(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
@@ -192,6 +195,7 @@ def test_symbolic_state_cannot_solve(
     assert jnp.allclose(solution, _EXPECTED, atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_transpose_solves_transposed_system(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
@@ -209,6 +213,7 @@ def test_transpose_solves_transposed_system(
     assert jnp.allclose(solution, expected, atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_update_no_op_returns_same_state(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
@@ -222,6 +227,7 @@ def test_update_no_op_returns_same_state(
     state.release()
 
 
+@pytest.mark.cpu_only
 def test_solve_under_jit(make_operator: OperatorFactory, enable_x64: None) -> None:
     """The refinement loop is traceable, so a solve wrapped in `jax.jit` runs and gives
     the right answer."""
@@ -235,6 +241,7 @@ def test_solve_under_jit(make_operator: OperatorFactory, enable_x64: None) -> No
     assert jnp.allclose(solve(RIGHT_HAND_SIDE), _EXPECTED, atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_differentiable_wrt_vector(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
@@ -255,6 +262,7 @@ def test_differentiable_wrt_vector(
     )
 
 
+@pytest.mark.cpu_only
 def test_stateful_linear_solve_returns_tuple(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
@@ -269,6 +277,7 @@ def test_stateful_linear_solve_returns_tuple(
     assert jnp.allclose(solution.value, _EXPECTED, atol=1e-8)
 
 
+@pytest.mark.cpu_only
 def test_refinement_fixes_a_stale_factorization(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:

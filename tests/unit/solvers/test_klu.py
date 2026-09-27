@@ -56,6 +56,7 @@ def _spy(function_name: str) -> Generator[list[bool], None, None]:
         setattr(klu, function_name, original)
 
 
+@pytest.mark.cpu_only
 def test_init_computes_with_solve_with_numeric(
     make_operator: OperatorFactory,
 ) -> None:
@@ -73,6 +74,7 @@ def test_init_computes_with_solve_with_numeric(
     assert not solve_calls, "compute used the one-shot klujax.solve"
 
 
+@pytest.mark.cpu_only
 def test_update_same_pattern_reuses_symbol_and_refactors() -> None:
     """`update` on an operator sharing the sparsity tag reuses the symbolic token and
     the previous numeric factorization, so `analyze` runs once and the pivot-reusing
@@ -98,6 +100,7 @@ def _square_jacobian_function(x: jnp.ndarray, args: object) -> jnp.ndarray:
     return 3.0 * x + x**2 + 0.5 * jnp.roll(x, 1) * x
 
 
+@pytest.mark.cpu_only
 def test_update_across_jacobian_points_reuses_analysis() -> None:
     """Operators from one `operator_at` factory carry a pattern tag from their shared
     coloring, so `update` across evaluation points reuses the analysis, and a BCOO
@@ -122,6 +125,7 @@ def test_update_across_jacobian_points_reuses_analysis() -> None:
     )
 
 
+@pytest.mark.cpu_only
 def test_update_falls_back_when_reused_pivots_go_bad() -> None:
     """When new values leave the reused pivots badly scaled, the guarded refactor falls
     back to a fresh factor, so the solve stays accurate. The second matrix zeros out a
@@ -143,6 +147,7 @@ def test_update_falls_back_when_reused_pivots_go_bad() -> None:
     assert jnp.allclose(solution, expected, atol=1e-6)
 
 
+@pytest.mark.cpu_only
 def test_transpose_reuses_factorization_via_tsolve() -> None:
     """`transpose` reuses the same tokens and solves A^T through
     `tsolve_with_numeric_with_status`."""
@@ -165,6 +170,7 @@ def test_transpose_reuses_factorization_via_tsolve() -> None:
     assert jnp.allclose(solution, expected, atol=1e-5)
 
 
+@pytest.mark.cpu_only
 def test_conj_real_is_a_no_op() -> None:
     """For a real matrix, `conj` returns the same state unchanged."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
@@ -174,6 +180,7 @@ def test_conj_real_is_a_no_op() -> None:
     assert conjugated is state
 
 
+@pytest.mark.cpu_only
 def test_conj_complex_reuses_symbol_creates_new_numeric() -> None:
     """For a complex matrix, `conj` reuses the symbolic token (same sparsity) and builds a
     fresh numeric token for conj(A)."""
@@ -188,6 +195,7 @@ def test_conj_complex_reuses_symbol_creates_new_numeric() -> None:
     assert jnp.allclose(conjugated.coo[2], state.coo[2].conj())
 
 
+@pytest.mark.cpu_only
 def test_release_frees_both_handles() -> None:
     """`release` frees the symbolic and the numeric cache slot once each."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
@@ -199,6 +207,7 @@ def test_release_frees_both_handles() -> None:
     assert len(numeric_frees) == 1
 
 
+@pytest.mark.cpu_only
 def test_init_symbolic_defers_numeric() -> None:
     """`init_symbolic` analyzes only, so the state carries a symbolic token but no numeric
     one until `update` folds in an operator."""
