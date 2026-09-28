@@ -658,6 +658,107 @@ def test_generic_operations_in_program_order_under_transforms(
 
 
 @pytest.mark.cpu_only
+def test_stateful_transform_profiles_one_sequence_in_program_order(
+    enable_x64: None,
+) -> None:
+    """A jitted `stateful_solve_transform` of two naive `lineax.linear_solve` calls records
+    one sequence in program order. The records of the `init` `lineax` runs itself are
+    dropped, since the threaded state replaces it, and each `compute` sorts at its solve."""
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    tag = splx.sparsity_pattern_tag(sparsity)
+    first = splx.BCOOLinearOperator(sparsity, tags=tag)
+    second = splx.BCOOLinearOperator(BCOO.fromdense(2.0 * SQUARE_MATRIX), tags=tag)
+
+    @eqx.filter_jit
+    @splx.stateful_solve_transform
+    def solve_two(
+        first: splx.BCOOLinearOperator, second: splx.BCOOLinearOperator
+    ) -> tuple[lx.Solution, lx.Solution]:
+        # The full `Solution`s are returned, so their `state` fields stay live.
+        return (
+            lx.linear_solve(first, RIGHT_HAND_SIDE, splx.KLU()),
+            lx.linear_solve(second, RIGHT_HAND_SIDE, splx.KLU()),
+        )
+
+    profile = splx.create_solve_profile()
+    with profile:
+        jax.block_until_ready(solve_two(first, second))
+    generic_ops = [
+        record.operation for record in _ordered(profile) if record.solver is None
+    ]
+    assert generic_ops == [
+        "init",
+        "compute",
+        "track",
+        "update",
+        "compute",
+        "track",
+        "release",
+    ]
+    assert len(profile.sequences) == 1
+    assert _ops(profile).count("analyze") == 1
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    ("transform", "batch_rhs"),
+    [
+        (eqx.filter_jit, False),
+        (lambda fn: eqx.filter_jit(jax.vmap(fn, in_axes=(None, 0))), True),
+        (lambda fn: eqx.filter_jit(jax.jacfwd(fn, argnums=1)), False),
+        (lambda fn: eqx.filter_jit(jax.grad(fn, argnums=1)), False),
+    ],
+    ids=["jit", "vmap", "jacfwd", "grad"],
+)
+def test_stateful_transform_profile_matches_hand_written_solves(
+    enable_x64: None,
+    transform: Callable[[Callable[[Array, Array], Array]], Callable[..., Any]],
+    batch_rhs: bool,
+) -> None:
+    """A `stateful_solve_transform` of naive `lineax.linear_solve` calls records the same
+    operations, in the same order, as the same solves written by hand with
+    `splineax.linear_solve`, under `jit`, `vmap`, `jacfwd`, and `grad`."""
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    tag = splx.sparsity_pattern_tag(sparsity)
+
+    def operator_of(values: Array) -> splx.BCOOLinearOperator:
+        return splx.BCOOLinearOperator(
+            BCOO(
+                (values, sparsity.indices),
+                shape=sparsity.shape,
+                indices_sorted=True,
+            ),
+            tags=tag,
+        )
+
+    def naive_solves(data: Array, rhs: Array) -> Array:
+        first = lx.linear_solve(operator_of(data), rhs, splx.KLU())
+        second = lx.linear_solve(operator_of(2.0 * data), first.value, splx.KLU())
+        return second.value.sum()
+
+    rhs = (
+        jnp.stack([RIGHT_HAND_SIDE, 2.0 * RIGHT_HAND_SIDE])
+        if batch_rhs
+        else RIGHT_HAND_SIDE
+    )
+    profiles = []
+    for fn in (
+        _make_chained_solves(sparsity),
+        splx.stateful_solve_transform(naive_solves),
+    ):
+        profile = splx.create_solve_profile()
+        with profile:
+            jax.block_until_ready(transform(fn)(sparsity.data, rhs))
+        profiles.append(profile)
+    hand_written, transformed = profiles
+
+    def operations(profile: splx.SolveProfile) -> list[tuple[str | None, str]]:
+        return [(record.solver, record.operation) for record in _ordered(profile)]
+
+    assert operations(transformed) == operations(hand_written)
+
+
+@pytest.mark.cpu_only
 def test_function_compiled_outside_context_records_nothing(enable_x64: None) -> None:
     """Tracing is applied at profile time, so a function compiled before the block emits
     nothing when later called inside it (a documented limitation)."""
