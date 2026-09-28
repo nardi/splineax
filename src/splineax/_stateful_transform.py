@@ -1,8 +1,9 @@
 """Turn naive `lineax.linear_solve` code into stateful solving.
 
 `stateful_solve_transform` wraps a function that calls `lineax.linear_solve` and threads a
-solver state through its solves, so they reuse a factorization, using only the generic
-stateful API (the solver's `init` and `update`, and a state's `track` and `release`).
+solver state through its solves, so they reuse a factorization. Each threaded solve is
+staged through `splineax.linear_solve`, so it behaves exactly like a hand-written call that
+passes the state along, and the final state is released with the generic `release`.
 
 A solve inside a `lax.scan` or `lax.while_loop` is threaded by carrying the state through
 the loop, and the first iteration is unrolled to create the state when there is none yet.
@@ -14,7 +15,6 @@ checkpointing.
 from collections.abc import Callable, Mapping
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar, cast, overload
 
-import equinox as eqx
 import equinox.internal as eqxi
 import jax
 import jax.core
@@ -27,7 +27,9 @@ from lineax import AbstractLinearOperator, AbstractLinearSolver
 from lineax._solution import RESULTS
 from lineax._solve import linear_solve_p
 
-from splineax.solvers._stateful import StatefulSolver, TrackingSolverState
+from splineax._profile import is_record_callback
+from splineax.solvers._sparse import linear_solve as splineax_linear_solve
+from splineax.solvers._stateful import StatefulSolver
 
 _OutputT = TypeVar("_OutputT")
 """The return type of the wrapped function."""
@@ -86,17 +88,6 @@ def _solver_matches(solver: AbstractLinearSolver, filter_solver: _FilterSolver) 
     if isinstance(filter_solver, type):
         return isinstance(solver, filter_solver)
     return filter_solver(solver)
-
-
-def _stop_gradient_leaves(tree: PyTree) -> PyTree:
-    """Stop gradients on the array leaves of a pytree, leaving the rest untouched.
-
-    `lineax`'s solve primitive asserts its state carries no tangent, so the state and the
-    operator it is built from are stopped before the bind. Kept generic here rather than
-    relying on a solver stopping its own values.
-    """
-    dynamic, static = eqx.partition(tree, eqx.is_array)
-    return eqx.combine(jax.lax.stop_gradient(dynamic), static)
 
 
 def _is_runtime_value(leaf: object) -> bool:
@@ -158,17 +149,70 @@ def _nested_jaxprs(eqn: JaxprEqn) -> list[Jaxpr]:
     return found
 
 
-def _jaxpr_has_selected_solve(jaxpr: Jaxpr, filter_solver: _FilterSolver) -> bool:
-    """Whether a jaxpr, or any it nests, holds a solve the filter would thread.
+def _is_selected_solve(eqn: JaxprEqn, filter_solver: _FilterSolver) -> bool:
+    """Whether an equation binds `linear_solve_p` with a solver the filter would thread.
 
     The solver is a static param, so it reads out without running anything, by
     reconstructing with placeholder operands.
     """
+    if eqn.primitive is not linear_solve_p:
+        return False
+    arguments = _reconstruct_solve_arguments(eqn, [None] * len(eqn.invars))
+    return _solver_matches(arguments[4], filter_solver)
+
+
+def _is_profile_record(eqn: JaxprEqn) -> bool:
+    """Whether an equation is the `io_callback` that appends a solve-profile record."""
+    if eqn.primitive.name != "io_callback":
+        return False
+    callback = getattr(eqn.params.get("callback"), "callback_func", None)
+    return is_record_callback(callback)
+
+
+def _state_substitutions(eqn: JaxprEqn, new_state: PyTree) -> dict[Var, Any]:
+    """Map the invars carrying a solve's own state to the matching leaves of `new_state`.
+
+    `lineax.linear_solve` returns the state it bound on the `Solution`, so its outputs read
+    these invars. Pointing them at the threaded state leaves the state `lineax` built dead,
+    which lets DCE drop it. Each operand is swapped for a unique marker and the arguments
+    are rebuilt, so the state's leaves say which invars they came from.
+
+    Returns no substitutions when the two states differ in structure or leaf type, which
+    keeps the state `lineax` built. A var the solve also reads outside its state is skipped,
+    so its other readers keep their value.
+    """
+    markers = [object() for _ in eqn.invars]
+    index_by_marker = {id(marker): index for index, marker in enumerate(markers)}
+    marked_state = _reconstruct_solve_arguments(eqn, markers)[1]
+    marked_leaves, marked_treedef = jax.tree_util.tree_flatten(marked_state)
+    new_leaves, new_treedef = jax.tree_util.tree_flatten(new_state)
+    if marked_treedef != new_treedef:
+        return {}
+
+    substitutions: dict[Var, Any] = {}
+    for marked, new in zip(marked_leaves, new_leaves):
+        index = index_by_marker.get(id(marked))
+        if index is None:
+            # A static leaf, which is no operand.
+            continue
+        var = eqn.invars[index]
+        if not _is_runtime_value(new):
+            return {}
+        # A solve operand is always an array, so its aval is a `ShapedArray`.
+        aval = cast(jax.core.ShapedArray, var.aval)
+        if new.shape != aval.shape or new.dtype != aval.dtype:
+            return {}
+        if isinstance(var, Literal) or eqn.invars.count(var) > 1:
+            continue
+        substitutions[var] = new
+    return substitutions
+
+
+def _jaxpr_has_selected_solve(jaxpr: Jaxpr, filter_solver: _FilterSolver) -> bool:
+    """Whether a jaxpr, or any it nests, holds a solve the filter would thread."""
     for eqn in jaxpr.eqns:
-        if eqn.primitive is linear_solve_p:
-            arguments = _reconstruct_solve_arguments(eqn, [None] * len(eqn.invars))
-            if _solver_matches(arguments[4], filter_solver):
-                return True
+        if _is_selected_solve(eqn, filter_solver):
+            return True
         if any(
             _jaxpr_has_selected_solve(inner, filter_solver)
             for inner in _nested_jaxprs(eqn)
@@ -199,8 +243,21 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         self.state = state
         self.pass_through_custom_diff = pass_through_custom_diff
 
-    def interpret(self, jaxpr: Jaxpr, consts: list[Any], args: list[Any]) -> list[Any]:
-        """Evaluate the jaxpr against these argument values, returning its output values."""
+    def interpret(
+        self,
+        jaxpr: Jaxpr,
+        consts: list[Any],
+        args: list[Any],
+        drop_profile_records: bool = False,
+    ) -> list[Any]:
+        """Evaluate the jaxpr against these argument values, returning its output values.
+
+        Profile records that come before a threaded solve in the same jaxpr are dropped,
+        and so are all records when `drop_profile_records` is true. A jaxpr that binds a
+        solve itself is the body of `lineax.linear_solve`, where everything before the bind
+        is `lineax`'s own `init`. The threaded state replaces that init, so its records
+        describe work that no longer runs.
+        """
         env: dict[Var, Any] = {}
 
         def read(atom: _Atom) -> Any:
@@ -214,31 +271,52 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         for invar, arg in zip(jaxpr.invars, args):
             write(invar, arg)
 
-        for eqn in jaxpr.eqns:
+        last_solve_index = max(
+            (
+                index
+                for index, eqn in enumerate(jaxpr.eqns)
+                if _is_selected_solve(eqn, self.filter_solver)
+            ),
+            default=-1,
+        )
+        for index, eqn in enumerate(jaxpr.eqns):
+            drops_records = drop_profile_records or index < last_solve_index
+            if drops_records and _is_profile_record(eqn):
+                continue
             operands = [read(v) for v in eqn.invars]
-            outputs = self._process_equation(eqn, operands)
+            outputs = self._process_equation(eqn, operands, env, drops_records)
             for outvar, value in zip(eqn.outvars, outputs):
                 write(outvar, value)
 
         return [read(v) for v in jaxpr.outvars]
 
-    def _process_equation(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
+    def _process_equation(
+        self,
+        eqn: JaxprEqn,
+        operands: list[Any],
+        env: dict[Var, Any],
+        drop_profile_records: bool,
+    ) -> list[Any]:
         """Produce one equation's output values, threading the state through a matched solve.
 
         A matched `linear_solve_p` is threaded, an inline primitive has its body interpreted
         in place, a higher-order primitive that nests a matched solve raises, and everything
-        else is rebound as `jax.core.eval_jaxpr` would.
+        else is rebound as `jax.core.eval_jaxpr` would. A threaded solve may rewrite `env`,
+        see `_thread_solve`, and an inlined body drops its profile records when
+        `drop_profile_records` is true.
         """
         primitive: Primitive = eqn.primitive
         if primitive is linear_solve_p:
             arguments = _reconstruct_solve_arguments(eqn, operands)
             if _solver_matches(arguments[4], self.filter_solver):
-                return self._thread_solve(arguments)
+                return self._thread_solve(eqn, arguments, env)
             return _runtime_value_leaves(_rebind_solve(arguments))
 
         if primitive.name in _INLINE_PRIMITIVES:
             inner = cast(ClosedJaxpr, eqn.params["jaxpr"])
-            return self.interpret(inner.jaxpr, inner.consts, operands)
+            return self.interpret(
+                inner.jaxpr, inner.consts, operands, drop_profile_records
+            )
 
         nested = _nested_jaxprs(eqn)
         if any(
@@ -269,33 +347,27 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         result = primitive.bind(*operands, **bind_params)
         return list(result) if primitive.multiple_results else [result]
 
-    def _thread_solve(self, arguments: _SolveArguments) -> list[Any]:
-        """Update the state for this solve's operator, solve, and track the solution.
+    def _thread_solve(
+        self, eqn: JaxprEqn, arguments: _SolveArguments, env: dict[Var, Any]
+    ) -> list[Any]:
+        """Solve through `splineax.linear_solve`, threading the state in and out.
 
-        The operator and the state are stopped before the bind so the solve's autodiff rule
-        sees no state tangent, matching what `lineax.linear_solve` does with the state it
-        builds. Returns the solve's output values.
+        The solve is staged exactly as a hand-written `splineax.linear_solve` call would
+        stage it, with the same `init` or `update`, `track`, differentiation rule, and
+        profile order. The vars that held the old state then point at the state this solve
+        used, see `_state_substitutions`. Returns the solve's output values.
         """
-        operator, _old_state, vector, options, solver_any, throw = arguments
-        solver = cast(StatefulSolver[_StateT], solver_any)
-        stopped_operator = _stop_gradient_leaves(operator)
-        if self.state is None:
-            self.state = solver.init(stopped_operator, {})
-        else:
-            self.state = solver.update(self.state, stopped_operator, {})
-        solution, result_code, stats = _rebind_solve(
-            (
-                operator,
-                _stop_gradient_leaves(self.state),
-                vector,
-                options,
-                solver_any,
-                throw,
-            )
+        operator, _old_state, vector, options, solver, throw = arguments
+        solution, self.state = splineax_linear_solve(
+            operator,
+            vector,
+            solver,
+            options=dict(options),
+            state=self.state,
+            throw=throw,
         )
-        tracking_state = cast(TrackingSolverState, self.state)
-        self.state = cast(_StateT, tracking_state.track(solution))
-        return _runtime_value_leaves((solution, result_code, stats))
+        env.update(_state_substitutions(eqn, solution.state))
+        return _runtime_value_leaves((solution.value, solution.result, solution.stats))
 
     def _require_prior_state(self, region: str) -> None:
         """Raise if no state exists yet to seed a control-flow region's carry."""
