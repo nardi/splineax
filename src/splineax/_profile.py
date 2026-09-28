@@ -475,6 +475,68 @@ def compute_scope() -> Iterator[None]:
         _LOCAL.compute_depth = depth
 
 
+@dataclasses.dataclass(eq=False)
+class _RecordCallback:
+    """The host callback of one `record_operation`, which appends its record when it fires.
+
+    It is a class rather than a closure so a jaxpr pass can tell a profile record apart from
+    other `io_callback`s, see `is_record_callback`. `eq=False` keeps the identity hash, since
+    the dict fields are unhashable.
+    """
+
+    operation: str
+    """The operation name the record carries."""
+
+    solver: str | None
+    """The solver type for a solver-specific operation, or None for a generic one."""
+
+    input_fields: dict[str, Any]
+    """The input fields, known at trace time."""
+
+    static_outputs: dict[str, Any]
+    """The output fields known at trace time, used when `outputs_fn` is None."""
+
+    outputs_fn: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None
+    """Builds the output fields from the converted runtime values, or None."""
+
+    conditional: bool
+    """Whether the runtime values carry a `__cond__` flag that gates the record."""
+
+    order: tuple[int, ...]
+    """The sort key for program order, taken at trace time."""
+
+    def __call__(self, values: Mapping[str, Any]) -> None:
+        """Append the record into the profile active on this thread, if any."""
+        profile = _active()
+        if profile is None:
+            return
+        if self.conditional and not values["__cond__"]:
+            return
+        if self.conditional:
+            values = {key: value for key, value in values.items() if key != "__cond__"}
+        merged: dict[str, Any] = {}
+        for key, value in values.items():
+            merged[key] = _to_python(value)
+        if self.outputs_fn is not None:
+            merged.update(self.outputs_fn(merged))
+        else:
+            merged.update(self.static_outputs)
+        profile._append(
+            ProfileRecord(
+                operation=self.operation,
+                solver=self.solver,
+                inputs=self.input_fields,
+                outputs=merged,
+                order=self.order,
+            )
+        )
+
+
+def is_record_callback(callback: object) -> bool:
+    """Whether `callback` is the host callback of a `record_operation` record."""
+    return isinstance(callback, _RecordCallback)
+
+
 def _to_python(value: Any) -> Any:
     """Convert a runtime array handed to the callback into a plain Python scalar/list."""
     array = jax.numpy.asarray(value)
@@ -524,9 +586,8 @@ def record_operation(
         input_fields = dict(inputs)
     else:
         input_fields = dict(inputs())
-    # Split `outputs` into its two shapes up front. A nested function does not narrow a
-    # union type captured from the enclosing scope, so the branch has to happen here,
-    # not inside `_callback`. Checked against `Mapping` rather than `callable`, since a
+    # Split `outputs` into its two shapes up front, so `_RecordCallback` holds each in a
+    # field of its own type. Checked against `Mapping` rather than `callable`, since a
     # `Mapping` could itself implement `__call__` and `callable` alone would not rule
     # that branch out.
     if outputs is None or isinstance(outputs, Mapping):
@@ -542,29 +603,13 @@ def record_operation(
     if conditional:
         dynamic_values["__cond__"] = jax.lax.stop_gradient(jnp.asarray(condition))
 
-    def _callback(values: Mapping[str, Any]) -> None:
-        profile = _active()
-        if profile is None:
-            return
-        if conditional and not values["__cond__"]:
-            return
-        if conditional:
-            values = {key: value for key, value in values.items() if key != "__cond__"}
-        merged: dict[str, Any] = {}
-        for key, value in values.items():
-            merged[key] = _to_python(value)
-        if outputs_fn is not None:
-            merged.update(outputs_fn(merged))
-        else:
-            merged.update(static_outputs)
-        profile._append(
-            ProfileRecord(
-                operation=operation,
-                solver=solver,
-                inputs=input_fields,
-                outputs=merged,
-                order=order,
-            )
-        )
-
-    io_callback(_callback, (), dynamic_values, ordered=False)
+    callback = _RecordCallback(
+        operation=operation,
+        solver=solver,
+        input_fields=input_fields,
+        static_outputs=static_outputs,
+        outputs_fn=outputs_fn,
+        conditional=conditional,
+        order=order,
+    )
+    io_callback(callback, (), dynamic_values, ordered=False)
