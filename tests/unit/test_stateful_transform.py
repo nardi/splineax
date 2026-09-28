@@ -112,6 +112,34 @@ def test_reuses_factorization_across_solves() -> None:
 
 
 @pytest.mark.cpu_only
+def test_returned_solution_state_is_the_threaded_state() -> None:
+    """A function that returns the full `Solution`s still analyzes once. Each `Solution`
+    carries the threaded state its solve used, so the `init` `lineax` ran is dead and
+    pruned."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    indices = _indices()
+    solver = splx.KLU()
+
+    def fn(data: jax.Array, b1: jax.Array, b2: jax.Array):
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=(3, 3)), tags=tag
+        )
+        return (
+            lx.linear_solve(operator, b1, solver),
+            lx.linear_solve(operator, b2, solver),
+        )
+
+    run = splx.stateful_solve_transform(fn)
+    b1, b2 = _b1(), _b2()
+    threaded = make_jaxpr(lambda d: run(d, b1, b2))(_data())
+    assert _count_primitive(threaded.jaxpr, "analyze") == 1
+    solution1, solution2 = run(_data(), b1, b2)
+    expected1, expected2 = fn(_data(), b1, b2)
+    assert jnp.allclose(solution1.value, expected1.value, atol=1e-8)
+    assert jnp.allclose(solution2.value, expected2.value, atol=1e-8)
+
+
+@pytest.mark.cpu_only
 def test_composes_with_jit_vmap_and_diff() -> None:
     """`jit`, `vmap`, `jacfwd`, and `jacrev` of the wrapped function match the plain one."""
     tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
