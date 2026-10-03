@@ -377,6 +377,25 @@ def _solve_factorization(
     )
 
 
+def update_then_compute(
+    solver: Any,
+    state: Any,
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    options: dict[str, Any],
+) -> tuple[PyTree[Any], RESULTS, dict[str, Any], Any]:
+    """Update `state` for `operator`, then solve through `lineax.linear_solve`.
+
+    This is the `update_and_compute` of a solver that has nothing to decide after the
+    solve. It never raises on a failed result. The caller checks the result code.
+    """
+    updated_state = solver.update(state, operator, options)
+    solution = _solve_factorization(
+        operator, vector, solver, options, updated_state, throw=False
+    )
+    return solution.value, solution.result, solution.stats, updated_state
+
+
 def _stateful_solve_impl(
     operator: AbstractLinearOperator,
     vector: PyTree[Any],
@@ -388,12 +407,24 @@ def _stateful_solve_impl(
 ) -> tuple[Solution, Any]:
     """The solve body shared by `linear_solve` and its custom JVP rule.
 
-    Runs `init` or `update`, solves, and tracks the solution, exactly as `linear_solve`
-    does for a stateful solver.
+    Runs `init` when there is no state, then `update_and_compute`, and tracks the
+    solution, exactly as `linear_solve` does for a stateful solver.
     """
     opts = {} if options is None else options
-    state = _prepare_state(operator, state, solver, opts)
-    solution = _solve_factorization(operator, vector, solver, opts, state, throw)
+    if state is None:
+        # A state fresh from `init` matches the operator, so there is nothing to update.
+        state = solver.init(operator, opts)
+        initial = _solve_factorization(
+            operator, vector, solver, opts, state, throw=False
+        )
+        value, result, stats = initial.value, initial.result, initial.stats
+    else:
+        value, result, stats, state = solver.update_and_compute(
+            state, operator, vector, opts
+        )
+    if throw:
+        value = result.error_if(value, result != RESULTS.successful)
+    solution = Solution(value=value, result=result, state=state, stats=stats)
     # Order any later `release` after this solve. A no-op for solvers whose state owns
     # nothing, such as `Spsolve`.
     if hasattr(state, "track"):

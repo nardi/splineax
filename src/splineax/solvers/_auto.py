@@ -113,6 +113,17 @@ class _AutoDispatch(AbstractLinearSolver[_State]):
     ) -> _State:
         return self._solver_for_state(state).update(state, operator, options)
 
+    def update_and_compute(
+        self,
+        state: Any,
+        operator: AbstractLinearOperator,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any], _State]:
+        return self._solver_for_state(state).update_and_compute(
+            state, operator, vector, options
+        )
+
     def compute(
         self, state: Any, vector: PyTree[Array], options: dict[str, Any]
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
@@ -214,6 +225,15 @@ class AutoSparseLinearSolver(AbstractLinearSolver[TrackingSolverState]):
         options: dict[str, Any] = {},
     ) -> TrackingSolverState:
         return self._solver.update(state, operator, options)
+
+    def update_and_compute(
+        self,
+        state: TrackingSolverState,
+        operator: AbstractLinearOperator,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any], TrackingSolverState]:
+        return self._solver.update_and_compute(state, operator, vector, options)
 
     def compute(
         self, state: TrackingSolverState, vector: PyTree[Array], options: dict[str, Any]
