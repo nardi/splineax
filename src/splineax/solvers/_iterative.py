@@ -23,7 +23,7 @@ from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 
 from splineax._profile import compute_scope, record_operation
-from splineax.solvers._sparse import SparseLinearSolver, _Sparsity
+from splineax.solvers._sparse import SparseLinearSolver, _Sparsity, update_then_compute
 from splineax.solvers._stateful import TrackingSolverState
 
 _StateT = TypeVar("_StateT")
@@ -228,6 +228,16 @@ class IterativeRefinement(AbstractLinearSolver[_IterativeRefinementState]):
         if inner is state.inner_state:
             return state
         return _IterativeRefinementState(inner, operator)
+
+    def update_and_compute(
+        self,
+        state: _IterativeRefinementState,
+        operator: AbstractLinearOperator,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any], _IterativeRefinementState]:
+        """Update `state` for `operator`, then solve. See `update_then_compute`."""
+        return update_then_compute(self, state, operator, vector, options)
 
     def compute(
         self,

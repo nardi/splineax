@@ -214,3 +214,31 @@ def test_sparsity_tag_reuse_solves_new_values(
 
     expected = jnp.linalg.solve(np.asarray(second_matrix), np.asarray(RIGHT_HAND_SIDE))
     assert jnp.allclose(solution, expected, atol=1e-5)
+
+
+def _shared_pattern_operators() -> tuple[BCOOLinearOperator, BCOOLinearOperator]:
+    """Two operators with the same sparsity pattern and different values."""
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    tag = splx.sparsity_pattern_tag(sparsity)
+    first = BCOOLinearOperator(sparsity, tags=tag)
+    second = BCOOLinearOperator(BCOO.fromdense(2.0 * SQUARE_MATRIX), tags=tag)
+    return first, second
+
+
+def test_update_and_compute_matches_update_then_solve(
+    solver: splx.SparseLinearSolver,
+) -> None:
+    """`update_and_compute` returns the solution for the new operator and a state that
+    solves that operator again."""
+    first, second = _shared_pattern_operators()
+    state = solver.init(first, {})
+    solution, result, _, updated = solver.update_and_compute(
+        state, second, RIGHT_HAND_SIDE, {}
+    )
+    again = lx.linear_solve(second, RIGHT_HAND_SIDE, solver=solver, state=updated).value
+    updated.release()
+
+    new_expected = jnp.linalg.solve(2.0 * SQUARE_MATRIX, RIGHT_HAND_SIDE)
+    assert result == lx.RESULTS.successful
+    assert jnp.allclose(solution, new_expected, atol=1e-5)
+    assert jnp.allclose(again, new_expected, atol=1e-5)

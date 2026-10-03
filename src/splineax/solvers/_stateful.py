@@ -43,9 +43,11 @@ class StatefulSolver(Protocol[_StateT]):
 
     This is the part of the lineax `AbstractLinearSolver` interface we rely on, plus
     `update`. A solver satisfies it structurally, so no base class is needed. `update` folds
-    new information about the operator into an existing state.
+    new information about the operator into an existing state, and `update_and_compute`
+    does that and solves in one call, so a solver can choose how much of the state to
+    rebuild after seeing the result of the solve.
 
-    The states a solver produces from `init`, `update`, and a state's `track` should share
+    The states a solver produces from `init`, `update`/`update_and_compute`, and a state's `track` should share
     one pytree structure, so a state can be carried through a `scan` or `while_loop`, whose
     carry has a fixed structure. The sparse `init_symbolic` state may differ, since it holds
     only a symbolic analysis. Such a state must be `update`d before it is carried through a
@@ -63,6 +65,21 @@ class StatefulSolver(Protocol[_StateT]):
         options: dict[str, Any] = {},
     ) -> _StateT:
         """Fold a new operator into `state`, reusing prior work where possible."""
+        ...
+
+    def update_and_compute(
+        self,
+        state: _StateT,
+        operator: AbstractLinearOperator,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any], _StateT]:
+        """Fold `operator` into `state` and solve against `vector`.
+
+        Returns the solution, the result code, the solver statistics and the updated
+        state. A solver may defer or skip the work in `update` when the solve shows that
+        the existing state was good enough.
+        """
         ...
 
     def compute(
