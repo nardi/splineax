@@ -30,7 +30,7 @@ from splineax import (
     KLU,
     AutoSparseLinearSolver,
     CuDSS,
-    IterativeRefinement,
+    HybridDirectIterative,
     IterativeRefinementSettings,
     Pardiso,
     Spsolve,
@@ -38,7 +38,7 @@ from splineax import (
 from splineax.solvers import SparseLinearSolver
 from splineax.solvers._auto import _AutoDispatch, _cuda_backend_available
 from splineax.solvers._cudss import _cudss_available
-from splineax.solvers._iterative import _IterativeRefinementState
+from splineax.solvers._iterative import HybridState
 from splineax.solvers._klu import _KLUState
 from splineax.solvers._pardiso import _pardiso_available
 
@@ -185,17 +185,15 @@ def test_select_solver_returns_exact_solver_with_refinement(
     make_operator: OperatorFactory, pardiso_installed: None
 ) -> None:
     """`AutoSparseLinearSolver.select_solver` returns the exact solver it runs: an
-    `IterativeRefinement` wrapping the chosen direct solver by default, and the direct
+    `HybridDirectIterative` wrapping the chosen direct solver by default, and the direct
     dispatch itself when refinement is off."""
     operator = make_operator(SQUARE_MATRIX)
     with jax.enable_x64(True):
         refined = AutoSparseLinearSolver().select_solver(operator)
-        assert isinstance(refined, IterativeRefinement)
-        assert isinstance(refined.solver, _AutoDispatch)
+        assert isinstance(refined, HybridDirectIterative)
+        assert isinstance(refined.direct, _AutoDispatch)
 
-        plain = AutoSparseLinearSolver(iterative_refinement=False).select_solver(
-            operator
-        )
+        plain = AutoSparseLinearSolver(iterative=False).select_solver(operator)
         assert isinstance(plain, _AutoDispatch)
 
 
@@ -253,7 +251,7 @@ def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
 
         # Disable refinement so the state is the chosen direct solver's own, which this
         # test inspects to confirm the complex fallback landed on `KLU`.
-        solver = AutoSparseLinearSolver(iterative_refinement=False)
+        solver = AutoSparseLinearSolver(iterative=False)
         assert isinstance(_AutoDispatch().select_solver(operator), Pardiso)
 
         state = solver.init(operator, {})
@@ -275,16 +273,16 @@ def test_auto_falls_back_to_klu_for_complex_when_pardiso_chosen(
 def test_auto_applies_iterative_refinement_by_default(
     make_operator: OperatorFactory, enable_x64: None
 ) -> None:
-    """By default `AutoSparseLinearSolver` wraps its chosen solver in iterative
-    refinement, so its state is an `_IterativeRefinementState`. Disabling it returns the
-    chosen solver's own state instead."""
+    """By default `AutoSparseLinearSolver` combines its chosen solver with iterative
+    refinement, so its state is a `HybridState`. Disabling it returns the chosen solver's
+    own state instead."""
     operator = make_operator(SQUARE_MATRIX)
 
     refined = AutoSparseLinearSolver().init(operator, {})
-    assert isinstance(refined, _IterativeRefinementState)
+    assert isinstance(refined, HybridState)
 
-    plain = AutoSparseLinearSolver(iterative_refinement=False).init(operator, {})
-    assert not isinstance(plain, _IterativeRefinementState)
+    plain = AutoSparseLinearSolver(iterative=False).init(operator, {})
+    assert not isinstance(plain, HybridState)
 
 
 def test_auto_refinement_settings_are_forwarded(
@@ -294,11 +292,11 @@ def test_auto_refinement_settings_are_forwarded(
     `IterativeRefinement`, and the configured solve is still correct."""
     operator = make_operator(SQUARE_MATRIX)
     settings = IterativeRefinementSettings(tol=1e-8, max_steps=3)
-    solver = AutoSparseLinearSolver(iterative_refinement=settings)
+    solver = AutoSparseLinearSolver(iterative=settings)
     wrapper = solver.select_solver(operator)
-    assert isinstance(wrapper, IterativeRefinement)
+    assert isinstance(wrapper, HybridDirectIterative)
     assert wrapper.tol == 1e-8
-    assert wrapper.max_steps == 3
+    assert wrapper.iterative.max_steps == 3
 
     expected = jnp.linalg.solve(np.asarray(SQUARE_MATRIX), np.asarray(RIGHT_HAND_SIDE))
     solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver).value
@@ -310,7 +308,7 @@ def test_solvers_satisfy_sparse_linear_solver_protocol() -> None:
     assert isinstance(KLU(), SparseLinearSolver)
     assert isinstance(Spsolve(), SparseLinearSolver)
     assert isinstance(AutoSparseLinearSolver(), SparseLinearSolver)
-    assert isinstance(IterativeRefinement(KLU()), SparseLinearSolver)
+    assert isinstance(HybridDirectIterative(KLU()), SparseLinearSolver)
     if _pardiso_available():
         assert isinstance(Pardiso(), SparseLinearSolver)
     if _cudss_available():
