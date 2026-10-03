@@ -28,6 +28,7 @@ from splineax.solvers._sparse import (
     operator_pattern_tag,
     profile_inputs,
     sparse_indices_sorted,
+    update_then_compute,
     warn_if_unsorted,
 )
 
@@ -214,6 +215,16 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
             outputs={"outcome": "rebuilt", "reason": "No factorization to reuse"},
         )
         return self._build(operator, options)
+
+    def update_and_compute(
+        self,
+        state: _SpsolveState,
+        operator: AbstractLinearOperator,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any], _SpsolveState]:
+        """Update `state` for `operator`, then solve. See `update_then_compute`."""
+        return update_then_compute(self, state, operator, vector, options)
 
     def compute(
         self, state: _SpsolveState, vector: PyTree[Array], options: dict[str, Any]

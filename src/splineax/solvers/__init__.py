@@ -2,8 +2,19 @@ from ._auto import AutoSparseLinearSolver as AutoSparseLinearSolver
 from ._cudss import CuDSS as CuDSS
 from ._cudss import CuDSSMemory as CuDSSMemory
 from ._cudss import CuDSSReordering as CuDSSReordering
+from ._iterative import BiCGStabOptions as BiCGStabOptions
+from ._iterative import CGOptions as CGOptions
+from ._iterative import GMRESOptions as GMRESOptions
+from ._iterative import HybridDirectIterative as HybridDirectIterative
+from ._iterative import HybridSettings as HybridSettings
+from ._iterative import HybridState as HybridState
+from ._iterative import IterativeOptions as IterativeOptions
 from ._iterative import IterativeRefinement as IterativeRefinement
 from ._iterative import IterativeRefinementSettings as IterativeRefinementSettings
+from ._iterative import ReuseOptions as ReuseOptions
+from ._iterative import Richardson as Richardson
+from ._iterative import RichardsonOptions as RichardsonOptions
+from ._iterative import SupportedIterativeOptions as SupportedIterativeOptions
 from ._klu import KLU as KLU
 from ._pardiso import Pardiso as Pardiso
 from ._sparse import (

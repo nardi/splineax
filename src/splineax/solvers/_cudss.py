@@ -38,6 +38,7 @@ from splineax.solvers._sparse import (
     profile_inputs,
     sparsity_pattern_tag,
     sparsity_reuse_block,
+    update_then_compute,
 )
 
 if TYPE_CHECKING:
@@ -600,6 +601,16 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         return _CuDSSState(
             None, token, None, shape, False, sparsity_pattern_tag(sparsity)
         )
+
+    def update_and_compute(
+        self,
+        state: _CuDSSState,
+        operator: AbstractLinearOperator,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any], _CuDSSState]:
+        """Update `state` for `operator`, then solve. See `update_then_compute`."""
+        return update_then_compute(self, state, operator, vector, options)
 
     def update(
         self,

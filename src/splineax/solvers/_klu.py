@@ -34,6 +34,7 @@ from splineax.solvers._sparse import (
     profile_inputs,
     sparsity_pattern_tag,
     sparsity_reuse_block,
+    update_then_compute,
 )
 
 # `Ai` (row indices), `Aj` (column indices), `Ax` (values): the matrix in COO form.
@@ -413,6 +414,16 @@ class KLU(AbstractLinearSolver[_KLUState]):
             False,
             sparsity_pattern_tag(sparsity),
         )
+
+    def update_and_compute(
+        self,
+        state: _KLUState,
+        operator: AbstractLinearOperator,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any], _KLUState]:
+        """Update `state` for `operator`, then solve. See `update_then_compute`."""
+        return update_then_compute(self, state, operator, vector, options)
 
     def update(
         self,

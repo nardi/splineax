@@ -8,7 +8,11 @@ from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 
 from ._cudss import CuDSS, _cudss_available, _CuDSSState
-from ._iterative import IterativeRefinement, IterativeRefinementSettings
+from ._iterative import (
+    HybridSettings,
+    IterativeRefinementSettings,
+    _hybrid_from_settings,
+)
 from ._klu import KLU, _KLUState
 from ._pardiso import Pardiso, _pardiso_available, _PardisoState
 from ._sparse import SparseLinearSolver, _Sparsity
@@ -113,6 +117,17 @@ class _AutoDispatch(AbstractLinearSolver[_State]):
     ) -> _State:
         return self._solver_for_state(state).update(state, operator, options)
 
+    def update_and_compute(
+        self,
+        state: Any,
+        operator: AbstractLinearOperator,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any], _State]:
+        return self._solver_for_state(state).update_and_compute(
+            state, operator, vector, options
+        )
+
     def compute(
         self, state: Any, vector: PyTree[Array], options: dict[str, Any]
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
@@ -151,10 +166,11 @@ class AutoSparseLinearSolver(AbstractLinearSolver[TrackingSolverState]):
     on `Pardiso`. Construct `KLU()` directly for symbolic-pattern reuse on a complex
     operator. `CuDSS` supports complex directly, so it needs no equivalent fallback.
 
-    By default the chosen solver is wrapped in `IterativeRefinement`, which improves each
-    solution until its relative residual is within tolerance or a step cap is spent. Pass
-    an `IterativeRefinementSettings` to tune those, or `iterative_refinement=False` to
-    solve with the chosen direct solver alone.
+    By default the chosen solver is combined with an iterative solver (see `iterative`),
+    which refines each solution until its relative residual is within tolerance or a step
+    cap is spent. Pass an `IterativeRefinementSettings` to tune those, a `HybridSettings`
+    to pick another iterative solver, or `iterative=False` to solve with the chosen direct
+    solver alone.
     """
 
     platform: str | None = None
@@ -163,35 +179,38 @@ class AutoSparseLinearSolver(AbstractLinearSolver[TrackingSolverState]):
     only when this resolves to "cpu" and x64 is enabled. `CuDSS` is chosen only when it
     resolves to "gpu" and a CUDA (not ROCm) device is visible. Otherwise `Spsolve` is
     chosen."""
-    iterative_refinement: bool | IterativeRefinementSettings = True
-    """Whether to refine the direct solve, and with what settings. `True` refines with the
-    `IterativeRefinementSettings` defaults, `False` disables it, and an explicit
-    `IterativeRefinementSettings` sets the tolerance and step cap."""
+    iterative: bool | IterativeRefinementSettings | HybridSettings = True
+    """Whether to combine the selected direct sparse solver with an iterative solver, either
+    to deal with limited precision (`IterativeRefinement`) or to allow increased
+    factorization reuse (`HybridDirectIterative`). `True` (the default) refines with the
+    `IterativeRefinementSettings` defaults, `False` uses the direct solver alone, and an
+    explicit `IterativeRefinementSettings` or `HybridSettings` allows choosing a specific
+    iterative solver and how it should be used."""
 
     @cached_property
     def _solver(self) -> SparseLinearSolver[Any]:
         """The exact solver `AutoSparseLinearSolver` runs.
 
-        The platform dispatch, wrapped in `IterativeRefinement` unless refinement is
-        disabled. Every stateful-API call and `select_solver` forward here, so with
-        refinement on the state is an `_IterativeRefinementState` and with it off the state
-        is the chosen direct solver's own.
+        The platform dispatch, combined with an iterative solver unless `iterative` is
+        `False`. Every stateful-API call and `select_solver` forward here, so with an
+        iterative solver the state is a `HybridState` and without one the state is the
+        chosen direct solver's own.
         """
         dispatch = _AutoDispatch(self.platform)
-        settings = self.iterative_refinement
+        settings = self.iterative
         if settings is False:
             return dispatch
         if settings is True:
             settings = IterativeRefinementSettings()
-        return IterativeRefinement(dispatch, settings.tol, settings.max_steps)
+        return _hybrid_from_settings(dispatch, settings)
 
     def select_solver(
         self, operator: AbstractLinearOperator
     ) -> SparseLinearSolver[Any]:
-        """The exact solver `AutoSparseLinearSolver` will run, including any refinement.
+        """The exact solver `AutoSparseLinearSolver` will run, including any iterative solver.
 
-        Mirrors `lineax.AutoLinearSolver.select_solver`. With refinement on this is an
-        `IterativeRefinement` wrapping the chosen direct solver. The operator is accepted
+        Mirrors `lineax.AutoLinearSolver.select_solver`. With an iterative solver this is a
+        `HybridDirectIterative` around the chosen direct solver. The operator is accepted
         for signature parity but selection depends only on the platform.
         """
         del operator
@@ -214,6 +233,15 @@ class AutoSparseLinearSolver(AbstractLinearSolver[TrackingSolverState]):
         options: dict[str, Any] = {},
     ) -> TrackingSolverState:
         return self._solver.update(state, operator, options)
+
+    def update_and_compute(
+        self,
+        state: TrackingSolverState,
+        operator: AbstractLinearOperator,
+        vector: PyTree[Array],
+        options: dict[str, Any],
+    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any], TrackingSolverState]:
+        return self._solver.update_and_compute(state, operator, vector, options)
 
     def compute(
         self, state: TrackingSolverState, vector: PyTree[Array], options: dict[str, Any]
@@ -241,8 +269,10 @@ AutoSparseLinearSolver.__init__.__doc__ = """**Arguments:**
     are chosen only when this resolves to "cpu" and x64 is enabled. `CuDSS` (if
     installed) is chosen only when this resolves to "gpu" and a CUDA device is visible.
     Otherwise `Spsolve` is chosen.
-- `iterative_refinement`: whether to refine the direct solve with iterative refinement.
-    `True` (the default) refines with the `IterativeRefinementSettings` defaults, `False`
-    disables it, and an explicit `IterativeRefinementSettings` sets the tolerance and
-    step cap.
+- `iterative`: whether to combine the selected direct sparse solver with an iterative
+    solver, either to deal with limited precision (`IterativeRefinement`) or to allow
+    increased factorization reuse (`HybridDirectIterative`). `True` (the default) refines
+    with the `IterativeRefinementSettings` defaults, `False` uses the direct solver alone,
+    and an explicit `IterativeRefinementSettings` or `HybridSettings` allows choosing a
+    specific iterative solver and how it should be used.
 """

@@ -20,6 +20,9 @@ Every solver in this package exposes the same small API.
 - `state = solver.init(operator)` builds a state for an operator.
 - `state = solver.update(state, operator)` folds a new operator into an existing state,
   reusing prior work where the two operators allow it.
+- `solution, result, stats, state = solver.update_and_compute(state, operator, vector, options)`
+  updates the state and solves in one call. A solver can use it to decide what to rebuild
+  after it has seen the result of the solve. `splineax.linear_solve` calls it.
 - `state.release()` says you are done with the state, so any memory it holds may go. It is
   optional, and a no-op for solvers whose state holds nothing.
 - `state = state.track(solution)` records that a solution depends on the state, so a later

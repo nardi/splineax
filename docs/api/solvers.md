@@ -24,6 +24,42 @@
 
 ---
 
+::: splineax.HybridDirectIterative
+
+---
+
+::: splineax.RichardsonOptions
+
+---
+
+::: splineax.GMRESOptions
+
+---
+
+::: splineax.BiCGStabOptions
+
+---
+
+::: splineax.CGOptions
+
+---
+
+::: splineax.ReuseOptions
+
+---
+
+::: splineax.HybridSettings
+
+---
+
+::: splineax.HybridState
+
+---
+
+::: splineax.Richardson
+
+---
+
 ::: splineax.IterativeRefinement
 
 ---
