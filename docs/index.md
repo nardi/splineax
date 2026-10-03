@@ -24,8 +24,10 @@ It provides:
   `KLU` and `Pardiso` reuse their factorization across solves.
 - **Higher-level solvers**: [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver],
   which picks an appropriate solver based on platform and settings, and
-  [`IterativeRefinement`][splineax.IterativeRefinement], which wraps any solver and refines
-  its solution to a target residual.
+  [`HybridDirectIterative`][splineax.HybridDirectIterative], which combines a direct
+  solver with an iterative solver that uses the factorization as its preconditioner. It
+  can reuse an old factorization for new operators, and
+  [`IterativeRefinement`][splineax.IterativeRefinement] is a special case of it.
 - **Lineax code interop**:
   [`stateful_solve_transform`][splineax.stateful_solve_transform] rewrites a function that
   calls `lineax.linear_solve` so its solves thread a solver state and reuse a
