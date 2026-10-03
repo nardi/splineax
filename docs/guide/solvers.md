@@ -1,8 +1,8 @@
 # Solvers
 
 `splineax` provides five sparse direct solvers, plus
-[`IterativeRefinement`][splineax.IterativeRefinement], which wraps any of them to sharpen
-a solution. All implement Lineax's `AbstractLinearSolver` interface (so they work with
+[`HybridDirectIterative`][splineax.HybridDirectIterative], which pairs any of them with
+an iterative solver. All implement Lineax's `AbstractLinearSolver` interface (so they work with
 `lineax.linear_solve`) and the [`SparseLinearSolver`][splineax.SparseLinearSolver] protocol
 (factorization reuse, see [Stateful solves](stateful.md)). All handle **square,
 nonsingular** operators only.
@@ -153,21 +153,102 @@ gpu_solver = splx.AutoSparseLinearSolver(platform="gpu")  # -> CuDSS if installe
 
 This is the recommended default when you want portable code that uses
 `Pardiso`/`KLU`/`CuDSS` where available and `Spsolve` elsewhere. By default it also
-refines every solution with iterative refinement (see below). Pass
-`iterative_refinement=False` to solve with the chosen direct solver alone.
+refines every solution with [iterative refinement](#iterativerefinement). Pass
+`iterative=False` to solve with the chosen direct solver alone.
 
 ```{.python continuation}
 # The direct solve, refined until the residual is small (the default).
 refining = splx.AutoSparseLinearSolver()
 
 # The direct solve on its own.
-plain = splx.AutoSparseLinearSolver(iterative_refinement=False)
+plain = splx.AutoSparseLinearSolver(iterative=False)
 
 # A looser tolerance and a lower step cap.
 tuned = splx.AutoSparseLinearSolver(
-    iterative_refinement=splx.IterativeRefinementSettings(tol=1e-8, max_steps=5)
+    iterative=splx.IterativeRefinementSettings(tol=1e-8, max_steps=5)
 )
 ```
+
+## `HybridDirectIterative`
+
+A direct solver factors a matrix once and then solves cheaply, but a new matrix needs a
+new factorization. When the matrix changes a little between solves, the factorization of
+an earlier matrix still comes close to solving the new problem. This means that it can serve as a good preconditioner for an iterative solver. `HybridDirectIterative` pairs a direct
+solver with an iterative solver, and uses the direct solver as the preconditioner for the iterative one.
+For sake of efficiency, it only factors a new matrix when the preconditioned iterative solve is not able to (quickly) solve the new problem.
+
+```python
+import jax
+import jax.numpy as jnp
+from jax.experimental.sparse import BCOO
+
+import splineax as splx
+
+# KLU requires 64-bit mode.
+jax.config.update("jax_enable_x64", True)
+
+dense = jnp.array([[4.0, 1.0, 0.0], [1.0, 5.0, 2.0], [0.0, 2.0, 6.0]])
+vector = jnp.array([1.0, 2.0, 3.0])
+tag = splx.sparsity_pattern_tag(BCOO.fromdense(dense))
+
+solver = splx.HybridDirectIterative(
+    splx.KLU(),
+    splx.GMRESOptions(),
+    reuse_direct=splx.ReuseOptions(max_reuses=20),
+)
+
+state = None
+for step in range(3):
+    # The shared tag says that every operator has the same sparsity pattern.
+    operator = splx.BCOOLinearOperator(
+        BCOO.fromdense(dense + 0.01 * step * jnp.eye(3)), tags=tag
+    )
+    solution, state = splx.linear_solve(operator, vector, solver, state=state)
+    print(step, solution.stats["reused"], solution.stats["refactored"])
+state.release()
+```
+
+The first solve will factor the matrix, after which the following ones will try the old factorization first, giving up after a small amount of steps (`max_steps_stale`). If the iteration gets within solution tolerance, it keeps the old
+factorization. If it does not converge (in time), it will factor the new matrix and then run the
+iterative solver with a higher step cap (`max_steps`). Every solution is checked
+against the true residual `||b - A x|| <= tol * ||b||`. A solve that still fails after a
+new factorization returns NaN with the result `max_steps_reached`. So reuse can make a solve cheaper, but it
+never changes whether a solve is successful. Tuning the iterative and reuse parameters can help to avoid ineffective reuse, where the fallback is triggered more often than not.
+
+The factorization is only reused through `splineax.linear_solve` (or `update_and_compute`,
+see [Stateful solves](stateful.md)), and only for operators that share a
+[sparsity pattern tag](stateful.md#shared-patterns-between-operators). A plain `update`
+always makes a new factorization, and so does a solve that is differentiated.
+
+### Iterative solver options
+
+The `iterative` argument picks the iterative solver, with the options that belong to it.
+Every option type has the step caps `max_steps` (for a factorization of the current
+matrix) and `max_steps_stale` (for a factorization of an earlier matrix, kept low).
+
+| Options | Method | Operator |
+| --- | --- | --- |
+| [`RichardsonOptions`][splineax.RichardsonOptions] | Iterative refinement | any |
+| [`GMRESOptions`][splineax.GMRESOptions] | GMRES | any |
+| [`BiCGStabOptions`][splineax.BiCGStabOptions] | BiCGStab | any |
+| [`CGOptions`][splineax.CGOptions] | Conjugate gradients | symmetric positive definite |
+
+`CGOptions` needs the operator to carry `lineax.positive_semidefinite_tag`. The default is
+`GMRESOptions`. `RichardsonOptions` repeats the direct solve on the residual, which is
+iterative refinement. Each of its steps costs one back-substitution and one matrix-vector
+product. The Krylov methods can converge when the old factorization is too far off for
+Richardson iteration.
+
+### Reuse options
+
+`reuse_direct` is `True` by default. Pass `False` to factor every new matrix, or a
+[`ReuseOptions`][splineax.ReuseOptions] to set the limits. `max_reuses` is the number of
+solves in a row that may use the same factorization. `slow_fraction` is the fraction of
+`max_steps_stale` that a reuse may use before the next solve makes a new factorization.
+
+Reuse pays off when making a factorization costs much more than a few back-substitutions,
+which holds for large matrices. For a small matrix, a new factorization can be cheaper
+than the stale solve.
 
 ## `IterativeRefinement`
 
@@ -186,7 +267,7 @@ tell the solve fell short instead of trusting a solution that never converged.
 import lineax as lx
 
 refined = splx.IterativeRefinement(splx.Spsolve(), tol=1e-6, max_steps=10)
-solution = lx.linear_solve(operator, jnp.array([1.0, 2.0]), solver=refined)
+solution = lx.linear_solve(operator, vector, solver=refined)
 ```
 
 - `tol`: the target relative residual. Defaults to `1e-10`.
@@ -199,3 +280,7 @@ solve, for instance, cannot push the relative residual much below `1e-6`, and re
 will not demand it. The wrapper exposes the same stateful API as the solver it wraps (see
 [Stateful solves](stateful.md)), so it reuses factorizations across right-hand sides the
 same way.
+
+Under the hood, `IterativeRefinement` consists of a
+[`HybridDirectIterative`](#hybriddirectiterative) solver with a `Richardson` iteration, and
+no reuse of the direct solver state.

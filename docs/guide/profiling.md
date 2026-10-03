@@ -2,9 +2,9 @@
 
 When using a sparse direct solver, every linear solve is part of a larger chain of
 operations. The solver analyzes a matrix's sparsity pattern, factorizes it, reuses or
-rebuilds that factorization as the values change, solves against it, and (with
-[iterative refinement](solvers.md)) corrects the solution step by step. When a solve is
-slower than expected, it might be the case that some work is unexpectedly being repeated.
+rebuilds that factorization as the values change, solves against it, and when doing a
+hybrid solve, additional iterative adjustments are performed. When a solve is slower than
+expected, it might be the case that some work is unexpectedly being repeated.
 For example, the solver might decide a new factorization needs to be rebuilt, while
 actually it could reuse the factorization it already had. The [stateful API](stateful.md)
 hides exactly these decisions.

@@ -15,8 +15,10 @@ plugs straight into `lineax.linear_solve`. It also interfaces with [asdex](https
   GPU-only, NVIDIA cuDSS, installed as extra). `KLU`, `Pardiso`, and `CuDSS` reuse their
   factorization across solves.
 - **Higher-level solvers**: `AutoSparseLinearSolver`, which picks an appropriate solver
-  based on platform and settings, and `IterativeRefinement`, which wraps any solver and
-  refines its solution to a target residual.
+  based on platform and settings, and `HybridDirectIterative`, which combines a direct
+  solver with an iterative solver that uses the factorization as its preconditioner. For
+  example, `IterativeRefinement` applies a Richardson iteration to the direct solver
+  result in order to recover a high-precision solution using a limited-precision solver.
 - **Lineax code interop**: `stateful_solve_transform` rewrites a function that calls
   `lineax.linear_solve` so its solves thread a solver state and reuse a factorization.
 
