@@ -35,6 +35,8 @@ import splineax as splx
 from splineax import (
     KLU,
     BCOOLinearOperator,
+    BiCGStabOptions,
+    CGOptions,
     GMRESOptions,
     HybridDirectIterative,
     IterativeRefinement,
@@ -524,13 +526,15 @@ def test_slow_solve_makes_a_new_factorization_next(
 
 @pytest.mark.parametrize("scale", [1e-4, 1e-2, 0.3, 1.0])
 @pytest.mark.parametrize(
-    "iterative", [RichardsonOptions(), GMRESOptions()], ids=["richardson", "gmres"]
+    "iterative",
+    [RichardsonOptions(), GMRESOptions(), BiCGStabOptions()],
+    ids=["richardson", "gmres", "bicgstab"],
 )
 @pytest.mark.cpu_only
 def test_solution_meets_the_tolerance_for_any_change(
     direct: splx.SparseLinearSolver,
     scale: float,
-    iterative: RichardsonOptions | GMRESOptions,
+    iterative: RichardsonOptions | GMRESOptions | BiCGStabOptions,
 ) -> None:
     """Whatever the size of the change, a successful solve is within the tolerance."""
     operators, matrices = _tagged_operators([0.0, scale], seed=3)
@@ -720,6 +724,44 @@ def test_gradient_through_a_stale_state(direct: splx.SparseLinearSolver) -> None
     assert jnp.allclose(
         gradient, jax.grad(dense_loss)(operator.matrix.data), rtol=1e-6, atol=1e-8
     )
+
+
+def _symmetric_operators(
+    scales: list[float],
+) -> tuple[list[BCOOLinearOperator], list[np.ndarray]]:
+    """Symmetric positive definite operators with one pattern and perturbed values."""
+    base = np.asarray(SQUARE_MATRIX, dtype=np.float64)
+    symmetric = base @ base.T + 10.0 * np.eye(4)
+    sparsity = BCOO.fromdense(symmetric)
+    tag = splx.sparsity_pattern_tag(sparsity)
+    random_state = np.random.default_rng(6)
+    operators, matrices = [], []
+    for scale in scales:
+        noise = 1.0 + scale * random_state.uniform(-1.0, 1.0, size=symmetric.shape)
+        matrix = symmetric * (noise + noise.T) / 2.0
+        operators.append(
+            BCOOLinearOperator(
+                BCOO.fromdense(matrix),
+                tags=frozenset({tag, lx.positive_semidefinite_tag}),
+            )
+        )
+        matrices.append(matrix)
+    return operators, matrices
+
+
+@pytest.mark.cpu_only
+def test_cg_reuses_the_factorization_of_a_symmetric_operator(
+    direct: splx.SparseLinearSolver,
+) -> None:
+    """Conjugate gradients reaches the tolerance with a stale factorization."""
+    operators, matrices = _symmetric_operators([0.0, 1e-3])
+    solver = HybridDirectIterative(direct, CGOptions(max_steps_stale=20))
+
+    _, reused = _solve_sequence(solver, operators)
+
+    assert reused.result == lx.RESULTS.successful
+    assert reused.stats["reused"]
+    assert _dense_relative_residual(matrices[1], reused.value) <= _TOLERANCE
 
 
 @pytest.mark.cpu_only

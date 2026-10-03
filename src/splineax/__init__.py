@@ -35,6 +35,12 @@ from .solvers import (
     AutoSparseLinearSolver as AutoSparseLinearSolver,
 )
 from .solvers import (
+    BiCGStabOptions as BiCGStabOptions,
+)
+from .solvers import (
+    CGOptions as CGOptions,
+)
+from .solvers import (
     CuDSS as CuDSS,
 )
 from .solvers import (

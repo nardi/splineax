@@ -27,8 +27,10 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxtyping import Array, Bool, Float, Int, PyTree
 from lineax import (
+    CG,
     GMRES,
     AbstractLinearOperator,
+    BiCGStab,
     conj,
     has_unit_diagonal,
     is_diagonal,
@@ -297,7 +299,53 @@ class GMRESOptions(eqx.Module):
         )
 
 
-SupportedIterativeOptions = RichardsonOptions | GMRESOptions
+class CGOptions(eqx.Module):
+    """Options for conjugate gradients with the factorization as the preconditioner.
+
+    The operator must be symmetric and positive definite, and carry
+    `lineax.positive_semidefinite_tag`. The factorization of an earlier matrix of that
+    kind is a positive definite preconditioner. Each step needs one matrix-vector product
+    and one solve, with short recurrences and no growing Krylov space.
+    """
+
+    max_steps: int = eqx.field(default=100, static=True)
+    """The step cap when the factorization was made for the current operator."""
+    max_steps_stale: int = eqx.field(default=10, static=True)
+    """The step cap when the factorization was made for an earlier operator."""
+    max_restarts: int = eqx.field(default=2, static=True)
+    """Passes after the first. CG stops on a preconditioned residual, so the true
+    residual can end above the target and a pass from the current solution fixes it."""
+
+    def build(
+        self, relative_tolerance: float, max_steps: int
+    ) -> AbstractLinearSolver[Any]:
+        return CG(rtol=relative_tolerance, atol=0.0, max_steps=max_steps)
+
+
+class BiCGStabOptions(eqx.Module):
+    """Options for BiCGStab with the factorization as the preconditioner.
+
+    BiCGStab handles a nonsymmetric operator with short recurrences. Each step needs two
+    matrix-vector products and two solves.
+    """
+
+    max_steps: int = eqx.field(default=100, static=True)
+    """The step cap when the factorization was made for the current operator."""
+    max_steps_stale: int = eqx.field(default=10, static=True)
+    """The step cap when the factorization was made for an earlier operator."""
+    max_restarts: int = eqx.field(default=2, static=True)
+    """Passes after the first. BiCGStab stops on a preconditioned residual, so the true
+    residual can end above the target and a pass from the current solution fixes it."""
+
+    def build(
+        self, relative_tolerance: float, max_steps: int
+    ) -> AbstractLinearSolver[Any]:
+        return BiCGStab(rtol=relative_tolerance, atol=0.0, max_steps=max_steps)
+
+
+SupportedIterativeOptions = (
+    RichardsonOptions | GMRESOptions | CGOptions | BiCGStabOptions
+)
 """The iterative solver options that `HybridDirectIterative` accepts."""
 
 
@@ -656,6 +704,7 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
             inner_state,
             options,
             operator.in_structure(),
+            isinstance(self.iterative, CGOptions),
         )
 
         def above_target(solution: PyTree[Array]) -> Bool[Array, ""]:
