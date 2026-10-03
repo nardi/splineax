@@ -38,6 +38,21 @@ from .solvers import (
     CuDSS as CuDSS,
 )
 from .solvers import (
+    GMRESOptions as GMRESOptions,
+)
+from .solvers import (
+    HybridDirectIterative as HybridDirectIterative,
+)
+from .solvers import (
+    HybridSettings as HybridSettings,
+)
+from .solvers import (
+    HybridState as HybridState,
+)
+from .solvers import (
+    IterativeOptions as IterativeOptions,
+)
+from .solvers import (
     IterativeRefinement as IterativeRefinement,
 )
 from .solvers import (
@@ -50,6 +65,15 @@ from .solvers import (
     PerformanceWarning as PerformanceWarning,
 )
 from .solvers import (
+    ReuseOptions as ReuseOptions,
+)
+from .solvers import (
+    Richardson as Richardson,
+)
+from .solvers import (
+    RichardsonOptions as RichardsonOptions,
+)
+from .solvers import (
     SparseLinearSolver as SparseLinearSolver,
 )
 from .solvers import (
@@ -57,6 +81,9 @@ from .solvers import (
 )
 from .solvers import (
     StatefulSolver as StatefulSolver,
+)
+from .solvers import (
+    SupportedIterativeOptions as SupportedIterativeOptions,
 )
 from .solvers import (
     TrackingSolverState as TrackingSolverState,

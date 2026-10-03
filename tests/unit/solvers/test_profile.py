@@ -432,7 +432,7 @@ def test_iterative_refinement_records_steps(enable_x64: None) -> None:
     assert ops.count("refine_start") == 1
     assert ops.count("refine_result") == 1
     assert ops.count("compute") == 1
-    steps = _by_op(profile, "refine_step", "IterativeRefinement")
+    steps = _by_op(profile, "refine_step", "Richardson")
     assert len(steps) >= 2
     assert [record.outputs["step"] for record in steps] == list(
         range(1, len(steps) + 1)
@@ -476,7 +476,7 @@ def test_refinement_exhausting_steps_still_records(enable_x64: None) -> None:
     ops = _ops(profile)
     assert ops.count("refine_start") == 1
     assert ops.count("refine_result") == 1
-    steps = _by_op(profile, "refine_step", "IterativeRefinement")
+    steps = _by_op(profile, "refine_step", "Richardson")
     assert [record.outputs["step"] for record in steps] == [1, 2, 3]
     assert _by_op(profile, "refine_result")[0].outputs["converged"] is False
 

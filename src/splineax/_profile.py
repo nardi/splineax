@@ -458,10 +458,31 @@ def profile_solves(
 
 
 @contextlib.contextmanager
+def suppress_records() -> Iterator[None]:
+    """Drop every `record_operation` traced inside this block.
+
+    Code that runs inside a `lax.cond` branch uses this, since an IO callback in a branch
+    breaks `vmap`-of-cond under a jitted forward-mode derivative. The caller records a
+    summary outside the branch with `dynamic=` values instead.
+    """
+    depth = getattr(_LOCAL, "suppress_depth", 0)
+    _LOCAL.suppress_depth = depth + 1
+    try:
+        yield
+    finally:
+        _LOCAL.suppress_depth = depth
+
+
+def _records_suppressed() -> bool:
+    """Whether the code being traced is inside a `suppress_records` block."""
+    return getattr(_LOCAL, "suppress_depth", 0) > 0
+
+
+@contextlib.contextmanager
 def compute_scope() -> Iterator[None]:
     """Emit the generic `compute` boundary once, at the outermost solver's `compute`.
 
-    A wrapping solver's `compute` (e.g. `IterativeRefinement`) calls an inner solver's
+    A wrapping solver's `compute` (e.g. `HybridDirectIterative`) calls an inner solver's
     `compute`, and this suppresses the inner boundary so one user solve is one generic
     `compute`, with every solver-specific operation nested under it.
     """
@@ -577,7 +598,7 @@ def record_operation(
     into is decided when it fires, by looking up the active profile inside the callback, so
     a call to an already-compiled function made outside any `with` block records nothing.
     """
-    if _active() is None:
+    if _active() is None or _records_suppressed():
         return
     order = _next_order()
     if inputs is None:
