@@ -40,7 +40,6 @@ from splineax import (
     BCOOLinearOperator,
     BCSRLinearOperator,
     CuDSS,
-    SparseJacobianLinearOperator,
 )
 from splineax.solvers import CuDSSReordering
 from splineax.solvers._auto import _cuda_backend_available
@@ -164,17 +163,16 @@ def test_init_handles_unsorted_bcsr(fake_cudss: FakeCuDSS) -> None:
     assert jnp.allclose(_dense_from_token(state), SQUARE_MATRIX)
 
 
-def test_init_materialises_sparse_jacobian(fake_cudss: FakeCuDSS) -> None:
-    """A `SparseJacobianLinearOperator` is materialised into the same CSR pattern as the
-    equivalent `BCOOLinearOperator`."""
+def test_init_materialises_tagged_jacobian(fake_cudss: FakeCuDSS) -> None:
+    """A tagged `lineax.JacobianLinearOperator` is materialised into the same CSR
+    pattern as the equivalent `BCOOLinearOperator`."""
 
     def fn(x, args):
         del args
         return x * 2.0
 
-    operator = SparseJacobianLinearOperator(
-        fn, jnp.arange(4.0), sparsity=BCOO.fromdense(jnp.eye(4))
-    )
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(jnp.eye(4)))
+    operator = lx.JacobianLinearOperator(fn, jnp.arange(4.0), tags=tag)
     state = CuDSS().init(operator, {})
     assert jnp.allclose(_dense_from_token(state), 2.0 * jnp.eye(4))
 
