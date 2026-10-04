@@ -8,7 +8,7 @@ Two tiers of coverage follow from that:
 - **CPU-runnable, always on:** availability/`ImportError`, tag-to-mtype selection,
   operator-to-CSR conversion, and the square/type checks, none of which touch
   `spineax.cudss` at all, plus the init/update/transpose/conj/refactorize logic in
-  `_cudss.py`, exercised against a small fake `spineax.cudss` module (`_FakeCuDSS` below)
+  `_cudss.py`, exercised against a small fake `spineax.cudss` module (`FakeCuDSS` below)
   that reproduces its documented phase contract (analyze -> factorize/refactorize ->
   solve, phase checks, dtype/nnz checks) with a real dense `jnp.linalg.solve` underneath.
   This is what actually proves `_cudss.py`'s state machine is wired correctly, without a
@@ -24,7 +24,6 @@ state through jit) lives in `test_factorization.py`, the generic solve suite in
 
 from __future__ import annotations
 
-import dataclasses
 from typing import Any
 
 import equinox as eqx
@@ -47,182 +46,8 @@ from splineax.solvers import CuDSSReordering
 from splineax.solvers._auto import _cuda_backend_available
 from splineax.solvers._cudss import _cudss_available, _CuDSSState, _mtype_id
 
+from ...fake_cudss import FakeCuDSS
 from .conftest import COMPLEX_MATRIX, RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
-
-# ---------------------------------------------------------------------------
-# A fake `spineax.cudss` module, faithful to its documented phase contract, backed by a
-# real dense solve. Lets the dispatch/state logic in `_cudss.py` be exercised on CPU,
-# without a GPU or the real (CUDA-only) binding.
-# ---------------------------------------------------------------------------
-
-
-class _FakeFactorToken(eqx.Module):
-    id: jax.Array
-    values: jax.Array
-    offsets: jax.Array
-    columns: jax.Array
-    phase: str = eqx.field(static=True)
-    dtype: Any = eqx.field(static=True)
-    n: int = eqx.field(static=True)
-    nnz: int = eqx.field(static=True)
-    mtype_id: int = eqx.field(static=True)
-    mview_id: int = eqx.field(static=True)
-    device_id: int = eqx.field(static=True)
-    reordering_id: int = eqx.field(static=True)
-    memory_id: int = eqx.field(static=True)
-
-
-class _FakeCuDSS:
-    """A minimal stand-in for `spineax.cudss`, tracking calls and backed by a real dense
-    solve. Mirrors the real module's documented contract closely enough to prove
-    `_cudss.py` calls it the right way, not to test cuDSS itself:
-
-    - `factorize` accepts any phase, while `refactorize`/`solve` need a factorized one.
-    - `factorize`/`refactorize` check the incoming values' dtype and size against the
-      token they were analyzed for.
-    - `solve` checks the right-hand side dtype against the token.
-    - every phase call mints a fresh registry id, `release` retires one.
-    """
-
-    def __init__(self) -> None:
-        self._next_id = 0
-        self._live: set[int] = set()
-        self.analyze_calls: list[dict[str, Any]] = []
-        self.factorize_calls: list[Any] = []
-        self.refactorize_calls: list[Any] = []
-        self._refactorized_ids: set[int] = set()
-        self.solve_calls: list[Any] = []
-        self.release_calls: list[Any] = []
-
-    def _mint(self) -> jax.Array:
-        token_id = self._next_id
-        self._next_id += 1
-        self._live.add(token_id)
-        return jnp.array([token_id], dtype=jnp.int32)
-
-    def analyze(
-        self,
-        values,
-        offsets,
-        columns,
-        *,
-        mtype_id: int,
-        mview_id: int,
-        device_id: int,
-        reordering: int,
-        memory: int,
-    ) -> _FakeFactorToken:
-        self.analyze_calls.append(
-            dict(mtype_id=mtype_id, mview_id=mview_id, device_id=device_id)
-        )
-        n = offsets.shape[0] - 1
-        return _FakeFactorToken(
-            id=self._mint(),
-            values=values,
-            offsets=offsets.astype(jnp.int32),
-            columns=columns.astype(jnp.int32),
-            phase="analyzed",
-            dtype=jnp.dtype(values.dtype),
-            n=int(n),
-            nnz=int(columns.shape[0]),
-            mtype_id=mtype_id,
-            mview_id=mview_id,
-            device_id=device_id,
-            reordering_id=reordering,
-            memory_id=memory,
-        )
-
-    def _numeric(self, token: _FakeFactorToken, values, *, refactor: bool):
-        if refactor and token.phase != "factorized":
-            raise ValueError("fake cudss: refactorize requires a factorized token")
-        if jnp.dtype(values.dtype) != token.dtype:
-            raise ValueError("fake cudss: values dtype does not match token dtype")
-        if values.shape[-1] != token.nnz:
-            raise ValueError("fake cudss: values size does not match token nnz")
-        # "factorize/refactorize consume their input's id and return a fresh one" (the
-        # real `FactorToken`'s docstring): the old id is retired here, not left behind as
-        # a second live entry, so a whole analyze -> factorize chain is one registry slot,
-        # renamed as it advances, not one entry per call. A traced id, from a branch of a
-        # `lax.cond`, has no concrete value to retire.
-        if not isinstance(token.id, jax.core.Tracer):
-            self._live.discard(int(jax.device_get(token.id).ravel()[0]))
-        return dataclasses.replace(
-            token, id=self._mint(), values=values, phase="factorized"
-        )
-
-    def factorize(self, token: _FakeFactorToken, values) -> _FakeFactorToken:
-        self.factorize_calls.append(values)
-        return self._numeric(token, values, refactor=False)
-
-    def refactorize(self, token: _FakeFactorToken, values) -> _FakeFactorToken:
-        self.refactorize_calls.append(values)
-        refactorized = self._numeric(token, values, refactor=True)
-        self._refactorized_ids.add(int(jax.device_get(refactorized.id).ravel()[0]))
-        return refactorized
-
-    def query(self, token: _FakeFactorToken) -> dict[str, jax.Array]:
-        """Return the factor's diagonal, the only `query` field `_cudss.py` reads.
-
-        A refactorized token keeps the first factorization's pivots. The reference
-        matrices are diagonally dominant, so those pivots are the diagonal itself, which
-        elimination without row swaps models. Any other token gets partial pivoting.
-        """
-        dense = np.array(
-            BCSR(
-                (token.values, token.columns, token.offsets), shape=(token.n, token.n)
-            ).todense()
-        )
-        if int(jax.device_get(token.id).ravel()[0]) not in self._refactorized_ids:
-            return {"diag": jnp.diag(jax.scipy.linalg.lu(dense)[2])}
-        for k in range(token.n):
-            dense[k + 1 :, k:] -= np.outer(
-                dense[k + 1 :, k] / dense[k, k], dense[k, k:]
-            )
-        return {"diag": jnp.asarray(np.diag(dense))}
-
-    def solve(self, token: _FakeFactorToken, b, ir_nsteps=None):
-        del ir_nsteps
-        self.solve_calls.append(b)
-        if token.phase != "factorized":
-            raise ValueError("fake cudss: solve requires a factorized token")
-        if jnp.dtype(b.dtype) != token.dtype:
-            raise ValueError("fake cudss: rhs dtype does not match token dtype")
-        dense = BCSR(
-            (token.values, token.columns, token.offsets), shape=(token.n, token.n)
-        ).todense()
-        return jnp.linalg.solve(dense, b)
-
-    def release(self, token: _FakeFactorToken) -> bool:
-        self.release_calls.append(token)
-        token_id = int(jax.device_get(token.id).ravel()[0])
-        # `set.discard` returns None whether or not the id was present.
-        return self._live.discard(token_id) is None
-
-    def registry_size(self) -> int:
-        return len(self._live)
-
-    def rebuild_count(self) -> int:
-        return 0
-
-    def cache_capacity(self) -> int:
-        return 8
-
-
-@pytest.fixture
-def fake_cudss(monkeypatch: pytest.MonkeyPatch) -> _FakeCuDSS:
-    """Make `CuDSS()` construct successfully and every `_spineax_cudss()` lookup in
-    `_cudss.py` return a fresh `_FakeCuDSS`, so the whole solver runs against it.
-
-    Also disables `_ensure_gpu`: these tests exercise the dispatch/state logic, not the
-    real CUDA-only platform guard, which this environment's real "cpu" backend would
-    otherwise (correctly) trip on every `compute` call. That guard is checked for real,
-    unpatched, by `test_ensure_gpu_matches_the_platform` below.
-    """
-    fake = _FakeCuDSS()
-    monkeypatch.setattr(_cudss_module, "_cudss_available", lambda: True)
-    monkeypatch.setattr(_cudss_module, "_spineax_cudss", lambda: fake)
-    monkeypatch.setattr(_cudss_module, "_ensure_gpu", lambda args: args)
-    return fake
 
 
 def _dense_from_token(state: _CuDSSState) -> jax.Array:
@@ -316,7 +141,7 @@ def test_mtype_id_spd() -> None:
 
 
 def test_init_converts_operator_to_csr(
-    make_operator: OperatorFactory, fake_cudss: _FakeCuDSS
+    make_operator: OperatorFactory, fake_cudss: FakeCuDSS
 ) -> None:
     """`CuDSS.init` reads the operator into the CSR arrays its factorized token carries,
     matching the dense reference, for both `BCOO`- and `BCSR`-backed operators."""
@@ -326,7 +151,7 @@ def test_init_converts_operator_to_csr(
     assert jnp.allclose(_dense_from_token(state), SQUARE_MATRIX)
 
 
-def test_init_handles_unsorted_bcsr(fake_cudss: _FakeCuDSS) -> None:
+def test_init_handles_unsorted_bcsr(fake_cudss: FakeCuDSS) -> None:
     """An unsorted `BCSR` operator round-trips through `BCOO` correctly (the same caveat
     `Pardiso`/`KLU` have to handle)."""
     bcoo = BCOO.fromdense(SQUARE_MATRIX)
@@ -339,7 +164,7 @@ def test_init_handles_unsorted_bcsr(fake_cudss: _FakeCuDSS) -> None:
     assert jnp.allclose(_dense_from_token(state), SQUARE_MATRIX)
 
 
-def test_init_materialises_sparse_jacobian(fake_cudss: _FakeCuDSS) -> None:
+def test_init_materialises_sparse_jacobian(fake_cudss: FakeCuDSS) -> None:
     """A `SparseJacobianLinearOperator` is materialised into the same CSR pattern as the
     equivalent `BCOOLinearOperator`."""
 
@@ -354,14 +179,14 @@ def test_init_materialises_sparse_jacobian(fake_cudss: _FakeCuDSS) -> None:
     assert jnp.allclose(_dense_from_token(state), 2.0 * jnp.eye(4))
 
 
-def test_init_rejects_non_square(fake_cudss: _FakeCuDSS) -> None:
+def test_init_rejects_non_square(fake_cudss: FakeCuDSS) -> None:
     wide = jnp.ones((2, 3))
     operator = BCOOLinearOperator(BCOO.fromdense(wide))
     with pytest.raises(ValueError, match="square"):
         CuDSS().init(operator, {})
 
 
-def test_init_rejects_unsupported_operator(fake_cudss: _FakeCuDSS) -> None:
+def test_init_rejects_unsupported_operator(fake_cudss: FakeCuDSS) -> None:
     operator = lx.MatrixLinearOperator(SQUARE_MATRIX)
     with pytest.raises(TypeError, match="CuDSS"):
         CuDSS().init(operator, {})
@@ -373,7 +198,7 @@ def test_init_rejects_unsupported_operator(fake_cudss: _FakeCuDSS) -> None:
 
 
 def test_init_analyzes_and_factorizes_once(
-    make_operator: OperatorFactory, fake_cudss: _FakeCuDSS
+    make_operator: OperatorFactory, fake_cudss: FakeCuDSS
 ) -> None:
     """`init` analyzes and factorizes once; `compute` then only solves, and `release`
     frees the token."""
@@ -394,7 +219,7 @@ def test_init_analyzes_and_factorizes_once(
 
 
 def test_compute_rejects_symbolic_only_state(
-    fake_cudss: _FakeCuDSS,
+    fake_cudss: FakeCuDSS,
 ) -> None:
     """A state straight from `init_symbolic` is not solvable: `compute` must raise until
     `update` folds in an operator."""
@@ -404,7 +229,7 @@ def test_compute_rejects_symbolic_only_state(
 
 
 def test_update_same_operator_is_a_no_op(
-    make_operator: OperatorFactory, fake_cudss: _FakeCuDSS
+    make_operator: OperatorFactory, fake_cudss: FakeCuDSS
 ) -> None:
     """`update` with the same operator object returns the state unchanged, running no
     further analyze or factorize."""
@@ -418,7 +243,7 @@ def test_update_same_operator_is_a_no_op(
 
 
 def test_update_reuses_analysis_across_shared_pattern(
-    fake_cudss: _FakeCuDSS,
+    fake_cudss: FakeCuDSS,
 ) -> None:
     """Two operators sharing a `sparsity_pattern_tag` let `update` reuse the analysis: one
     analyze, a fresh factorize per operator, and correct solves for both.
@@ -447,7 +272,7 @@ def test_update_reuses_analysis_across_shared_pattern(
 
 
 def test_update_new_pattern_reanalyzes(
-    make_operator: OperatorFactory, fake_cudss: _FakeCuDSS
+    make_operator: OperatorFactory, fake_cudss: FakeCuDSS
 ) -> None:
     """`update` with an operator that shares no tag re-analyzes from scratch."""
     solver = CuDSS()
@@ -461,7 +286,7 @@ def test_update_new_pattern_reanalyzes(
 
 
 def test_init_symbolic_then_update_reuses_analysis(
-    make_operator: OperatorFactory, fake_cudss: _FakeCuDSS
+    make_operator: OperatorFactory, fake_cudss: FakeCuDSS
 ) -> None:
     """`init_symbolic` analyzes once; a later `update` folds in an operator sharing the
     pattern and factorizes without re-analyzing."""
@@ -509,7 +334,7 @@ def _cudss_records(profile: splx.SolveProfile, operation: str) -> list[Any]:
 
 
 def test_update_factorizes_under_the_default_reordering(
-    fake_cudss: _FakeCuDSS,
+    fake_cudss: FakeCuDSS,
 ) -> None:
     """cuDSS only refactorizes under the COLAMD reorderings, so under the default one
     `update` factorizes again, keeping the analysis."""
@@ -528,7 +353,7 @@ def test_update_factorizes_under_the_default_reordering(
     "reordering", [CuDSSReordering.COLAMD, CuDSSReordering.BTF_COLAMD]
 )
 def test_update_refactorizes_under_colamd(
-    fake_cudss: _FakeCuDSS, reordering: CuDSSReordering
+    fake_cudss: FakeCuDSS, reordering: CuDSSReordering
 ) -> None:
     """Under the COLAMD reorderings `update` refactorizes with the previous pivots, and
     keeps the result when those pivots stay well scaled for the new values."""
@@ -545,7 +370,7 @@ def test_update_refactorizes_under_colamd(
     "reordering", [CuDSSReordering.COLAMD, CuDSSReordering.BTF_COLAMD]
 )
 def test_update_falls_back_when_reused_pivots_go_bad(
-    fake_cudss: _FakeCuDSS, reordering: CuDSSReordering
+    fake_cudss: FakeCuDSS, reordering: CuDSSReordering
 ) -> None:
     """When the new values leave the reused pivots badly scaled, `update` factorizes
     fresh instead. The second matrix shrinks the diagonal entry the first factorization
@@ -573,7 +398,7 @@ def _shared_pattern_operators() -> tuple[BCOOLinearOperator, BCOOLinearOperator]
     return first, second
 
 
-def test_track_entangles_token_with_solution(fake_cudss: _FakeCuDSS) -> None:
+def test_track_entangles_token_with_solution(fake_cudss: FakeCuDSS) -> None:
     """`track` makes the token depend on the solution, so a later `factorize` that renames
     the registry entry is ordered after the solve under jit."""
     first, _ = _shared_pattern_operators()
@@ -587,7 +412,7 @@ def test_track_entangles_token_with_solution(fake_cudss: _FakeCuDSS) -> None:
     state.release()
 
 
-def test_linear_solve_threads_a_tracked_state(fake_cudss: _FakeCuDSS) -> None:
+def test_linear_solve_threads_a_tracked_state(fake_cudss: FakeCuDSS) -> None:
     """`splineax.linear_solve` tracks the state after each solve, and the tracked state
     still reuses the analysis for an operator sharing the pattern."""
     first, second = _shared_pattern_operators()
@@ -607,7 +432,7 @@ def test_linear_solve_threads_a_tracked_state(fake_cudss: _FakeCuDSS) -> None:
 
 
 def test_release_under_jit_is_skipped(
-    make_operator: OperatorFactory, fake_cudss: _FakeCuDSS
+    make_operator: OperatorFactory, fake_cudss: FakeCuDSS
 ) -> None:
     """A traced `release` cannot reach the eager-only `spineax.cudss.release`, so it is
     skipped and the cache keeps the entry until eviction."""
@@ -618,7 +443,7 @@ def test_release_under_jit_is_skipped(
     assert len(fake_cudss.release_calls) == 1
 
 
-def test_profile_records_cudss_operations(fake_cudss: _FakeCuDSS) -> None:
+def test_profile_records_cudss_operations(fake_cudss: FakeCuDSS) -> None:
     """A solve profile records the analyze, the factorize per operator, the solves, and
     the release, with the `update` marked as reusing the analysis."""
     first, second = _shared_pattern_operators()
@@ -650,7 +475,7 @@ def test_profile_records_cudss_operations(fake_cudss: _FakeCuDSS) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_transpose_symmetric_reuses_factorization(fake_cudss: _FakeCuDSS) -> None:
+def test_transpose_symmetric_reuses_factorization(fake_cudss: FakeCuDSS) -> None:
     """For a symmetric matrix, `transpose` reuses the token unchanged: no extra
     analyze/factorize calls."""
     symmetric_matrix = SQUARE_MATRIX + SQUARE_MATRIX.T
@@ -670,7 +495,7 @@ def test_transpose_symmetric_reuses_factorization(fake_cudss: _FakeCuDSS) -> Non
     assert jnp.allclose(solution, _expected(symmetric_matrix.T))
 
 
-def test_transpose_general_refactorizes(fake_cudss: _FakeCuDSS) -> None:
+def test_transpose_general_refactorizes(fake_cudss: FakeCuDSS) -> None:
     """For a general (untagged) matrix, `transpose` builds and factorizes a genuinely
     transposed token: cuDSS has no native transpose solve."""
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
@@ -688,7 +513,7 @@ def test_transpose_general_refactorizes(fake_cudss: _FakeCuDSS) -> None:
     assert jnp.allclose(solution, _expected(SQUARE_MATRIX.T))
 
 
-def test_conj_real_is_noop(fake_cudss: _FakeCuDSS) -> None:
+def test_conj_real_is_noop(fake_cudss: FakeCuDSS) -> None:
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     solver = CuDSS()
     state = solver.init(operator, {})
@@ -696,7 +521,7 @@ def test_conj_real_is_noop(fake_cudss: _FakeCuDSS) -> None:
     assert conj_state is state
 
 
-def test_conj_complex_refactorizes(fake_cudss: _FakeCuDSS) -> None:
+def test_conj_complex_refactorizes(fake_cudss: FakeCuDSS) -> None:
     """For a complex matrix, `conj` reuses the pivots via `refactorize` (same magnitudes,
     so the existing pivoting stays valid) and solves correctly."""
     operator = BCOOLinearOperator(BCOO.fromdense(COMPLEX_MATRIX))

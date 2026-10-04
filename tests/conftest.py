@@ -4,6 +4,8 @@ import pytest
 from splineax.solvers._auto import _cuda_backend_available
 from splineax.solvers._cudss import _cudss_available
 
+from .fake_cudss import fake_cudss as fake_cudss
+
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
