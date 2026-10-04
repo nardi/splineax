@@ -3,10 +3,10 @@ from typing import Any
 
 import equinox as eqx
 from jax import custom_batching
-from jax.experimental.sparse import BCSR
+from jax.experimental.sparse import BCOO, BCSR
 from jax.experimental.sparse.linalg import _csr_transpose, spsolve
 from jaxtyping import Array, Inexact, PyTree
-from lineax import AbstractLinearOperator, materialise
+from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
@@ -20,14 +20,12 @@ from lineax._solver.misc import (
 from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.operators._jacobian import (
-    SparseJacobianLinearOperator,
-)
 from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
     profile_inputs,
     sparse_indices_sorted,
+    sparse_operator,
     update_then_compute,
     warn_if_unsorted,
 )
@@ -145,11 +143,10 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         # row. We assume the matrix is coalesced (no duplicate indices) and only ensure
         # the sorting here. An operator tagged `sparse_indices_sorted` asserts it needs
         # no sort.
-        sorted_asserted = sparse_indices_sorted in getattr(operator, "tags", ())
-        match operator:
-            case SparseJacobianLinearOperator():
-                return self._build(materialise(operator), options)
-            case BCSRLinearOperator(matrix):
+        sparse = sparse_operator(operator, "Spsolve")
+        sorted_asserted = sparse_indices_sorted in sparse.tags
+        match sparse:
+            case BCSRLinearOperator(matrix=BCSR() as matrix):
                 # Round-trip an unsorted `BCSR` through `BCOO`, since `BCSR.from_bcoo`
                 # sorts.
                 if matrix.indices_sorted or sorted_asserted:
@@ -157,20 +154,10 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
                 else:
                     warn_if_unsorted(matrix, "Spsolve")
                     matrix_bcsr = BCSR.from_bcoo(matrix.to_bcoo())
-            case BCOOLinearOperator(matrix):
-                if sorted_asserted:
-                    matrix_bcsr = BCSR.from_bcoo(matrix)
-                else:
+            case BCOOLinearOperator(matrix=BCOO() as matrix):
+                if not sorted_asserted:
                     warn_if_unsorted(matrix, "Spsolve")
-                    matrix_bcsr = BCSR.from_bcoo(matrix)
-            case _:
-                raise TypeError(
-                    "`Spsolve` requires a sparse operator backed by a `BCOO` or `BCSR` "
-                    "matrix (e.g. `splineax.BCOOLinearOperator` or "
-                    "`splineax.BCSRLinearOperator`), or a "
-                    f"`splineax.SparseJacobianLinearOperator`; "
-                    f"got {type(operator).__name__}."
-                )
+                matrix_bcsr = BCSR.from_bcoo(matrix)
 
         return _SpsolveState(operator, matrix_bcsr, pack_structures(operator))
 

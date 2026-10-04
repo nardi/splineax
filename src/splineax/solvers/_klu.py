@@ -4,12 +4,11 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from asdex import ColoredPattern
 from entangle_jax import entangle
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import NumericToken, SymbolToken
-from lineax import AbstractLinearOperator, materialise
+from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
@@ -23,15 +22,12 @@ from lineax._solver.misc import (
 from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.operators._jacobian import (
-    JacobianColoring,
-    SparseJacobianLinearOperator,
-    SparseJacobianLinearOperatorColoring,
-)
 from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
+    pattern_coordinates,
     profile_inputs,
+    sparse_operator,
     sparsity_pattern_tag,
     sparsity_reuse_block,
     update_then_compute,
@@ -68,23 +64,14 @@ def _extract_coo(
 ) -> tuple[Array, Array, Array, tuple[int, ...]]:
     """Read an operator's COO triple and shape, upcasting the values.
 
-    A `SparseJacobianLinearOperator` is materialised first, then handled like a BCOO.
+    A tagged `lineax.JacobianLinearOperator` or `lineax.FunctionLinearOperator` is
+    materialised as a `BCOO` first.
     """
-    match operator:
-        case SparseJacobianLinearOperator():
-            return _extract_coo(materialise(operator))
-        case BCSRLinearOperator(matrix):
+    match sparse_operator(operator, "KLU"):
+        case BCSRLinearOperator(matrix=BCSR() as matrix):
             bcoo = matrix.to_bcoo()
-        case BCOOLinearOperator(matrix):
+        case BCOOLinearOperator(matrix=BCOO() as matrix):
             bcoo = matrix
-        case _:
-            raise TypeError(
-                "`KLU` requires a sparse operator backed by a `BCOO` or `BCSR` "
-                "matrix (e.g. `splineax.BCOOLinearOperator` or "
-                "`splineax.BCSRLinearOperator`), or a "
-                f"`splineax.SparseJacobianLinearOperator`; "
-                f"got {type(operator).__name__}."
-            )
     row = bcoo.indices[:, 0].astype(jnp.int32)
     col = bcoo.indices[:, 1].astype(jnp.int32)
     # Stop gradients on the values before they reach `analyze`/`factor`, which have no
@@ -95,61 +82,9 @@ def _extract_coo(
 
 
 def _extract_pattern(sparsity: _Sparsity) -> tuple[Array, Array, tuple[int, ...]]:
-    """Read a sparsity pattern's COO indices and shape, without any values.
-
-    The Jacobian and coloring forms carry the pattern in their precomputed asdex
-    coloring, so the indices are read there rather than materialising the Jacobian.
-    """
-    match sparsity:
-        case SparseJacobianLinearOperator(transposed=True):
-            # The stored pattern describes the forward Jacobian. asdex emits `BCOO`
-            # values in the pattern's index order and `BCOO.T` swaps the index columns
-            # without reordering entries, so swapping rows and columns here keeps the
-            # indices aligned with the values a later solve pairs them with.
-            pattern = sparsity.coloring.sparsity
-            row = jnp.asarray(pattern.cols, dtype=jnp.int32)
-            col = jnp.asarray(pattern.rows, dtype=jnp.int32)
-            shape = pattern.shape[::-1]
-        case SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring():
-            # Both hold the coloring one level in: the operator stores an
-            # `asdex.ColoredPattern` whose `.sparsity` is the pattern, and the operator
-            # coloring stores a `JacobianColoring` whose `.sparsity` property returns it.
-            pattern = sparsity.coloring.sparsity
-            row = jnp.asarray(pattern.rows, dtype=jnp.int32)
-            col = jnp.asarray(pattern.cols, dtype=jnp.int32)
-            shape = pattern.shape
-        case JacobianColoring() | ColoredPattern():
-            pattern = sparsity.sparsity
-            row = jnp.asarray(pattern.rows, dtype=jnp.int32)
-            col = jnp.asarray(pattern.cols, dtype=jnp.int32)
-            shape = pattern.shape
-        case BCSRLinearOperator():
-            bcoo = sparsity.matrix.to_bcoo()
-            row = bcoo.indices[:, 0].astype(jnp.int32)
-            col = bcoo.indices[:, 1].astype(jnp.int32)
-            shape = bcoo.shape
-        case BCOOLinearOperator():
-            bcoo = sparsity.matrix
-            row = bcoo.indices[:, 0].astype(jnp.int32)
-            col = bcoo.indices[:, 1].astype(jnp.int32)
-            shape = bcoo.shape
-        case BCSR():
-            bcoo = sparsity.to_bcoo()
-            row = bcoo.indices[:, 0].astype(jnp.int32)
-            col = bcoo.indices[:, 1].astype(jnp.int32)
-            shape = bcoo.shape
-        case BCOO():
-            row = sparsity.indices[:, 0].astype(jnp.int32)
-            col = sparsity.indices[:, 1].astype(jnp.int32)
-            shape = sparsity.shape
-        case _:
-            raise TypeError(
-                "`KLU.init_symbolic` requires a `BCOO`, `BCSR`, `BCOOLinearOperator`, "
-                "`BCSRLinearOperator`, `SparseJacobianLinearOperator`, "
-                "`SparseJacobianLinearOperatorColoring`, `JacobianColoring`, or "
-                f"`asdex.ColoredPattern`; got {type(sparsity).__name__}."
-            )
-    return row, col, tuple(shape)
+    """Read a sparsity pattern's COO indices and shape, without any values."""
+    coordinates = pattern_coordinates(sparsity, "KLU")
+    return coordinates.rows, coordinates.columns, coordinates.shape
 
 
 class _KLUState(eqx.Module):
@@ -385,10 +320,11 @@ class KLU(AbstractLinearSolver[_KLUState]):
     ) -> _KLUState:
         """Analyze a sparsity pattern into a symbolic-only state, no values yet.
 
-        Accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`,
-        `SparseJacobianLinearOperator`, `SparseJacobianLinearOperatorColoring`, or
-        `JacobianColoring`. `update` then folds in an operator sharing the pattern and
-        reuses this analysis. The pattern must be concrete here, not a traced value.
+        Accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`, a
+        sparsity-pattern tag, a tagged `lineax.JacobianLinearOperator` or
+        `lineax.FunctionLinearOperator`, or an `asdex.ColoredPattern`. `update`
+        then folds in an operator sharing the pattern and reuses this analysis. The
+        pattern must be concrete here, not a traced value.
         """
         del options
         row, col, shape = _extract_pattern(sparsity)
