@@ -102,20 +102,17 @@ def _square_jacobian_function(x: jnp.ndarray, args: object) -> jnp.ndarray:
 
 @pytest.mark.cpu_only
 def test_update_across_jacobian_points_reuses_analysis() -> None:
-    """Operators from one `operator_at` factory carry a pattern tag from their shared
-    coloring, so `update` across evaluation points reuses the analysis, and a BCOO
-    materialised from such an operator does too, so `analyze` runs once each."""
+    """Jacobian operators that share a tag reuse the analysis across evaluation points,
+    and a BCOO materialised from such an operator does too, so `analyze` runs once."""
     point = jnp.linspace(0.5, 1.5, 5)
-    factory = splx.SparseJacobianLinearOperatorColoring.detect(
-        _square_jacobian_function, point
-    )
-    first = factory.operator_at(point)
-    second = factory.operator_at(point + 0.3)
+    tag = splx.sparsity_coloring_tag(_square_jacobian_function, point)
+    first = lx.JacobianLinearOperator(_square_jacobian_function, point, tags=tag)
+    second = lx.JacobianLinearOperator(_square_jacobian_function, point + 0.3, tags=tag)
     solver = KLU()
     with _spy("analyze") as analyze_calls:
         state = solver.init(first, {})
         across_points = solver.update(state, second)
-        across_materialised = solver.update(state, lx.materialise(second))
+        across_materialised = solver.update(state, splx.materialise_as_bcoo(second))
     assert across_points.symbol is state.symbol, "update re-analyzed another point"
     assert across_materialised.symbol is state.symbol, (
         "update re-analyzed a materialised operator"

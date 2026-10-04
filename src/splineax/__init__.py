@@ -20,16 +20,7 @@ from .operators import (
     BCSRLinearOperator as BCSRLinearOperator,
 )
 from .operators import (
-    JacobianColoring as JacobianColoring,
-)
-from .operators import (
     JacobianDirection as JacobianDirection,
-)
-from .operators import (
-    SparseJacobianLinearOperator as SparseJacobianLinearOperator,
-)
-from .operators import (
-    SparseJacobianLinearOperatorColoring as SparseJacobianLinearOperatorColoring,
 )
 from .operators import (
     materialise_as_bcoo as materialise_as_bcoo,

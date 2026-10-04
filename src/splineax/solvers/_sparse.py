@@ -36,29 +36,18 @@ from splineax._profile import (
 )
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.operators._jacobian import (
-    JacobianColoring,
-    SparseJacobianLinearOperator,
-    SparseJacobianLinearOperatorColoring,
-)
 from splineax.operators._tagged import materialise_as_bcoo
 from splineax.operators._tags import (
-    PatternSource,
-    PatternTag,
+    TaggedOperator,
     _ContentPatternTag,
-    _IdentityPatternTag,
     coloring_index_array,
     find_pattern_tag,
     pattern_indices,
-    sparsity_tag_from_coloring,
 )
+from splineax.operators._tags import operator_pattern_tag as operator_pattern_tag
 from splineax.operators._tags import sparse_indices_sorted as sparse_indices_sorted
+from splineax.operators._tags import sparsity_pattern_tag as sparsity_pattern_tag
 from splineax.solvers._stateful import StatefulSolver
-
-TaggedOperator = (
-    lx.JacobianLinearOperator | lx.FunctionLinearOperator | lx.TaggedLinearOperator
-)
-"""The lineax operators a solver accepts when they carry a sparsity-pattern tag."""
 
 # Everything `init_symbolic` accepts as a sparsity pattern.
 _Sparsity = (
@@ -66,9 +55,6 @@ _Sparsity = (
     | BCSR
     | BCOOLinearOperator
     | BCSRLinearOperator
-    | SparseJacobianLinearOperator
-    | SparseJacobianLinearOperatorColoring
-    | JacobianColoring
     | ColoredPattern
     | _ContentPatternTag
     | TaggedOperator
@@ -103,8 +89,6 @@ def sparse_operator(
     match operator:
         case BCOOLinearOperator() | BCSRLinearOperator():
             return operator
-        case SparseJacobianLinearOperator():
-            return BCOOLinearOperator(operator.as_bcoo(), operator.tags)
         case (
             lx.JacobianLinearOperator()
             | lx.FunctionLinearOperator()
@@ -158,24 +142,11 @@ def _coordinates_from_indices(
 def pattern_coordinates(sparsity: _Sparsity, solver_name: str) -> PatternCoordinates:
     """Read the coordinates of a sparsity pattern for `init_symbolic`.
 
-    A tag, a tagged lineax operator and the coloring forms carry the pattern host-side,
-    so their indices are read without materialising anything. Their entry order is the
+    A tag, a tagged lineax operator and an `asdex.ColoredPattern` carry the pattern
+    host-side, so their indices are read without materialising anything. Their entry order is the
     order in which a later solve will pair values with the indices.
     """
     match sparsity:
-        case SparseJacobianLinearOperator(transposed=True):
-            # The stored pattern describes the forward Jacobian. asdex emits `BCOO`
-            # values in the pattern's index order and `BCOO.T` swaps the index columns
-            # without reordering entries, so swapping rows and columns here keeps the
-            # indices aligned with the values a later solve pairs them with.
-            indices, shape = coloring_index_array(sparsity.coloring)
-            return _coordinates_from_indices(indices[:, ::-1], shape[::-1])
-        case SparseJacobianLinearOperator() | JacobianColoring():
-            return _coordinates_from_indices(*coloring_index_array(sparsity.coloring))
-        case SparseJacobianLinearOperatorColoring():
-            return _coordinates_from_indices(
-                *coloring_index_array(sparsity.coloring.coloring)
-            )
         case ColoredPattern():
             return _coordinates_from_indices(*coloring_index_array(sparsity))
         case _ContentPatternTag(indices=indices, shape=shape):
@@ -239,80 +210,6 @@ def warn_if_unsorted(matrix: BCOO | BCSR, solver_name: str) -> None:
         )
 
 
-def _pattern_indices(
-    pattern: "_Sparsity | PatternSource",
-) -> tuple[np.ndarray | None, tuple[int, ...] | None]:
-    """Read a pattern's COO index array and shape as concrete numpy data.
-
-    Returns `(None, None)` when the indices are traced, which sends
-    `sparsity_pattern_tag` to its random-id fallback. The Jacobian and coloring forms read
-    their pattern from the precomputed asdex coloring, whose indices are always concrete.
-    """
-    match pattern:
-        case SparseJacobianLinearOperator() | JacobianColoring():
-            return coloring_index_array(pattern.coloring)
-        case SparseJacobianLinearOperatorColoring():
-            return coloring_index_array(pattern.coloring.coloring)
-        case _ContentPatternTag(indices=indices, shape=shape):
-            return indices, tuple(shape)
-        case (
-            lx.JacobianLinearOperator()
-            | lx.FunctionLinearOperator()
-            | lx.TaggedLinearOperator()
-        ):
-            tag = find_pattern_tag(pattern.tags)
-            if isinstance(tag, _ContentPatternTag):
-                return tag.indices, tuple(tag.shape)
-            return None, None
-        case _:
-            return pattern_indices(pattern)
-
-
-def sparsity_pattern_tag(
-    pattern: "_Sparsity | PatternSource | None" = None,
-) -> PatternTag:
-    """Create a tag marking an operator's structural sparsity pattern.
-
-    Attach the tag to operators through their `tags` argument. Two operators carrying
-    equal tags are asserted to have exactly the same index arrays, in the same order, so
-    a solver may reuse one operator's factorization for the other.
-
-    Given a concrete `pattern`, the tag is content-hashed, so independently tagged
-    operators with the same indices get equal tags. With no argument, or a pattern whose
-    indices are traced under jit, the tag instead carries a random id. Thread that one
-    tag object onto every operator sharing the pattern to mark them as equal.
-
-    A content-hashed tag also lets a solver turn a tagged `lineax.JacobianLinearOperator`
-    or `lineax.FunctionLinearOperator` into a `BCOO`. The Jacobian coloring this needs is
-    computed on first use and cached on the tag. A pattern that already holds a coloring
-    (an `asdex.ColoredPattern`) keeps it. Use [`splineax.sparsity_coloring_tag`][] to
-    compute the coloring up front.
-
-    Given a tag, or a lineax operator that carries one, that tag is returned.
-    """
-    match pattern:
-        case None:
-            return _IdentityPatternTag()
-        case ColoredPattern():
-            return sparsity_tag_from_coloring(pattern)
-        case SparseJacobianLinearOperator():
-            return sparsity_tag_from_coloring(pattern.coloring)
-        case _ContentPatternTag():
-            return pattern
-        case (
-            lx.JacobianLinearOperator()
-            | lx.FunctionLinearOperator()
-            | lx.TaggedLinearOperator()
-        ):
-            operator_tag = find_pattern_tag(pattern.tags)
-            if operator_tag is not None:
-                return operator_tag
-    indices, shape = _pattern_indices(pattern)
-    if indices is None or shape is None:
-        return _IdentityPatternTag()
-    return _ContentPatternTag(indices, shape)
-
-
 def profile_inputs(
     pattern: Any,
     tag: object | None,
@@ -324,7 +221,7 @@ def profile_inputs(
     `sparsity_hash`. Meant to be called lazily (only when a profile is active), since reading
     the index array is not free.
     """
-    indices, index_shape = _pattern_indices(pattern)
+    indices, index_shape = pattern_indices(pattern)
     nse = None if indices is None else int(indices.shape[0])
     return {
         "shape": shape if shape is not None else index_shape,
@@ -349,17 +246,6 @@ def sparsity_reuse_block(
     if state_tag != operator_tag:
         return "Different sparsity tag"
     return None
-
-
-def operator_pattern_tag(operator: AbstractLinearOperator) -> PatternTag | None:
-    """Return the operator's sparsity-pattern tag, or None if it carries none.
-
-    Solvers read this in `update` to decide whether an operator shares a state's pattern. A
-    `SparseJacobianLinearOperator` carries a tag derived from its coloring, so operators built
-    by one `operator_at` factory, and any BCOO materialised from them, reuse a factorization
-    without the caller tagging them.
-    """
-    return find_pattern_tag(getattr(operator, "tags", frozenset()))
 
 
 _StateT = TypeVar("_StateT")

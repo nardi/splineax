@@ -17,15 +17,3 @@
 ---
 
 ::: splineax.JacobianDirection
-
----
-
-::: splineax.SparseJacobianLinearOperator
-
----
-
-::: splineax.JacobianColoring
-
----
-
-::: splineax.SparseJacobianLinearOperatorColoring
