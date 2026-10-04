@@ -188,8 +188,7 @@ listed here.
 - **Reuse needs a shared pattern.** Threading a state does not by itself reuse a
   factorization. The solver reuses one only when it can tell two operators share a pattern,
   which comes from a [`splineax.sparsity_pattern_tag`][]. You have to make sure the operators
-  get this tag, either by passing it through yourself or by building Jacobian operators with
-  one tag from [`splineax.sparsity_coloring_tag`][].
+  get this tag, by supplying it when the operator is constructed.
 - **`lax.cond` needs an initial state.** A solve inside a `cond` branch is threaded only when
   a solve before the `cond` has already created the state, since the untaken branch has to
   return a matching state. A first solve reached only inside a `cond` raises.
