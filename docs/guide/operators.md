@@ -108,16 +108,17 @@ The entries of the `BCOO` come out in the same order as the indices in the tag.
 
 ### Pattern tags and coloring tags
 
-Two functions create a tag that can drive the conversion.
+There are two ways to create a tag that indicates an operator follows a certain sparsity
+pattern:
 
 - [`sparsity_pattern_tag`][splineax.sparsity_pattern_tag] holds only the pattern. The
   first conversion colors it and caches the coloring on the tag, and later conversions
   reuse that coloring.
-- [`sparsity_coloring_tag`][splineax.sparsity_coloring_tag] colors the pattern right
-  away. It takes a known pattern (a `BCOO`, a `BCSR`, a sparse operator, an
-  `asdex.SparsityPattern`, a dense boolean mask, or an `asdex.ColoredPattern`). It also
-  takes a function and a point, and then it detects the pattern first. Only the shape and
-  dtype of the point matter, so a `jax.ShapeDtypeStruct` works as well.
+- [`sparsity_coloring_tag`][splineax.sparsity_coloring_tag] colors the pattern right away.
+  It takes a known pattern (a `BCOO`, a `BCSR`, a sparse operator, an
+  `asdex.SparsityPattern`, a dense boolean mask, or an `asdex.ColoredPattern`), or a
+  function and a point, and then it detects the pattern first. Only the shape and dtype of
+  the point matter, so a `jax.ShapeDtypeStruct` works as well.
 
 Both kinds of tag compare equal when their patterns match, so operators that carry either
 one share a factorization (see [Stateful solves](stateful.md)). The Jacobian of `residual`
@@ -147,10 +148,10 @@ row_operator = lx.JacobianLinearOperator(residual, y0, tags=row_tag, jac="bwd")
 
 ### Function operators
 
-A `lineax.FunctionLinearOperator` with a tag converts the same way. lineax requires its
-function to be linear, so its matrix is the Jacobian of `mv` at any point. A function
-operator of the JVP of `residual` therefore has the same indices and values as the
-Jacobian operator above:
+A `lineax.FunctionLinearOperator` with a tag converts the same way. This operator is meant
+to wrap a linear function, which means its matrix representation is exactly the Jacobian
+of `mv` (at any point). This also means a function operator of the JVP of `residual` has
+the same indices and values as the Jacobian operator above:
 
 ```{.python continuation}
 def residual_jvp(tangent):
@@ -198,11 +199,12 @@ state.release()
 
 ### Transposed operators
 
-A tag follows a transpose. The transpose of a tagged `lineax.JacobianLinearOperator` is a
-`lineax.FunctionLinearOperator` of the VJP, and it carries the tag of the transposed
-pattern. A coloring carries over with its direction swapped, because a column coloring of
-a matrix is a row coloring of its transpose. `BCOOLinearOperator` and `BCSRLinearOperator`
-transpose their tags in the same way.
+When an operator is transposed, the tags get transformed with it. The transpose of a
+tagged `lineax.JacobianLinearOperator` is a `lineax.FunctionLinearOperator` of the VJP,
+and it carries the tag of the transposed pattern. A coloring carries over with its
+direction swapped, because a column coloring of a matrix is a row coloring of its
+transpose. `BCOOLinearOperator` and `BCSRLinearOperator` transpose their tags in the same
+way.
 
 ```{.python continuation}
 transposed = splx.materialise_as_bcoo(operator.T).matrix
@@ -213,9 +215,10 @@ assert jnp.allclose(transposed.todense(), jacobian.todense().T)
 
 - Only real dtypes are supported.
 - Pytree inputs and outputs are raveled in leaf order into one vector each.
-- The conversion needs a tag built from concrete indices. A tag created under `jax.jit`
-  from traced indices, or by `sparsity_pattern_tag()` with no argument, carries only an
-  id, and a solver will reject it for a Jacobian or function operator.
+- To use a tag to compute a sparse Jacobian, it has to be built from concrete indices. A
+  tag created under `jax.jit` from traced indices, or by `sparsity_pattern_tag()` with no
+  argument, carries only an id, and a solver will reject it for a Jacobian or function
+  operator.
 
 ## BCOO or BCSR?
 
