@@ -95,11 +95,11 @@ solution = lx.linear_solve(operator, b1, solver=solver, state=state).value
 state.release()
 ```
 
-`init_symbolic` accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`,
-`SparseJacobianLinearOperator`, `SparseJacobianLinearOperatorColoring`, or
-`JacobianColoring`. Only its sparsity pattern is read. For the Jacobian and coloring
-forms, the pattern comes from the precomputed coloring, without materialising the Jacobian
-numerically.
+`init_symbolic` accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`, a
+sparsity-pattern tag, a tagged `lineax.JacobianLinearOperator` or
+`lineax.FunctionLinearOperator`, or an `asdex.ColoredPattern`. Only its sparsity pattern is
+read. A tag or a tagged operator gives its pattern without materialising anything, so
+`solver.init_symbolic(tag)` works before you know any point to evaluate a Jacobian at.
 
 ### Shared patterns between operators
 
@@ -123,9 +123,9 @@ Two operators carrying the same tag are asserted to have exactly the same index 
 in the same order. Given a concrete pattern the tag is a content hash, so operators tagged
 separately still compare equal when their indices match. With no argument, or under `jit`
 where the indices are traced, `sparsity_pattern_tag()` instead returns a marker you thread
-onto every operator sharing the pattern. Operators built by one
-`SparseJacobianLinearOperatorColoring.operator_at` factory reuse a factorization across
-evaluation points automatically, without any tagging.
+onto every operator sharing the pattern. Jacobian operators at different points that carry
+one tag from [`splineax.sparsity_coloring_tag`][] reuse a factorization in the same way
+(see [Operators](operators.md#reuse-across-points)).
 
 There is also a `sparse_indices_sorted` tag. Attaching it to an operator asserts its
 indices are already row-major sorted, so `Pardiso` and `Spsolve` skip the sort they would

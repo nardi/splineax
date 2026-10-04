@@ -96,9 +96,9 @@ assert jnp.allclose(solve_twice_stateful_explicit(values, b1, b2), solve_twice(v
 
 Reuse depends on the solver recognising that the two operators share a pattern. That is what
 the `sparsity_pattern_tag` above asserts. Without a tag the two solves are treated as
-unrelated matrices and each one analyzes from scratch. Operators built from a
-[`splineax.SparseJacobianLinearOperator`][] carry such a tag automatically, from their
-coloring, so a Jacobian solved at many points needs no tagging.
+unrelated matrices and each one analyzes from scratch. A tagged
+`lineax.JacobianLinearOperator` (see [Operators](operators.md#jacobian-operators)) already
+carries such a tag, so a Jacobian solved at many points needs no further tagging.
 
 ## Reuse across a loop
 
@@ -188,8 +188,8 @@ listed here.
 - **Reuse needs a shared pattern.** Threading a state does not by itself reuse a
   factorization. The solver reuses one only when it can tell two operators share a pattern,
   which comes from a [`splineax.sparsity_pattern_tag`][]. You have to make sure the operators
-  get this tag, either by passing it through yourself or because the operators are generated
-  from a sparse Jacobian calculation.
+  get this tag, either by passing it through yourself or by building Jacobian operators with
+  one tag from [`splineax.sparsity_coloring_tag`][].
 - **`lax.cond` needs an initial state.** A solve inside a `cond` branch is threaded only when
   a solve before the `cond` has already created the state, since the untaken branch has to
   return a matching state. A first solve reached only inside a `cond` raises.
