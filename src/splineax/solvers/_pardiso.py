@@ -5,9 +5,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from entangle_jax import entangle
-from jax.experimental.sparse import BCSR
+from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
-from lineax import AbstractLinearOperator, materialise
+from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
@@ -21,15 +21,13 @@ from lineax._solver.misc import (
 from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.operators._jacobian import (
-    SparseJacobianLinearOperator,
-)
 from splineax.solvers._klu import COMPLEX_DTYPES, _extract_pattern
 from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
     profile_inputs,
     sparse_indices_sorted,
+    sparse_operator,
     sparsity_pattern_tag,
     sparsity_reuse_block,
     update_then_compute,
@@ -97,33 +95,25 @@ def _extract_csr(
 ) -> tuple[Array, Array, Array, tuple[int, ...]]:
     """Read an operator as a sorted CSR triple with int32 indices and float64 values.
 
-    A `SparseJacobianLinearOperator` is materialised first. An operator tagged
-    `sparse_indices_sorted` asserts its indices need no sort.
+    A tagged `lineax.JacobianLinearOperator` or `lineax.FunctionLinearOperator` is
+    materialised as a `BCOO` first. An operator tagged `sparse_indices_sorted` asserts
+    its indices need no sort.
     """
-    sorted_asserted = sparse_indices_sorted in getattr(operator, "tags", ())
+    operator = sparse_operator(operator, "Pardiso")
+    sorted_asserted = sparse_indices_sorted in operator.tags
     match operator:
-        case SparseJacobianLinearOperator():
-            return _extract_csr(materialise(operator))
-        case BCSRLinearOperator(matrix):
+        case BCSRLinearOperator(matrix=BCSR() as matrix):
             _reject_complex(matrix.dtype)
             if matrix.indices_sorted or sorted_asserted:
                 matrix_bcsr = matrix
             else:
                 warn_if_unsorted(matrix, "Pardiso")
                 matrix_bcsr = BCSR.from_bcoo(matrix.to_bcoo())
-        case BCOOLinearOperator(matrix):
+        case BCOOLinearOperator(matrix=BCOO() as matrix):
             _reject_complex(matrix.dtype)
             if not sorted_asserted:
                 warn_if_unsorted(matrix, "Pardiso")
             matrix_bcsr = BCSR.from_bcoo(matrix)
-        case _:
-            raise TypeError(
-                "`Pardiso` requires a sparse operator backed by a `BCOO` or `BCSR` "
-                "matrix (e.g. `splineax.BCOOLinearOperator` or "
-                "`splineax.BCSRLinearOperator`), or a "
-                f"`splineax.SparseJacobianLinearOperator`; "
-                f"got {type(operator).__name__}."
-            )
     indptr = matrix_bcsr.indptr.astype(jnp.int32)
     indices = matrix_bcsr.indices.astype(jnp.int32)
     # Stop gradients on the values before they reach `analyze`/`factor`, which have no

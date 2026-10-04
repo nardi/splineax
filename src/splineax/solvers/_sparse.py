@@ -12,12 +12,13 @@ import jax
 import jax.core
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import lineax as lx
 import numpy as np
 from asdex import ColoredPattern
 from equinox.internal import ω
 from jax._src.ad_util import SymbolicZero  # noqa: PLC2701
 from jax.experimental.sparse import BCOO, BCSR
-from jaxtyping import PyTree
+from jaxtyping import Array, Inexact, Integer, PyTree
 from lineax import (
     AbstractLinearOperator,
     AbstractLinearSolver,
@@ -40,6 +41,7 @@ from splineax.operators._jacobian import (
     SparseJacobianLinearOperator,
     SparseJacobianLinearOperatorColoring,
 )
+from splineax.operators._tagged import materialise_as_bcoo
 from splineax.operators._tags import (
     PatternSource,
     PatternTag,
@@ -53,6 +55,11 @@ from splineax.operators._tags import (
 from splineax.operators._tags import sparse_indices_sorted as sparse_indices_sorted
 from splineax.solvers._stateful import StatefulSolver
 
+TaggedOperator = (
+    lx.JacobianLinearOperator | lx.FunctionLinearOperator | lx.TaggedLinearOperator
+)
+"""The lineax operators a solver accepts when they carry a sparsity-pattern tag."""
+
 # Everything `init_symbolic` accepts as a sparsity pattern.
 _Sparsity = (
     BCOO
@@ -63,7 +70,125 @@ _Sparsity = (
     | SparseJacobianLinearOperatorColoring
     | JacobianColoring
     | ColoredPattern
+    | _ContentPatternTag
+    | TaggedOperator
 )
+
+
+class PatternCoordinates(eqx.Module):
+    """The coordinates of a sparsity pattern, with values when the source has them."""
+
+    rows: Integer[Array, " nse"]
+    """The int32 row index of each entry."""
+
+    columns: Integer[Array, " nse"]
+    """The int32 column index of each entry."""
+
+    shape: tuple[int, ...] = eqx.field(static=True)
+    """The shape of the matrix."""
+
+    values: Inexact[Array, " nse"] | None
+    """The values of a `BCOO` or `BCSR` source, or None for a source without values."""
+
+
+def sparse_operator(
+    operator: AbstractLinearOperator, solver_name: str
+) -> BCOOLinearOperator | BCSRLinearOperator:
+    """Return `operator` as one of the sparse operators the solvers read.
+
+    A `BCOOLinearOperator` or `BCSRLinearOperator` is returned as it is. A tagged
+    `lineax.JacobianLinearOperator` or `lineax.FunctionLinearOperator`, also inside a
+    `lineax.TaggedLinearOperator`, is materialised with `materialise_as_bcoo`.
+    """
+    match operator:
+        case BCOOLinearOperator() | BCSRLinearOperator():
+            return operator
+        case SparseJacobianLinearOperator():
+            return BCOOLinearOperator(operator.as_bcoo(), operator.tags)
+        case (
+            lx.JacobianLinearOperator()
+            | lx.FunctionLinearOperator()
+            | lx.TaggedLinearOperator()
+        ):
+            return materialise_as_bcoo(operator)
+        case _:
+            raise TypeError(
+                f"`{solver_name}` requires a sparse operator backed by a `BCOO` or "
+                "`BCSR` matrix (e.g. `splineax.BCOOLinearOperator` or "
+                "`splineax.BCSRLinearOperator`), or a `lineax.JacobianLinearOperator` or "
+                "`lineax.FunctionLinearOperator` carrying a sparsity-pattern tag; got "
+                f"{type(operator).__name__}."
+            )
+
+
+def _coordinates_from_indices(
+    indices: Array | np.ndarray,
+    shape: tuple[int, ...],
+    values: Inexact[Array, " nse"] | None = None,
+) -> PatternCoordinates:
+    """Split an `(nse, 2)` index array into int32 rows and columns."""
+    indices = jnp.asarray(indices)
+    return PatternCoordinates(
+        indices[:, 0].astype(jnp.int32),
+        indices[:, 1].astype(jnp.int32),
+        tuple(shape),
+        values,
+    )
+
+
+def pattern_coordinates(sparsity: _Sparsity, solver_name: str) -> PatternCoordinates:
+    """Read the coordinates of a sparsity pattern for `init_symbolic`.
+
+    A tag, a tagged lineax operator and the coloring forms carry the pattern host-side,
+    so their indices are read without materialising anything. Their entry order is the
+    order in which a later solve will pair values with the indices.
+    """
+    match sparsity:
+        case SparseJacobianLinearOperator(transposed=True):
+            # The stored pattern describes the forward Jacobian. asdex emits `BCOO`
+            # values in the pattern's index order and `BCOO.T` swaps the index columns
+            # without reordering entries, so swapping rows and columns here keeps the
+            # indices aligned with the values a later solve pairs them with.
+            indices, shape = coloring_index_array(sparsity.coloring)
+            return _coordinates_from_indices(indices[:, ::-1], shape[::-1])
+        case SparseJacobianLinearOperator() | JacobianColoring():
+            return _coordinates_from_indices(*coloring_index_array(sparsity.coloring))
+        case SparseJacobianLinearOperatorColoring():
+            return _coordinates_from_indices(
+                *coloring_index_array(sparsity.coloring.coloring)
+            )
+        case ColoredPattern():
+            return _coordinates_from_indices(*coloring_index_array(sparsity))
+        case _ContentPatternTag(indices=indices, shape=shape):
+            return _coordinates_from_indices(indices, shape)
+        case BCOO():
+            return _coordinates_from_indices(
+                sparsity.indices, sparsity.shape, sparsity.data
+            )
+        case BCSR():
+            return pattern_coordinates(sparsity.to_bcoo(), solver_name)
+        case BCOOLinearOperator() | BCSRLinearOperator():
+            return pattern_coordinates(sparsity.matrix, solver_name)
+        case (
+            lx.JacobianLinearOperator()
+            | lx.FunctionLinearOperator()
+            | lx.TaggedLinearOperator()
+        ):
+            tag = find_pattern_tag(sparsity.tags)
+            if not isinstance(tag, _ContentPatternTag):
+                raise TypeError(
+                    f"`{solver_name}.init_symbolic` needs a sparsity-pattern tag with "
+                    f"concrete indices on a `lineax.{type(sparsity).__name__}`."
+                )
+            return pattern_coordinates(tag, solver_name)
+        case _:
+            raise TypeError(
+                f"`{solver_name}.init_symbolic` requires a `BCOO`, `BCSR`, "
+                "`BCOOLinearOperator`, `BCSRLinearOperator`, a sparsity-pattern tag, a "
+                "tagged `lineax.JacobianLinearOperator` or "
+                "`lineax.FunctionLinearOperator`, or an `asdex.ColoredPattern`; got "
+                f"{type(sparsity).__name__}."
+            )
 
 
 class PerformanceWarning(UserWarning):
@@ -109,6 +234,17 @@ def _pattern_indices(
             return coloring_index_array(pattern.coloring)
         case SparseJacobianLinearOperatorColoring():
             return coloring_index_array(pattern.coloring.coloring)
+        case _ContentPatternTag(indices=indices, shape=shape):
+            return indices, tuple(shape)
+        case (
+            lx.JacobianLinearOperator()
+            | lx.FunctionLinearOperator()
+            | lx.TaggedLinearOperator()
+        ):
+            tag = find_pattern_tag(pattern.tags)
+            if isinstance(tag, _ContentPatternTag):
+                return tag.indices, tuple(tag.shape)
+            return None, None
         case _:
             return pattern_indices(pattern)
 
@@ -132,6 +268,8 @@ def sparsity_pattern_tag(
     computed on first use and cached on the tag. A pattern that already holds a coloring
     (an `asdex.ColoredPattern`) keeps it. Use [`splineax.sparsity_coloring_tag`][] to
     compute the coloring up front.
+
+    Given a tag, or a lineax operator that carries one, that tag is returned.
     """
     match pattern:
         case None:
@@ -140,6 +278,16 @@ def sparsity_pattern_tag(
             return sparsity_tag_from_coloring(pattern)
         case SparseJacobianLinearOperator():
             return sparsity_tag_from_coloring(pattern.coloring)
+        case _ContentPatternTag():
+            return pattern
+        case (
+            lx.JacobianLinearOperator()
+            | lx.FunctionLinearOperator()
+            | lx.TaggedLinearOperator()
+        ):
+            operator_tag = find_pattern_tag(pattern.tags)
+            if operator_tag is not None:
+                return operator_tag
     indices, shape = _pattern_indices(pattern)
     if indices is None or shape is None:
         return _IdentityPatternTag()
@@ -207,8 +355,17 @@ def _tangent_zeros(primal: Any) -> Any:
     structures equal (unlike `Zero`, which is itself a pytree node and would change the
     structure) while telling JAX no tangent flows there. Only the solution value carries
     a real tangent.
+
+    A leaf that is not an array, such as the function inside a stored
+    `lineax.JacobianLinearOperator`, gets `None`. `_StaticOutputs` drops those leaves
+    from the primal outputs too, so both structures still match.
     """
-    return jtu.tree_map(lambda x: SymbolicZero(jax.typeof(x).to_tangent_aval()), primal)
+    return jtu.tree_map(
+        lambda x: (
+            SymbolicZero(jax.typeof(x).to_tangent_aval()) if eqx.is_array(x) else None
+        ),
+        primal,
+    )
 
 
 def _has_tangent(tangent: Any) -> bool:
@@ -532,8 +689,63 @@ def _stateful_solve_jvp(
     return (solution, out_state), (tangent_solution, _tangent_zeros(out_state))
 
 
-_stateful_solve = eqx.filter_custom_jvp(_stateful_solve_impl)
-_stateful_solve.def_jvp(_stateful_solve_jvp)
+class _StaticOutputs:
+    """Holds the parts of the custom-JVP solve's outputs that are not arrays.
+
+    A `jax.custom_jvp` may only return arrays. A solver state stores its operator,
+    and a `lineax.JacobianLinearOperator` or `lineax.FunctionLinearOperator` holds a
+    Python function as a pytree leaf. The solve therefore returns only the array part,
+    keeps the rest here while it is traced, and `linear_solve` joins the two again.
+    """
+
+    def __init__(self) -> None:
+        self.static: Any = None
+        """The non-array part of the outputs, set each time the solve is traced."""
+
+    def array_part(self, outputs: Any) -> Any:
+        """Keep the non-array part of `outputs` here and return the array part."""
+        array_outputs, self.static = eqx.partition(outputs, eqx.is_array)
+        return array_outputs
+
+
+def _array_outputs_impl(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    state: Any,
+    *,
+    solver: Any,
+    options: dict[str, Any] | None,
+    throw: bool,
+    static_outputs: _StaticOutputs,
+) -> Any:
+    """Run `_stateful_solve_impl` and return the array part of its outputs."""
+    outputs = _stateful_solve_impl(
+        operator, vector, state, solver=solver, options=options, throw=throw
+    )
+    return static_outputs.array_part(outputs)
+
+
+def _array_outputs_jvp(
+    primals: tuple[Any, ...],
+    tangents: tuple[Any, ...],
+    *,
+    solver: Any,
+    options: dict[str, Any] | None,
+    throw: bool,
+    static_outputs: _StaticOutputs,
+) -> tuple[Any, Any]:
+    """Run `_stateful_solve_jvp` and return the array part of its primal outputs.
+
+    The tangent outputs already hold `None` where the primal outputs are not arrays.
+    """
+    outputs, tangent_outputs = _stateful_solve_jvp(
+        primals, tangents, solver=solver, options=options, throw=throw
+    )
+    return static_outputs.array_part(outputs), tangent_outputs
+
+
+_stateful_solve = eqx.filter_custom_jvp(_array_outputs_impl)
+_stateful_solve.def_jvp(_array_outputs_jvp)
 
 
 @runtime_checkable
@@ -625,12 +837,23 @@ def linear_solve(
     # the old ones through it. Stop its gradient here so those token tangents (and the
     # tangents of the entanglement edges) are dropped before crossing the boundary.
     # The primal pass is unchanged, so the ordering the entanglement provides holds.
-    state = jax.lax.stop_gradient(state)
+    # Only array leaves can take a gradient, so leave the others, such as the function
+    # of a stored `lineax.JacobianLinearOperator`, as they are.
+    array_state, static_state = eqx.partition(state, eqx.is_array)
+    state = eqx.combine(jax.lax.stop_gradient(array_state), static_state)
     # Route through the custom-JVP solve, whose rule ties the primal and tangent
     # solves into one factorization and threads the state between them. The solver, the
     # options, and the `throw` flag cross as static keyword arguments, so they stay
     # Python objects across the boundary rather than traced pytrees.
-    solution, out_state = _stateful_solve(
-        operator, vector, state, solver=solver, options=opts, throw=throw
+    static_outputs = _StaticOutputs()
+    array_outputs = _stateful_solve(
+        operator,
+        vector,
+        state,
+        solver=solver,
+        options=opts,
+        throw=throw,
+        static_outputs=static_outputs,
     )
+    solution, out_state = eqx.combine(array_outputs, static_outputs.static)
     return solution, out_state

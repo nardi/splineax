@@ -7,12 +7,11 @@ import jax
 import jax.core
 import jax.numpy as jnp
 import lineax as lx
-from asdex import ColoredPattern
 from entangle_jax import entangle
 from jax.experimental.sparse import BCOO, BCSR
 from jax.typing import DTypeLike
 from jaxtyping import Array, Inexact, Integer, PyTree
-from lineax import AbstractLinearOperator, materialise
+from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
@@ -26,16 +25,13 @@ from lineax._solver.misc import (
 from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
-from splineax.operators._jacobian import (
-    JacobianColoring,
-    SparseJacobianLinearOperator,
-    SparseJacobianLinearOperatorColoring,
-)
 from splineax.solvers._klu import _REFACTOR_RCOND_FLOOR, COMPLEX_DTYPES
 from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
+    pattern_coordinates,
     profile_inputs,
+    sparse_operator,
     sparsity_pattern_tag,
     sparsity_reuse_block,
     update_then_compute,
@@ -121,15 +117,12 @@ def _mtype_id(operator: AbstractLinearOperator) -> int:
 def _mtype_id_for_sparsity(sparsity: _Sparsity) -> int:
     """The cuDSS matrix-type id for a bare `init_symbolic` sparsity pattern.
 
-    Only three of the `_Sparsity` types carry lineax tags at all
-    (`BCOOLinearOperator`, `BCSRLinearOperator`, `SparseJacobianLinearOperator`). A
-    bare `BCOO`/`BCSR` or coloring carries no tags, so there is nothing to read and this
-    falls back to `0` (general), the always-correct choice.
+    Only the operator forms of `_Sparsity` carry lineax tags. A bare `BCOO`/`BCSR`, tag
+    or coloring carries none, so there is nothing to read and this falls back to `0`
+    (general), the always-correct choice.
     """
     match sparsity:
-        case (
-            BCOOLinearOperator() | BCSRLinearOperator() | SparseJacobianLinearOperator()
-        ):
+        case lx.AbstractLinearOperator():
             return _mtype_id(sparsity)
         case _:
             return 0
@@ -140,26 +133,18 @@ def _operator_to_bcsr(
 ) -> tuple[BCSR, tuple[int, ...]]:
     """Unwrap a sparse operator into a row-major sorted `BCSR` matrix and its shape.
 
-    A `SparseJacobianLinearOperator` is materialised first, then handled like a BCOO. An
-    already-sorted `BCSR` is used as-is. Everything else round-trips through `BCOO` so the
-    CSR arrays come out row-major sorted, which cuDSS needs.
+    A tagged `lineax.JacobianLinearOperator` or `lineax.FunctionLinearOperator` is
+    materialised as a `BCOO` first. An already-sorted `BCSR` is used as-is. Everything
+    else round-trips through `BCOO` so the CSR arrays come out row-major sorted, which
+    cuDSS needs.
     """
-    match operator:
-        case SparseJacobianLinearOperator():
-            return _operator_to_bcsr(materialise(operator))
-        case BCSRLinearOperator(matrix):
+    match sparse_operator(operator, "CuDSS"):
+        case BCSRLinearOperator(matrix=BCSR() as matrix):
             if matrix.indices_sorted:
                 return matrix, matrix.shape
             return BCSR.from_bcoo(matrix.to_bcoo()), matrix.shape
-        case BCOOLinearOperator(matrix):
+        case BCOOLinearOperator(matrix=BCOO() as matrix):
             return BCSR.from_bcoo(matrix), matrix.shape
-        case _:
-            raise TypeError(
-                "`CuDSS` requires a sparse operator backed by a `BCOO` or `BCSR` "
-                "matrix (e.g. `splineax.BCOOLinearOperator` or "
-                "`splineax.BCSRLinearOperator`), or a "
-                f"`splineax.SparseJacobianLinearOperator`; got {type(operator).__name__}."
-            )
 
 
 def _extract_csr(operator: AbstractLinearOperator) -> tuple[_CSR, tuple[int, ...]]:
@@ -183,65 +168,20 @@ def _pattern_to_csr(
 ) -> tuple[_CSR, tuple[int, ...]]:
     """Read a sparsity pattern's sorted CSR triple and shape, filling in dummy values.
 
-    The Jacobian and coloring forms carry the pattern in their precomputed asdex
-    coloring, so the indices are read there rather than materialising the Jacobian.
-    Forms that carry real values (a `BCOO`, `BCSR`, or their operators) pass those
-    through, so `init_symbolic` can analyze with representative numbers and pin the
-    dtype. A bare coloring has no values, so `1.0` fills in and the dtype defaults to
-    `float64`. Either way every later solve refactors with the operator's real values.
+    A tag, a tagged lineax operator and the coloring forms carry the pattern host-side,
+    so the indices are read there rather than materialising anything. Forms that carry
+    real values (a `BCOO`, `BCSR`, or their operators) pass those through, so
+    `init_symbolic` can analyze with representative numbers and pin the dtype. A pattern
+    without values gets `1.0` filled in and the dtype defaults to `float64`. Either way
+    every later solve refactors with the operator's real values.
     """
-    values: Inexact[Array, " nse"] | None = None
-    match sparsity:
-        case SparseJacobianLinearOperator(transposed=True):
-            # The stored pattern describes the forward Jacobian. asdex emits `BCOO`
-            # values in the pattern's index order and `BCOO.T` swaps the index columns
-            # without reordering entries, so swapping rows and columns here keeps the
-            # indices aligned with the values a later solve pairs them with.
-            pattern = sparsity.coloring.sparsity
-            rows = jnp.asarray(pattern.cols, dtype=jnp.int32)
-            cols = jnp.asarray(pattern.rows, dtype=jnp.int32)
-            shape = pattern.shape[::-1]
-        case SparseJacobianLinearOperator() | SparseJacobianLinearOperatorColoring():
-            # Both hold the coloring one level in: the operator stores an
-            # `asdex.ColoredPattern` whose `.sparsity` is the pattern, and the operator
-            # coloring stores a `JacobianColoring` whose `.sparsity` property returns it.
-            pattern = sparsity.coloring.sparsity
-            rows = jnp.asarray(pattern.rows, dtype=jnp.int32)
-            cols = jnp.asarray(pattern.cols, dtype=jnp.int32)
-            shape = pattern.shape
-        case JacobianColoring() | ColoredPattern():
-            pattern = sparsity.sparsity
-            rows = jnp.asarray(pattern.rows, dtype=jnp.int32)
-            cols = jnp.asarray(pattern.cols, dtype=jnp.int32)
-            shape = pattern.shape
-        case BCSRLinearOperator():
-            bcoo = sparsity.matrix.to_bcoo()
-            rows, cols, shape, values = _bcoo_pattern(bcoo)
-        case BCOOLinearOperator():
-            rows, cols, shape, values = _bcoo_pattern(sparsity.matrix)
-        case BCSR():
-            rows, cols, shape, values = _bcoo_pattern(sparsity.to_bcoo())
-        case BCOO():
-            rows, cols, shape, values = _bcoo_pattern(sparsity)
-        case _:
-            raise TypeError(
-                "`CuDSS.init_symbolic` requires a `BCOO`, `BCSR`, `BCOOLinearOperator`, "
-                "`BCSRLinearOperator`, `SparseJacobianLinearOperator`, "
-                "`SparseJacobianLinearOperatorColoring`, `JacobianColoring`, or "
-                f"`asdex.ColoredPattern`; got {type(sparsity).__name__}."
-            )
+    coordinates = pattern_coordinates(sparsity, "CuDSS")
+    values = coordinates.values
     dtype = values.dtype if values is not None else jnp.float64
-    csr = _coo_to_csr(rows, cols, tuple(shape), values, dtype=dtype)
-    return csr, tuple(shape)
-
-
-def _bcoo_pattern(
-    bcoo: BCOO,
-) -> tuple[Array, Array, tuple[int, ...], Inexact[Array, " nse"]]:
-    """Read a `BCOO`'s row/column indices, shape, and values."""
-    rows = bcoo.indices[:, 0].astype(jnp.int32)
-    cols = bcoo.indices[:, 1].astype(jnp.int32)
-    return rows, cols, bcoo.shape, bcoo.data
+    csr = _coo_to_csr(
+        coordinates.rows, coordinates.columns, coordinates.shape, values, dtype=dtype
+    )
+    return csr, coordinates.shape
 
 
 def _coo_to_csr(
@@ -579,11 +519,11 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
     ) -> _CuDSSState:
         """Analyze a sparsity pattern into an analyzed-only state, no values folded in.
 
-        Accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`,
-        `SparseJacobianLinearOperator`, `SparseJacobianLinearOperatorColoring`,
-        `JacobianColoring`, or `asdex.ColoredPattern`. A later `update` folds in an
-        operator sharing the pattern and reuses this analysis. The pattern must be
-        concrete here, not a traced value.
+        Accepts a `BCOO`, `BCSR`, `BCOOLinearOperator`, `BCSRLinearOperator`, a
+        sparsity-pattern tag, a tagged `lineax.JacobianLinearOperator` or
+        `lineax.FunctionLinearOperator`, or an `asdex.ColoredPattern`. A later `update`
+        folds in an operator sharing the pattern and reuses this analysis. The pattern
+        must be concrete here, not a traced value.
         """
         del options
         csr, shape = _pattern_to_csr(sparsity)
