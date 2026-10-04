@@ -32,6 +32,9 @@ from .operators import (
     SparseJacobianLinearOperatorColoring as SparseJacobianLinearOperatorColoring,
 )
 from .operators import (
+    materialise_as_bcoo as materialise_as_bcoo,
+)
+from .operators import (
     sparsity_coloring_tag as sparsity_coloring_tag,
 )
 from .solvers import (
