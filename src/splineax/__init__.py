@@ -23,10 +23,16 @@ from .operators import (
     JacobianColoring as JacobianColoring,
 )
 from .operators import (
+    JacobianDirection as JacobianDirection,
+)
+from .operators import (
     SparseJacobianLinearOperator as SparseJacobianLinearOperator,
 )
 from .operators import (
     SparseJacobianLinearOperatorColoring as SparseJacobianLinearOperatorColoring,
+)
+from .operators import (
+    sparsity_coloring_tag as sparsity_coloring_tag,
 )
 from .solvers import (
     KLU as KLU,

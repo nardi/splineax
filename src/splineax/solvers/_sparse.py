@@ -41,9 +41,14 @@ from splineax.operators._jacobian import (
     SparseJacobianLinearOperatorColoring,
 )
 from splineax.operators._tags import (
+    PatternSource,
+    PatternTag,
     _ContentPatternTag,
     _IdentityPatternTag,
     coloring_index_array,
+    find_pattern_tag,
+    pattern_indices,
+    sparsity_tag_from_coloring,
 )
 from splineax.operators._tags import sparse_indices_sorted as sparse_indices_sorted
 from splineax.solvers._stateful import StatefulSolver
@@ -91,7 +96,7 @@ def warn_if_unsorted(matrix: BCOO | BCSR, solver_name: str) -> None:
 
 
 def _pattern_indices(
-    pattern: "_Sparsity",
+    pattern: "_Sparsity | PatternSource",
 ) -> tuple[np.ndarray | None, tuple[int, ...] | None]:
     """Read a pattern's COO index array and shape as concrete numpy data.
 
@@ -100,30 +105,17 @@ def _pattern_indices(
     their pattern from the precomputed asdex coloring, whose indices are always concrete.
     """
     match pattern:
-        case BCOO():
-            indices, shape = pattern.indices, pattern.shape
-        case BCSR():
-            bcoo = pattern.to_bcoo()
-            indices, shape = bcoo.indices, bcoo.shape
-        case BCOOLinearOperator():
-            indices, shape = pattern.matrix.indices, pattern.matrix.shape
-        case BCSRLinearOperator():
-            bcoo = pattern.matrix.to_bcoo()
-            indices, shape = bcoo.indices, bcoo.shape
         case SparseJacobianLinearOperator() | JacobianColoring():
             return coloring_index_array(pattern.coloring)
         case SparseJacobianLinearOperatorColoring():
             return coloring_index_array(pattern.coloring.coloring)
-        case ColoredPattern():
-            return coloring_index_array(pattern)
         case _:
-            return None, None
-    if isinstance(indices, jax.core.Tracer):
-        return None, None
-    return np.asarray(indices), tuple(shape)
+            return pattern_indices(pattern)
 
 
-def sparsity_pattern_tag(pattern: "_Sparsity | None" = None) -> object:
+def sparsity_pattern_tag(
+    pattern: "_Sparsity | PatternSource | None" = None,
+) -> PatternTag:
     """Create a tag marking an operator's structural sparsity pattern.
 
     Attach the tag to operators through their `tags` argument. Two operators carrying
@@ -134,9 +126,20 @@ def sparsity_pattern_tag(pattern: "_Sparsity | None" = None) -> object:
     operators with the same indices get equal tags. With no argument, or a pattern whose
     indices are traced under jit, the tag instead carries a random id. Thread that one
     tag object onto every operator sharing the pattern to mark them as equal.
+
+    A content-hashed tag also lets a solver turn a tagged `lineax.JacobianLinearOperator`
+    or `lineax.FunctionLinearOperator` into a `BCOO`. The Jacobian coloring this needs is
+    computed on first use and cached on the tag. A pattern that already holds a coloring
+    (an `asdex.ColoredPattern`) keeps it. Use [`splineax.sparsity_coloring_tag`][] to
+    compute the coloring up front.
     """
-    if pattern is None:
-        return _IdentityPatternTag()
+    match pattern:
+        case None:
+            return _IdentityPatternTag()
+        case ColoredPattern():
+            return sparsity_tag_from_coloring(pattern)
+        case SparseJacobianLinearOperator():
+            return sparsity_tag_from_coloring(pattern.coloring)
     indices, shape = _pattern_indices(pattern)
     if indices is None or shape is None:
         return _IdentityPatternTag()
@@ -181,7 +184,7 @@ def sparsity_reuse_block(
     return None
 
 
-def operator_pattern_tag(operator: AbstractLinearOperator) -> object | None:
+def operator_pattern_tag(operator: AbstractLinearOperator) -> PatternTag | None:
     """Return the operator's sparsity-pattern tag, or None if it carries none.
 
     Solvers read this in `update` to decide whether an operator shares a state's pattern. A
@@ -189,10 +192,7 @@ def operator_pattern_tag(operator: AbstractLinearOperator) -> object | None:
     by one `operator_at` factory, and any BCOO materialised from them, reuse a factorization
     without the caller tagging them.
     """
-    for tag in getattr(operator, "tags", ()):
-        if isinstance(tag, (_ContentPatternTag, _IdentityPatternTag)):
-            return tag
-    return None
+    return find_pattern_tag(getattr(operator, "tags", frozenset()))
 
 
 _StateT = TypeVar("_StateT")

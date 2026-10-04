@@ -4,6 +4,7 @@ import jax.numpy as jnp
 from jax.experimental.sparse import BCOO
 from jaxtyping import Array, Inexact
 from lineax import AbstractLinearOperator, is_symmetric
+from lineax._operator import _frozenset
 from lineax._tags import transpose_tags
 
 from ._operations import (
@@ -52,7 +53,7 @@ class BCOOLinearOperator(AbstractLinearOperator):
                 indices_sorted=matrix.indices_sorted,
             )
         self.matrix = matrix
-        tags = tags if isinstance(tags, frozenset) else frozenset([tags])
+        tags = _frozenset(tags)
         # A sorted matrix lets a solver skip its sort, so record that through the tag.
         if matrix.indices_sorted:
             tags = tags | {sparse_indices_sorted}
