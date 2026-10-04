@@ -12,10 +12,12 @@ It provides:
 - **Operators** that wrap a sparse array into a `lineax.AbstractLinearOperator`:
   [`BCOOLinearOperator`][splineax.BCOOLinearOperator] and
   [`BCSRLinearOperator`][splineax.BCSRLinearOperator].
-- **Sparse Jacobian operators**:
-  [`SparseJacobianLinearOperator`][splineax.SparseJacobianLinearOperator] represents the
-  Jacobian of a function sparsely, detecting its sparsity pattern and constructing a coloring automatically (via
-  [asdex](https://github.com/adrhill/asdex)), which allows for efficient materialization into a sparse matrix by the solvers.
+- **Sparse Jacobians**: a `lineax.JacobianLinearOperator` or
+  `lineax.FunctionLinearOperator` that carries a tag from
+  [`sparsity_coloring_tag`][splineax.sparsity_coloring_tag] goes straight into the
+  solvers. The tag holds the sparsity pattern and a coloring from
+  [asdex](https://github.com/adrhill/asdex), so the solver builds the sparse matrix with one
+  JVP or VJP per color.
 - **Stateful solver protocols**: [`StatefulSolver`][splineax.StatefulSolver] and [`SparseLinearSolver`][splineax.SparseLinearSolver] allow for writing solver-agnostic code that reuses factorizations over multiple solves with multiple operators.
 - **Solver library bindings**: [`Spsolve`][splineax.Spsolve] (any backend, wraps
   `jax.experimental.sparse.linalg.spsolve`), [`KLU`][splineax.KLU] (CPU-only, wraps the
