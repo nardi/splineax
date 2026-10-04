@@ -140,15 +140,14 @@ def test_materialised_bcoo_inherits_the_pattern_tag() -> None:
     assert sparsity_pattern_tag(operator) in materialised.tags
 
 
-def test_transpose_carries_no_forward_pattern_tag() -> None:
-    """The transpose has a swapped pattern, so it does not carry the forward tag, and in
-    fact carries no content pattern tag at all."""
-    from splineax.operators._tags import _ContentPatternTag
-
+def test_transpose_carries_the_transposed_pattern_tag() -> None:
+    """The transpose has a swapped pattern, so it carries the transposed tag and not the
+    forward one."""
     operator = SparseJacobianLinearOperator(banded_function, EVALUATION_POINT)
     transposed = operator.transpose()
-    assert sparsity_pattern_tag(operator) not in transposed.tags
-    assert not any(isinstance(tag, _ContentPatternTag) for tag in transposed.tags)
+    forward_tag = sparsity_pattern_tag(operator)
+    assert forward_tag not in transposed.tags
+    assert sparsity_pattern_tag(operator.as_bcoo().T) in transposed.tags
 
 
 def test_construction_paths_agree() -> None:

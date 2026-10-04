@@ -4,6 +4,7 @@ import jax.numpy as jnp
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact
 from lineax import AbstractLinearOperator, is_symmetric
+from lineax._operator import _frozenset
 from lineax._tags import transpose_tags
 
 from ._operations import (
@@ -13,7 +14,7 @@ from ._operations import (
     sparse_mv,
     sparse_out_structure,
 )
-from ._tags import sparse_indices_sorted
+from ._tags import _ContentPatternTag, find_pattern_tag, sparse_indices_sorted
 
 
 class BCSRLinearOperator(AbstractLinearOperator):
@@ -52,7 +53,7 @@ class BCSRLinearOperator(AbstractLinearOperator):
                 indices_sorted=matrix.indices_sorted,
             )
         self.matrix = matrix
-        tags = tags if isinstance(tags, frozenset) else frozenset([tags])
+        tags = _frozenset(tags)
         # A sorted matrix lets a solver skip its sort, so record that through the tag.
         if matrix.indices_sorted:
             tags = tags | {sparse_indices_sorted}
@@ -78,7 +79,7 @@ class BCSRLinearOperator(AbstractLinearOperator):
             shape=matrix_T.shape,
             indices_sorted=True,
         )
-        return BCSRLinearOperator(matrix_T, transpose_tags(self.tags))
+        return BCSRLinearOperator(matrix_T, _row_major_pattern_tags(self.tags))
 
     def in_structure(self) -> jax.ShapeDtypeStruct:
         return sparse_in_structure(self)
@@ -92,6 +93,20 @@ class BCSRLinearOperator(AbstractLinearOperator):
             shape=self.matrix.shape,
         )
         return BCSRLinearOperator(matrix, self.tags)
+
+
+def _row_major_pattern_tags(tags: frozenset[object]) -> frozenset[object]:
+    """Transpose `tags` for a `BCSR` matrix, whose entries are always row-major sorted.
+
+    The transposed pattern tag keeps the entry order of the original, which is
+    column-major for the transposed matrix. A content tag is sorted to match the
+    transposed `BCSR`. An identity tag carries no indices, so it needs no change.
+    """
+    transposed_tags = transpose_tags(tags)
+    pattern_tag = find_pattern_tag(transposed_tags)
+    if not isinstance(pattern_tag, _ContentPatternTag):
+        return transposed_tags
+    return (transposed_tags - {pattern_tag}) | {pattern_tag.row_major_sorted()}
 
 
 register_sparse_operator(BCSRLinearOperator)
