@@ -13,6 +13,7 @@ and both autodiff modes, that independent profiles stay independent, and that
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -29,7 +30,7 @@ from lineax._solution import RESULTS
 
 import splineax as splx
 from splineax import IterativeRefinement, ProfileRecord
-from splineax._profile import _active
+from splineax._profile import _active, record_operation
 from splineax.solvers._sparse import _Sparsity
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
@@ -67,6 +68,63 @@ def test_no_active_profile_outside_context() -> None:
     with splx.create_solve_profile():
         assert _active() is not None
     assert _active() is None
+
+
+def _compile_probe_under(profile: splx.SolveProfile) -> Callable[[Array], Array]:
+    """Compile a function that records one `probe` operation each time it runs.
+
+    The function is traced while `profile` is entered, which is what puts the record into the
+    traced program. The returned function can then be run on any thread, at any time.
+    """
+
+    def probe(value: Array) -> Array:
+        record_operation("probe")
+        return value + 1.0
+
+    with profile:
+        return jax.jit(probe).lower(jnp.zeros(())).compile()
+
+
+def _run_on_another_thread(compiled: Callable[[Array], Array]) -> None:
+    """Run `compiled` to completion on a new thread, which has no profile entered."""
+    worker = threading.Thread(
+        target=lambda: jax.block_until_ready(compiled(jnp.zeros(())))
+    )
+    worker.start()
+    worker.join()
+
+
+def test_callback_on_another_thread_reaches_the_open_profile() -> None:
+    """A callback that fires on a thread with no profile entered still lands in the profile
+    that is open elsewhere. XLA runs larger programs on threads of its own, so this is the
+    normal case for them, not an edge case."""
+    profile = splx.create_solve_profile()
+    compiled = _compile_probe_under(profile)
+    with profile:
+        _run_on_another_thread(compiled)
+    assert [record.operation for record in profile.records] == ["probe"]
+
+
+def test_callback_after_the_profile_closes_records_nothing() -> None:
+    """Once the `with` block is over no profile is open, so a callback that fires later on any
+    thread is dropped instead of reaching the closed profile."""
+    profile = splx.create_solve_profile()
+    compiled = _compile_probe_under(profile)
+    _run_on_another_thread(compiled)
+    assert profile.records == []
+
+
+def test_callback_prefers_the_profile_of_its_own_thread() -> None:
+    """With a profile open on another thread too, a callback that fires on a thread that has its
+    own profile entered appends into that one."""
+    outer = splx.create_solve_profile()
+    inner = splx.create_solve_profile()
+    compiled = _compile_probe_under(inner)
+    with outer:
+        with inner:
+            jax.block_until_ready(compiled(jnp.zeros(())))
+    assert outer.records == []
+    assert [record.operation for record in inner.records] == ["probe"]
 
 
 def test_empty_block_records_nothing() -> None:

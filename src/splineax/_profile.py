@@ -13,7 +13,9 @@ print(profile)
 
 The records are appended through `jax.experimental.io_callback`s, which fire during
 execution and, each time they fire, append into whichever `SolveProfile` is currently
-entered on that thread, or nowhere if none is. Each record carries an order key taken
+entered on that thread, or nowhere if none is. XLA can fire a callback on one of its own
+threads, which has no profile entered. Such a callback appends into the most recently
+entered profile that is still open on any thread. Each record carries an order key taken
 when it is traced, so the printed tree is in program order even though the callbacks fire
 out of order. When no profile is ever active for a given compiled shape, nothing is emitted
 into the traced program at all, so profiling costs nothing when it is off.
@@ -52,6 +54,30 @@ def _active() -> "SolveProfile | None":
     """The innermost open profile on this thread, or None when profiling is off."""
     stack = _stack()
     return stack[-1] if stack else None
+
+
+_OPEN_PROFILES: list["SolveProfile"] = []
+"""Every profile that is entered on any thread right now, in the order they were entered."""
+
+_OPEN_PROFILES_LOCK = threading.Lock()
+"""Guards `_OPEN_PROFILES`, which every thread that enters or exits a profile changes."""
+
+
+def _active_for_callback() -> "SolveProfile | None":
+    """The profile a firing callback appends into, or None when no profile is open.
+
+    A callback fires on the thread that runs the compiled program. That is the thread that
+    entered the profile for a small program, but XLA can run a larger one on a thread of
+    its own, where `_stack` is empty. This prefers the profile entered on the current
+    thread and otherwise falls back to the most recently entered one that is still open.
+    With several threads holding profiles at once, a callback on an XLA thread cannot tell
+    which of them it belongs to, so it picks the latest.
+    """
+    profile = _active()
+    if profile is not None:
+        return profile
+    with _OPEN_PROFILES_LOCK:
+        return _OPEN_PROFILES[-1] if _OPEN_PROFILES else None
 
 
 def profiling_active() -> bool:
@@ -283,6 +309,8 @@ class SolveProfile:
     def __enter__(self) -> "SolveProfile":
         """Make this profile the active one on this thread, for every operation inside."""
         _stack().append(self)
+        with _OPEN_PROFILES_LOCK:
+            _OPEN_PROFILES.append(self)
         return self
 
     def __exit__(
@@ -295,6 +323,8 @@ class SolveProfile:
         # just before the block closes still lands here rather than after the pop.
         jax.effects_barrier()
         _stack().pop()
+        with _OPEN_PROFILES_LOCK:
+            _OPEN_PROFILES.remove(self)
 
     def _append(self, record: ProfileRecord) -> None:
         # Runs on the io_callback thread. `list.append` is atomic under the GIL.
@@ -527,8 +557,8 @@ class _RecordCallback:
     """The sort key for program order, taken at trace time."""
 
     def __call__(self, values: Mapping[str, Any]) -> None:
-        """Append the record into the profile active on this thread, if any."""
-        profile = _active()
+        """Append the record into the profile that is active when it fires, if any."""
+        profile = _active_for_callback()
         if profile is None:
             return
         if self.conditional and not values["__cond__"]:
