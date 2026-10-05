@@ -330,11 +330,7 @@ def coloring_index_array(
 
 
 def sparsity_tag_from_coloring(coloring: ColoredPattern) -> _ContentPatternTag:
-    """Build a content pattern tag that holds `coloring` and takes its entry order.
-
-    A `SparseJacobianLinearOperator` uses this to carry a tag for the fixed pattern its
-    coloring describes, so operators built for that pattern reuse each other's factorization.
-    """
+    """Build a content pattern tag that holds `coloring` and takes its entry order."""
     indices, shape = coloring_index_array(coloring)
     return _ContentPatternTag(indices, shape, coloring)
 
@@ -344,16 +340,41 @@ PatternSource = (
 )
 """Everything a sparsity pattern can be read from without a function."""
 
+TaggedOperator = (
+    lx.JacobianLinearOperator | lx.FunctionLinearOperator | lx.TaggedLinearOperator
+)
+"""The lineax operators that a solver accepts when they carry a sparsity-pattern tag."""
+
+
+def operator_pattern_tag(operator: lx.AbstractLinearOperator) -> PatternTag | None:
+    """Return the operator's sparsity-pattern tag, or None if it carries none.
+
+    Solvers read this in `update` to decide whether an operator shares a state's pattern.
+    """
+    return find_pattern_tag(getattr(operator, "tags", frozenset()))
+
 
 def pattern_indices(
-    pattern: PatternSource,
+    pattern: PatternSource | _ContentPatternTag | TaggedOperator,
 ) -> tuple[np.ndarray | None, tuple[int, ...] | None]:
     """Read a pattern's COO index array and shape as concrete numpy data.
 
-    Returns `(None, None)` when the indices are traced. A dense boolean mask lists its
-    entries in row-major order, the same order asdex uses for it.
+    Returns `(None, None)` when the indices are traced, or for a tagged lineax operator
+    whose tag carries no indices. A dense boolean mask lists its entries in row-major
+    order, the same order asdex uses for it.
     """
     match pattern:
+        case _ContentPatternTag():
+            return pattern.indices, tuple(pattern.shape)
+        case (
+            lx.JacobianLinearOperator()
+            | lx.FunctionLinearOperator()
+            | lx.TaggedLinearOperator()
+        ):
+            tag = operator_pattern_tag(pattern)
+            if isinstance(tag, _ContentPatternTag):
+                return tag.indices, tuple(tag.shape)
+            return None, None
         case ColoredPattern():
             return coloring_index_array(pattern)
         case SparsityPattern(rows=rows, cols=cols, shape=shape):
@@ -373,6 +394,49 @@ def pattern_indices(
     if isinstance(indices, jax.core.Tracer):
         return None, None
     return np.asarray(indices), tuple(shape)
+
+
+def sparsity_pattern_tag(
+    pattern: PatternSource | _ContentPatternTag | TaggedOperator | None = None,
+) -> PatternTag:
+    """Create a tag marking an operator's structural sparsity pattern.
+
+    Attach the tag to operators through their `tags` argument. Two operators carrying
+    equal tags are asserted to have exactly the same index arrays, in the same order, so
+    a solver may reuse one operator's factorization for the other.
+
+    Given a concrete `pattern`, the tag is content-hashed, so independently tagged
+    operators with the same indices get equal tags. With no argument, or a pattern whose
+    indices are traced under jit, the tag instead carries a random id. Thread that one
+    tag object onto every operator sharing the pattern to mark them as equal.
+
+    A content-hashed tag also lets a solver turn a tagged `lineax.JacobianLinearOperator`
+    or `lineax.FunctionLinearOperator` into a `BCOO`. The Jacobian coloring this needs is
+    computed on first use and cached on the tag. A pattern that already holds a coloring
+    (an `asdex.ColoredPattern`) keeps it. Use [`splineax.sparsity_coloring_tag`][] to
+    compute the coloring up front.
+
+    Given a tag, or a lineax operator that carries one, that tag is returned.
+    """
+    match pattern:
+        case None:
+            return _IdentityPatternTag()
+        case ColoredPattern():
+            return sparsity_tag_from_coloring(pattern)
+        case _ContentPatternTag():
+            return pattern
+        case (
+            lx.JacobianLinearOperator()
+            | lx.FunctionLinearOperator()
+            | lx.TaggedLinearOperator()
+        ):
+            operator_tag = operator_pattern_tag(pattern)
+            if operator_tag is not None:
+                return operator_tag
+    indices, shape = pattern_indices(pattern)
+    if indices is None or shape is None:
+        return _IdentityPatternTag()
+    return _ContentPatternTag(indices, shape)
 
 
 def example_point(
