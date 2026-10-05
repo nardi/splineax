@@ -40,7 +40,9 @@ class _SpsolveState(eqx.Module):
     """
 
     operator: AbstractLinearOperator | None
-    """The operator this state was built on. Compared by identity in `update`."""
+    """The sparse operator this state was built on, so that the state holds only arrays. A
+    tagged lineax operator is stored as the sparse matrix it materialises to. Compared by
+    identity in `update`."""
     matrix: BCSR | None
     """The sorted CSR matrix to solve, or None for a symbolic-only state."""
     packed_structures: PackedStructures | None
@@ -159,7 +161,7 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
                     warn_if_unsorted(matrix, "Spsolve")
                 matrix_bcsr = BCSR.from_bcoo(matrix)
 
-        return _SpsolveState(operator, matrix_bcsr, pack_structures(operator))
+        return _SpsolveState(sparse, matrix_bcsr, pack_structures(operator))
 
     def init_symbolic(
         self, sparsity: _Sparsity, options: dict[str, Any] = {}

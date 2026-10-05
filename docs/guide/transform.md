@@ -129,6 +129,12 @@ This function solves only inside the loop, with no solve beforehand. The transfo
 first iteration to create the state, then carries it through the rest, so you do not need
 to seed anything by hand. A `lax.while_loop` works the same way.
 
+A loop may also solve with a tagged `lineax.JacobianLinearOperator` that it rebuilds at
+every iteration, such as the Jacobian of a Newton step (see
+[Operators](operators.md#jacobian-operators)). The state stores the sparse matrix that the
+operator materializes to, so the first iteration analyzes and factorizes and every later
+iteration only refactorizes.
+
 ## Initial and final solver states
 
 By default the wrapped function returns the output alone, and the transform releases the

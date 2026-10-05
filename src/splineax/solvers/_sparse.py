@@ -121,6 +121,25 @@ def sparse_operator(
             )
 
 
+def state_operator(operator: AbstractLinearOperator) -> AbstractLinearOperator:
+    """Return the operator that a solver state stores, which holds only arrays.
+
+    A state can be carried through a `jax.lax.scan`, `jax.lax.while_loop` or `jax.lax.cond`,
+    which needs every leaf of it to be an array. A tagged `lineax.JacobianLinearOperator`
+    holds its function, which is a leaf that is not an array. It is stored as the sparse
+    matrix it materialises to instead, so matrix-vector products with the stored operator
+    are sparse products. An operator that already holds only arrays, or that carries no
+    sparsity-pattern tag to materialise with, is stored as it is.
+    """
+    if all(eqx.is_array(leaf) for leaf in jax.tree.leaves(operator)):
+        return operator
+    if isinstance(operator, TaggedOperator) and isinstance(
+        find_pattern_tag(operator.tags), _ContentPatternTag
+    ):
+        return materialise_as_bcoo(operator)
+    return operator
+
+
 def _coordinates_from_indices(
     indices: Array | np.ndarray,
     shape: tuple[int, ...],

@@ -53,6 +53,7 @@ from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
     sparsity_reuse_block,
+    state_operator,
 )
 from splineax.solvers._stateful import (
     TrackingSolverState,
@@ -136,7 +137,7 @@ class Richardson(AbstractLinearSolver[_RichardsonState]):
         self, operator: AbstractLinearOperator, options: dict[str, Any]
     ) -> _RichardsonState:
         del options
-        return _RichardsonState(operator)
+        return _RichardsonState(state_operator(operator))
 
     def compute(
         self,
@@ -476,7 +477,7 @@ def _initial_state(
     """A state whose factorization matches `operator`."""
     return HybridState(
         inner_state,
-        operator,
+        None if operator is None else state_operator(operator),
         jnp.array(False),
         jnp.array(0, dtype=jnp.int32),
         jnp.array(False),
@@ -656,7 +657,7 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
             # The factorization stays as it is until the solve shows that it is too far
             # off, see `_solve`.
             updated_state = dataclasses.replace(
-                state, operator=operator, stale=jnp.array(True)
+                state, operator=state_operator(operator), stale=jnp.array(True)
             )
         with compute_scope():
             solution, result, stats, new_state = self._solve(

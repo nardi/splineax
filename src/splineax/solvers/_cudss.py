@@ -327,7 +327,9 @@ class _CuDSSState(eqx.Module):
     """
 
     operator: AbstractLinearOperator | None
-    """The operator this state was built on. Compared by identity in `update`."""
+    """The sparse operator this state was built on, so that the state holds only arrays. A
+    tagged lineax operator is stored as the sparse matrix it materialises to. Compared by
+    identity in `update`."""
     token: "FactorToken"
     """The cuDSS token, analyzed-only or factorized. Also carries the CSR arrays and the
     analyze parameters, which `transpose` reads back."""
@@ -498,7 +500,8 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             raise ValueError(
                 "`CuDSS` may only be used for linear solves with square matrices"
             )
-        csr, shape = _extract_csr(operator)
+        sparse = sparse_operator(operator, "CuDSS")
+        csr, shape = _extract_csr(sparse)
         # Analyze then factorize right away, so the state is ready to solve and reusable
         # across right-hand sides.
         cudss = _spineax_cudss()
@@ -506,7 +509,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         record_operation("factorize", "CuDSS")
         token = cudss.factorize(token, csr[2])
         return _CuDSSState(
-            operator,
+            sparse,
             token,
             pack_structures(operator),
             shape,
@@ -605,7 +608,8 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         through `_refactorize_or_factorize`. Under every other reordering cuDSS runs the
         same phase for both, so a plain `factorize` costs no more.
         """
-        (_, _, values), shape = _extract_csr(operator)
+        sparse = sparse_operator(operator, "CuDSS")
+        (_, _, values), shape = _extract_csr(sparse)
         values = values.astype(state.token.dtype)
         cudss = _spineax_cudss()
         if state.token.phase != "factorized":
@@ -622,7 +626,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             )
             token = cudss.factorize(state.token, values)
         return _CuDSSState(
-            operator,
+            sparse,
             token,
             pack_structures(operator),
             shape,
