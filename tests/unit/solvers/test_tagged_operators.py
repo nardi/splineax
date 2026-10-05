@@ -4,6 +4,7 @@ Every direct solver turns such an operator into a `BCOO` with the tag's coloring
 reference is a dense numpy solve against `jax.jacfwd`.
 """
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import lineax as lx
@@ -151,3 +152,96 @@ def test_gradient_through_a_tagged_jacobian_solve(solver) -> None:
     point = SQUARE_POINT.astype(jnp.float64)
     gradient = jax.jit(jax.grad(loss), static_argnums=1)(point, solver)
     np.testing.assert_allclose(gradient, jax.grad(dense_loss)(point), rtol=1e-6)
+
+
+def test_state_holds_only_arrays(solver) -> None:
+    """A state built from a tagged `lineax.JacobianLinearOperator` stores the sparse matrix
+    it materialises to. The function inside the Jacobian operator is not an array, so a
+    state that kept it could not be carried through a loop."""
+    tag = sparsity_coloring_tag(square_function, SQUARE_POINT)
+    point = SQUARE_POINT.astype(jnp.float64)
+    operator = lx.JacobianLinearOperator(square_function, point, tags=tag)
+    state = solver.init(operator, {})
+    assert all(eqx.is_array(leaf) for leaf in jax.tree.leaves(state))
+    if hasattr(state, "release"):
+        state.release()
+
+
+def tagged_operator_at(
+    point: jax.Array, operator_kind: str, tag: object
+) -> lx.AbstractLinearOperator:
+    """Build a tagged Jacobian operator, or a function operator of its linearisation."""
+    if operator_kind == "jacobian":
+        return lx.JacobianLinearOperator(square_function, point, tags=tag)
+    _, linearised = jax.linearize(
+        lambda input_point: square_function(input_point, None), point
+    )
+    return lx.FunctionLinearOperator(
+        linearised, jax.eval_shape(lambda: point), tags=tag
+    )
+
+
+def run_loop(loop_kind: str, step, initial: jax.Array) -> jax.Array:
+    """Run `step` four times from `initial`, in a `scan` or a `while_loop`."""
+    if loop_kind == "scan":
+        return jax.lax.scan(
+            lambda value, _: (step(value), None), initial, None, length=4
+        )[0]
+    return jax.lax.while_loop(
+        lambda carry: carry[0] < 4,
+        lambda carry: (carry[0] + 1, step(carry[1])),
+        (0, initial),
+    )[1]
+
+
+@pytest.mark.parametrize("loop_kind", ["scan", "while_loop"])
+@pytest.mark.parametrize("operator_kind", ["jacobian", "function"])
+def test_transform_threads_a_tagged_operator_through_a_loop(
+    solver, operator_kind: str, loop_kind: str
+) -> None:
+    """`stateful_solve_transform` carries a solver state through a loop whose solves use a
+    tagged Jacobian or function operator, and the result matches the plain loop."""
+    tag = sparsity_coloring_tag(square_function, SQUARE_POINT)
+
+    def newton_step(point: jax.Array) -> jax.Array:
+        operator = tagged_operator_at(point, operator_kind, tag)
+        step = lx.linear_solve(operator, square_function(point, None), solver).value
+        return point - step
+
+    def newton(initial: jax.Array) -> jax.Array:
+        return run_loop(loop_kind, newton_step, initial)
+
+    initial = SQUARE_POINT.astype(jnp.float64)
+    expected = newton(initial)
+    threaded = splx.stateful_solve_transform(newton)
+    np.testing.assert_allclose(threaded(initial), expected, rtol=1e-10)
+    np.testing.assert_allclose(jax.jit(threaded)(initial), expected, rtol=1e-10)
+
+
+@pytest.mark.cpu_only
+def test_transform_threads_a_tagged_operator_through_a_hybrid_loop(
+    enable_x64: None,
+) -> None:
+    """The state of `HybridDirectIterative` keeps the operator it solves, so it stores the
+    sparse equivalent of a tagged operator as well."""
+    tag = sparsity_coloring_tag(square_function, SQUARE_POINT)
+    hybrid = splx.HybridDirectIterative(
+        KLU(), splx.RichardsonOptions(max_steps_stale=8)
+    )
+
+    def newton_step(point: jax.Array) -> jax.Array:
+        operator = tagged_operator_at(point, "jacobian", tag)
+        step = lx.linear_solve(operator, square_function(point, None), hybrid).value
+        return point - step
+
+    def newton(initial: jax.Array) -> jax.Array:
+        return run_loop("scan", newton_step, initial)
+
+    initial = SQUARE_POINT.astype(jnp.float64)
+    # The threaded state reuses a factorization that is stale, and refines it iteratively.
+    # The plain loop factorizes every step, so the two differ slightly at the tolerance.
+    np.testing.assert_allclose(
+        jax.jit(splx.stateful_solve_transform(newton))(initial),
+        newton(initial),
+        atol=1e-10,
+    )

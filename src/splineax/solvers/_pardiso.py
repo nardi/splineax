@@ -175,7 +175,9 @@ class _PardisoState(eqx.Module):
     """
 
     operator: AbstractLinearOperator | None
-    """The operator this state was built on. Compared by identity in `update`."""
+    """The sparse operator this state was built on, so that the state holds only arrays. A
+    tagged lineax operator is stored as the sparse matrix it materialises to. Compared by
+    identity in `update`."""
     csr: _CSR | None
     """The sorted CSR triple, or None for a symbolic-only state."""
     token: Any
@@ -261,7 +263,8 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         operator: AbstractLinearOperator,
         tag: object | None,
     ) -> _PardisoState:
-        indptr, indices, values, shape = _extract_csr(operator)
+        sparse = sparse_operator(operator, "Pardiso")
+        indptr, indices, values, shape = _extract_csr(sparse)
         pmj = _pardiso_mkl_jax()
         primitive = pmj.primitive
         # `analyze` and `factor` return `(token, final_iparm)`. Only the token is kept;
@@ -279,7 +282,7 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
         return _PardisoState(
-            operator,
+            sparse,
             (indptr, indices, values),
             token,
             pack_structures(operator),
@@ -403,7 +406,8 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         operator: AbstractLinearOperator,
         tag: object,
     ) -> _PardisoState:
-        indptr, indices, values, shape = _extract_csr(operator)
+        sparse = sparse_operator(operator, "Pardiso")
+        indptr, indices, values, shape = _extract_csr(sparse)
         pmj = _pardiso_mkl_jax()
         # `factor` reuses the analysis stored under the token's id, including the weighted
         # matching, and returns a fresh token for the new values. That matching was tuned
@@ -439,7 +443,7 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         )
         token = _reanalyze_if_unstable(pmj, token, iparm, indptr, indices, values)
         return _PardisoState(
-            operator,
+            sparse,
             (indptr, indices, values),
             token,
             pack_structures(operator),

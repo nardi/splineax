@@ -96,7 +96,9 @@ class _KLUState(eqx.Module):
     """
 
     operator: AbstractLinearOperator | None
-    """The operator this state was built on. Compared by identity in `update`."""
+    """The sparse operator this state was built on, so that the state holds only arrays. A
+    tagged lineax operator is stored as the sparse matrix it materialises to. Compared by
+    identity in `update`."""
     coo: _COO | None
     """The extracted (Ai, Aj, Ax) triple, or None for a symbolic-only state."""
     symbol: SymbolToken
@@ -295,7 +297,8 @@ class KLU(AbstractLinearSolver[_KLUState]):
             raise ValueError(
                 "`KLU` may only be used for linear solves with square matrices"
             )
-        row, col, values, shape = _extract_coo(operator)
+        sparse = sparse_operator(operator, "KLU")
+        row, col, values, shape = _extract_coo(sparse)
         klujax = _klujax()
         # This analyzes and factorizes right away, so the state is ready to solve and
         # reusable across right-hand sides. `factor` needs the real `SymbolToken`, which
@@ -305,7 +308,7 @@ class KLU(AbstractLinearSolver[_KLUState]):
         record_operation("factor", "KLU")
         numeric = klujax.factor(row, col, values, symbol)
         return _KLUState(
-            operator,
+            sparse,
             (row, col, values),
             symbol,
             numeric,
@@ -410,7 +413,8 @@ class KLU(AbstractLinearSolver[_KLUState]):
         options: dict[str, Any],
     ) -> _KLUState:
         del options
-        row, col, values, shape = _extract_coo(operator)
+        sparse = sparse_operator(operator, "KLU")
+        row, col, values, shape = _extract_coo(sparse)
         klujax = _klujax()
         # Reuse the stored symbolic analysis. The tag asserts the indices match the ones
         # `symbol` was analyzed with.
@@ -426,7 +430,7 @@ class KLU(AbstractLinearSolver[_KLUState]):
                 klujax, row, col, values, state.symbol, state.numeric
             )
         return _KLUState(
-            operator,
+            sparse,
             (row, col, values),
             state.symbol,
             numeric,
