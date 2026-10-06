@@ -551,6 +551,21 @@ def test_while_without_prior_state_threads() -> None:
 
 
 @pytest.mark.cpu_only
+def test_while_without_prior_state_batches_under_a_profile() -> None:
+    """A `vmap` of a loop-only `while_loop` still traces while a profile records, since the
+    loop is guarded by a select and not by a `cond`, which cannot hold the profile's
+    callbacks when it is batched."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _loop_only_while_fn(tag)
+    run = splx.stateful_solve_transform(fn)
+    right_hand_sides = jnp.stack([_b1(), _b2()])
+    with splx.create_solve_profile():
+        batched = jax.vmap(lambda b: run(_data(), b))(right_hand_sides)
+    expected = jnp.stack([fn(_data(), _b1()), fn(_data(), _b2())])
+    assert jnp.allclose(batched, expected, atol=1e-8)
+
+
+@pytest.mark.cpu_only
 def test_transform_leaves_a_jitted_function_unchanged() -> None:
     """Transforming a call of a jitted loop does not rewrite the loop the jit has cached, so
     calling the jitted function afterwards still gives the plain result."""
