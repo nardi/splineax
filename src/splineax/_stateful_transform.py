@@ -460,7 +460,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             )
 
         new_branches = tuple(rewrite_branch(branch) for branch in branches)
-        bind_params = eqn.primitive.get_bind_params(eqn.params)
+        bind_params = dict(eqn.primitive.get_bind_params(eqn.params))
         bind_params["branches"] = new_branches
         results = eqn.primitive.bind(
             index, *branch_operands, *state_leaves, **bind_params
@@ -473,7 +473,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
 
     def _rebind_unchanged(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
         """Rebind a primitive with its operands unchanged, threading no state."""
-        bind_params = eqn.primitive.get_bind_params(eqn.params)
+        bind_params = dict(eqn.primitive.get_bind_params(eqn.params))
         result = eqn.primitive.bind(*operands, **bind_params)
         return list(result) if eqn.primitive.multiple_results else [result]
 
@@ -543,7 +543,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         )
         self._check_loop_state_structure("scan", state_treedef, body_out_treedef)
         hoisted_body, hoisted_consts = self._hoist_consts(traced)
-        bind_params = eqn.primitive.get_bind_params(eqn.params)
+        bind_params = dict(eqn.primitive.get_bind_params(eqn.params))
         bind_params["jaxpr"] = hoisted_body
         bind_params["num_consts"] = num_consts + len(hoisted_consts)
         bind_params["num_carry"] = num_carry + num_state
@@ -678,7 +678,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         self._check_loop_state_structure("while_loop", seed_treedef, body_out_treedef)
         cond_closed, cond_hoisted = self._hoist_consts(traced_cond)
         body_closed, body_hoisted = self._hoist_consts(traced_body)
-        bind_params = eqn.primitive.get_bind_params(eqn.params)
+        bind_params = dict(eqn.primitive.get_bind_params(eqn.params))
         bind_params["cond_jaxpr"] = cond_closed
         bind_params["body_jaxpr"] = body_closed
         bind_params["cond_nconsts"] = cond_nconsts + len(cond_hoisted)
@@ -787,7 +787,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             return [*outputs, *out_leaves]
 
         traced = self._prune_dead(make_jaxpr(new_body)(*operands, *state_leaves))
-        bind_params = eqn.primitive.get_bind_params(eqn.params)
+        bind_params = dict(eqn.primitive.get_bind_params(eqn.params))
         bind_params["jaxpr"] = convert_constvars_jaxpr(traced.jaxpr)
         results = eqn.primitive.bind(
             *traced.consts, *operands, *state_leaves, **bind_params
