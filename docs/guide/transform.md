@@ -198,10 +198,12 @@ listed here.
 - **`lax.cond` needs an initial state.** A solve inside a `cond` branch is threaded only when
   a solve before the `cond` has already created the state, since the untaken branch has to
   return a matching state. A first solve reached only inside a `cond` raises.
-- **Custom differentiation raises by default.** A matched solve inside a `custom_jvp` or
-  `custom_vjp` raises, since the state cannot cross the custom rule. Set
-  `pass_through_custom_diff=True` to let such a solve run without threading, so it works but
-  does not reuse a factorization.
+- **Custom derivatives need a solve in their primal.** A solve inside a `custom_jvp` or
+  `custom_vjp` function is threaded, and so are the solves in its rule and backward
+  function. A call is only found when a solve appears in its primal function. A solve that
+  appears only in a rule or a backward function runs on its own.
+- **Custom derivatives can be left alone.** Set `pass_through_custom_diff=True` to run these
+  functions as they are. Their solves then work without reusing a factorization.
 - **Multiple solve families may not work.** The transform threads one state, so a single loop that
   interleaves two different solvers or patterns may not work, or perform poorly because factorizations
   are never reused. You might be able to use `filter_solver` and to separate them and apply the
