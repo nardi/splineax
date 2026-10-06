@@ -551,6 +551,18 @@ def test_while_without_prior_state_threads() -> None:
 
 
 @pytest.mark.cpu_only
+def test_transform_leaves_a_jitted_function_unchanged() -> None:
+    """Transforming a call of a jitted loop does not rewrite the loop the jit has cached, so
+    calling the jitted function afterwards still gives the plain result."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _loop_only_while_fn(tag)
+    jitted = jax.jit(fn)
+    run = splx.stateful_solve_transform(lambda data, b: jitted(data, b))
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+    assert jnp.allclose(jitted(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+
+
+@pytest.mark.cpu_only
 def test_while_that_runs_zero_times_keeps_its_carry() -> None:
     """When the loop condition is false at once, the unrolled solve is discarded and the
     original carry is returned, matching the untransformed function."""
