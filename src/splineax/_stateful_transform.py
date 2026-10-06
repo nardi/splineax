@@ -22,7 +22,7 @@ import jax.numpy as jnp
 from jax import make_jaxpr
 from jax._src.interpreters.partial_eval import convert_constvars_jaxpr, dce_jaxpr
 from jax.extend.core import ClosedJaxpr, Jaxpr, JaxprEqn, Literal, Primitive, Var
-from jaxtyping import Array, PyTree
+from jaxtyping import Array, Bool, PyTree
 from lineax import AbstractLinearOperator, AbstractLinearSolver
 from lineax._solution import RESULTS
 from lineax._solve import linear_solve_p
@@ -630,11 +630,13 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         carry_values: list[Any],
         seed_leaves: list[Any],
         seed_treedef: jax.tree_util.PyTreeDef,
+        start_condition: Bool[Array, ""] | None = None,
     ) -> tuple[list[Any], list[Any]]:
         """Rebind a `while` that also carries a state, seeded from `seed_leaves`.
 
-        The condition takes the state leaves and ignores them, the body threads them. Returns
-        the final carry leaves and the final state leaves.
+        The condition takes the state leaves and ignores them, the body threads them. When
+        `start_condition` is given, the loop also carries it unchanged and only runs while
+        it is true. Returns the final carry leaves and the final state leaves.
         """
         cond_jaxpr = cast(ClosedJaxpr, eqn.params["cond_jaxpr"])
         body_jaxpr = cast(ClosedJaxpr, eqn.params["body_jaxpr"])
@@ -643,14 +645,18 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         num_carry = len(carry_values)
         num_state = len(seed_leaves)
         body_out_treedef = seed_treedef
+        start_condition_carry = [] if start_condition is None else [start_condition]
 
         def new_cond(*args: Any) -> list[Any]:
             """Evaluate the loop condition, ignoring the extra state carry."""
             consts = list(args[:cond_nconsts])
             carry = list(args[cond_nconsts : cond_nconsts + num_carry])
-            return jax.core.eval_jaxpr(
+            (condition,) = jax.core.eval_jaxpr(
                 cond_jaxpr.jaxpr, cond_jaxpr.consts, *consts, *carry
             )
+            if start_condition is not None:
+                condition = jnp.logical_and(condition, args[-1])
+            return [condition]
 
         def new_body(*args: Any) -> list[Any]:
             """Run one loop step, threading the state carried alongside the loop carry."""
@@ -667,13 +673,17 @@ class _StateThreadingInterpreter(Generic[_StateT]):
                 carried_state,
                 seed_treedef,
             )
-            return [*outputs, *out_leaves]
+            return [*outputs, *out_leaves, *start_condition_carry]
 
         traced_cond = self._prune_dead(
-            make_jaxpr(new_cond)(*cond_consts, *carry_values, *seed_leaves)
+            make_jaxpr(new_cond)(
+                *cond_consts, *carry_values, *seed_leaves, *start_condition_carry
+            )
         )
         traced_body = self._prune_dead(
-            make_jaxpr(new_body)(*body_consts, *carry_values, *seed_leaves)
+            make_jaxpr(new_body)(
+                *body_consts, *carry_values, *seed_leaves, *start_condition_carry
+            )
         )
         self._check_loop_state_structure("while_loop", seed_treedef, body_out_treedef)
         cond_closed, cond_hoisted = self._hoist_consts(traced_cond)
@@ -690,6 +700,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             *body_consts,
             *carry_values,
             *seed_leaves,
+            *start_condition_carry,
             **bind_params,
         )
         carry_final = list(results[:num_carry])
@@ -720,7 +731,6 @@ class _StateThreadingInterpreter(Generic[_StateT]):
 
         cond_jaxpr = cast(ClosedJaxpr, eqn.params["cond_jaxpr"])
         body_jaxpr = cast(ClosedJaxpr, eqn.params["body_jaxpr"])
-        num_carry = len(carry_values)
         _, none_treedef = jax.tree_util.tree_flatten(None)
         first_carry, first_state_leaves, first_state_treedef = self._thread_nested_body(
             body_jaxpr.jaxpr,
@@ -729,32 +739,27 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             [],
             none_treedef,
         )
-        num_state = len(first_state_leaves)
         predicate = jax.core.eval_jaxpr(
             cond_jaxpr.jaxpr, cond_jaxpr.consts, *cond_consts, *carry_values
         )[0]
 
-        def run_rest() -> list[Any]:
-            """Continue the loop from the unrolled carry and state."""
-            carry_final, state_final = self._augmented_while(
-                eqn,
-                cond_consts,
-                body_consts,
-                list(first_carry),
-                first_state_leaves,
-                first_state_treedef,
-            )
-            return [*carry_final, *state_final]
-
-        def skip() -> list[Any]:
-            """Keep the original carry when the loop would run zero times."""
-            return [*carry_values, *first_state_leaves]
-
-        combined = jax.lax.cond(predicate, run_rest, skip)
-        self.state = jax.tree_util.tree_unflatten(
-            first_state_treedef, list(combined[num_carry : num_carry + num_state])
+        # The loop after the first iteration only runs when the condition held at the start.
+        # A zero-trip loop keeps its original carry, chosen by a select, since a `cond`
+        # could not hold the solves' callbacks when it is batched.
+        carry_final, state_final = self._augmented_while(
+            eqn,
+            cond_consts,
+            body_consts,
+            list(first_carry),
+            first_state_leaves,
+            first_state_treedef,
+            start_condition=predicate,
         )
-        return list(combined[:num_carry])
+        self.state = jax.tree_util.tree_unflatten(first_state_treedef, state_final)
+        return [
+            jax.lax.select(predicate, final_leaf, original_leaf)
+            for final_leaf, original_leaf in zip(carry_final, carry_values)
+        ]
 
     def _thread_remat(self, eqn: JaxprEqn, operands: list[Any]) -> list[Any]:
         """Thread the state through a `remat` whose body holds a matched solve.
