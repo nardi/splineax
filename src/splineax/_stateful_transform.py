@@ -9,19 +9,23 @@ A solve inside a `lax.scan` or `lax.while_loop` is threaded by carrying the stat
 the loop, and the first iteration is unrolled to create the state when there is none yet.
 A solve inside a `lax.cond` is threaded through the branches, and needs a state from an
 earlier solve. A solve inside a `jax.checkpoint` (`remat`) is threaded too, keeping the
-checkpointing.
+checkpointing. A solve inside a `custom_jvp` or `custom_vjp` function is threaded by rebuilding
+the function as a custom derivative that takes and returns the state.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar, cast, overload
 
 import equinox.internal as eqxi
 import jax
 import jax.core
 import jax.numpy as jnp
+import numpy as np
 from jax import make_jaxpr
 from jax._src.interpreters.partial_eval import convert_constvars_jaxpr, dce_jaxpr
+from jax.custom_derivatives import CustomVJPPrimal, SymbolicZero
 from jax.extend.core import ClosedJaxpr, Jaxpr, JaxprEqn, Literal, Primitive, Var
+from jax.interpreters.ad import Zero
 from jaxtyping import Array, Bool, PyTree
 from lineax import AbstractLinearOperator, AbstractLinearSolver
 from lineax._solution import RESULTS
@@ -68,11 +72,10 @@ The stats values are solver-defined, so they stay `Any`.
 """
 
 _CUSTOM_DIFF_PRIMITIVES = frozenset({"custom_jvp_call", "custom_vjp_call"})
-"""The custom-differentiation primitives whose solves can pass through unthreaded.
+"""The custom-differentiation primitives that the pass-through option leaves unthreaded.
 
-Their differentiation rule lives in an opaque callable, so the primal cannot be rewritten
-to thread the state without desyncing that rule. With the pass-through option the solve runs
-without reuse rather than raising.
+Without the option, `_thread_custom_jvp` and `_thread_custom_vjp` rebuild them with the
+state as an extra argument and output. With it, the solves inside them run without reuse.
 """
 
 _INLINE_PRIMITIVES = frozenset({"pjit", "jit", "closed_call", "core_call"})
@@ -81,6 +84,13 @@ _INLINE_PRIMITIVES = frozenset({"pjit", "jit", "closed_call", "core_call"})
 Each is a pure staging boundary, so running its body in place computes the same values.
 `lineax` wraps every solve in one of these, so inlining is required, not an optimisation.
 """
+
+
+def _instantiate_zero(zero: SymbolicZero) -> Array | np.ndarray:
+    """The array of zeros that a symbolic zero tangent stands for."""
+    if zero.dtype == jax.dtypes.float0:
+        return np.zeros(zero.shape, dtype=jax.dtypes.float0)
+    return jnp.zeros(zero.shape, zero.dtype)
 
 
 def _solver_matches(solver: AbstractLinearSolver, filter_solver: _FilterSolver) -> bool:
@@ -231,7 +241,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
     """The state threaded so far, or `None` before the first matched solve."""
 
     pass_through_custom_diff: bool
-    """Whether a solve inside a `custom_jvp` or `custom_vjp` passes through instead of raising."""
+    """Whether a `custom_jvp` or `custom_vjp` call runs as it is, instead of being threaded."""
 
     def __init__(
         self,
@@ -249,8 +259,13 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         consts: list[Any],
         args: list[Any],
         drop_profile_records: bool = False,
+        tangent_args: Sequence[bool] | None = None,
     ) -> list[Any]:
         """Evaluate the jaxpr against these argument values, returning its output values.
+
+        `tangent_args` flags the arguments that carry tangents. A solve that depends on
+        one of them runs with the threaded state but does not store the state it used, so
+        the state stays a function of the primal values alone.
 
         Profile records that come before a threaded solve in the same jaxpr are dropped,
         and so are all records when `drop_profile_records` is true. A jaxpr that binds a
@@ -270,6 +285,11 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             write(constvar, constval)
         for invar, arg in zip(jaxpr.invars, args):
             write(invar, arg)
+        tangent_vars: set[Var] = {
+            invar
+            for invar, is_tangent in zip(jaxpr.invars, tangent_args or ())
+            if is_tangent
+        }
 
         last_solve_index = max(
             (
@@ -284,7 +304,18 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             if drops_records and _is_profile_record(eqn):
                 continue
             operands = [read(v) for v in eqn.invars]
-            outputs = self._process_equation(eqn, operands, env, drops_records)
+            operand_is_tangent = [
+                not isinstance(v, Literal) and v in tangent_vars for v in eqn.invars
+            ]
+            has_tangent_operand = any(operand_is_tangent)
+            state_before = self.state
+            outputs = self._process_equation(
+                eqn, operands, env, drops_records, operand_is_tangent
+            )
+            if has_tangent_operand and eqn.primitive is linear_solve_p:
+                self.state = state_before
+            if has_tangent_operand:
+                tangent_vars.update(eqn.outvars)
             for outvar, value in zip(eqn.outvars, outputs):
                 write(outvar, value)
 
@@ -296,6 +327,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         operands: list[Any],
         env: dict[Var, Any],
         drop_profile_records: bool,
+        operand_is_tangent: Sequence[bool] = (),
     ) -> list[Any]:
         """Produce one equation's output values, threading the state through a matched solve.
 
@@ -309,13 +341,17 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         if primitive is linear_solve_p:
             arguments = _reconstruct_solve_arguments(eqn, operands)
             if _solver_matches(arguments[4], self.filter_solver):
-                return self._thread_solve(eqn, arguments, env)
+                return self._thread_solve(eqn, arguments, env, any(operand_is_tangent))
             return _runtime_value_leaves(_rebind_solve(arguments))
 
         if primitive.name in _INLINE_PRIMITIVES:
             inner = cast(ClosedJaxpr, eqn.params["jaxpr"])
             return self.interpret(
-                inner.jaxpr, inner.consts, operands, drop_profile_records
+                inner.jaxpr,
+                inner.consts,
+                operands,
+                drop_profile_records,
+                operand_is_tangent,
             )
 
         nested = _nested_jaxprs(eqn)
@@ -330,6 +366,16 @@ class _StateThreadingInterpreter(Generic[_StateT]):
                 return self._thread_while(eqn, operands)
             if primitive.name == "remat2":
                 return self._thread_remat(eqn, operands)
+            if (
+                primitive.name == "custom_jvp_call"
+                and not self.pass_through_custom_diff
+            ):
+                return self._thread_custom_jvp(eqn, operands)
+            if (
+                primitive.name == "custom_vjp_call"
+                and not self.pass_through_custom_diff
+            ):
+                return self._thread_custom_vjp(eqn, operands)
             passes_through = (
                 self.pass_through_custom_diff
                 and primitive.name in _CUSTOM_DIFF_PRIMITIVES
@@ -340,15 +386,19 @@ class _StateThreadingInterpreter(Generic[_StateT]):
                     f"solve inside `{primitive.name}`. Move the solve out of it, or drop "
                     "the transform for this function."
                 )
-            # Pass the custom-diff primitive through unchanged. Its solve runs but does not
-            # reuse a factorization, since the state cannot cross its opaque rule.
+            # The option asks for the primitive to run unchanged, so its solve runs without
+            # reusing a factorization.
 
         bind_params = primitive.get_bind_params(eqn.params)
         result = primitive.bind(*operands, **bind_params)
         return list(result) if primitive.multiple_results else [result]
 
     def _thread_solve(
-        self, eqn: JaxprEqn, arguments: _SolveArguments, env: dict[Var, Any]
+        self,
+        eqn: JaxprEqn,
+        arguments: _SolveArguments,
+        env: dict[Var, Any],
+        depends_on_tangent: bool = False,
     ) -> list[Any]:
         """Solve through `splineax.linear_solve`, threading the state in and out.
 
@@ -364,7 +414,9 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             solver,
             options=dict(options),
             state=self.state,
-            throw=throw,
+            # A solve of a tangent has no error check, which could not be transposed.
+            # The primal solve it follows has been checked already.
+            throw=throw and not depends_on_tangent,
         )
         env.update(_state_substitutions(eqn, solution.state))
         return _runtime_value_leaves((solution.value, solution.result, solution.stats))
@@ -385,6 +437,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         operands: list[Any],
         state_leaves: list[Any],
         state_treedef: jax.tree_util.PyTreeDef,
+        tangent_args: Sequence[bool] | None = None,
     ) -> tuple[list[Any], list[Any], jax.tree_util.PyTreeDef]:
         """Interpret a nested body seeded with the carried state, returning its outputs.
 
@@ -397,7 +450,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         inner: _StateThreadingInterpreter[_StateT] = _StateThreadingInterpreter(
             self.filter_solver, incoming, self.pass_through_custom_diff
         )
-        outputs = inner.interpret(jaxpr, consts, operands)
+        outputs = inner.interpret(jaxpr, consts, operands, tangent_args=tangent_args)
         if inner.state is not None:
             self.state = inner.state
         out_leaves, out_treedef = jax.tree_util.tree_flatten(self.state)
@@ -803,6 +856,307 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         )
         return list(results[:num_outputs])
 
+    def _thread_custom_jvp(self, eqn: JaxprEqn, operands: list[Array]) -> list[Array]:
+        """Thread the state through a `custom_jvp` call whose function holds a matched solve.
+
+        The function is rebuilt as a `custom_jvp` that takes the state's leaves as extra
+        arguments and returns the threaded state's leaves as extra outputs. Its primal runs
+        the original function under the interpreter, so its solves thread the state. Its
+        differentiation rule runs the jaxpr of the original rule under the interpreter in the
+        same way, so a solve in the rule threads the state as well. The state leaves get
+        zero tangents, since a state is not a differentiable quantity.
+
+        Like `remat` and unlike a loop, a custom-derivative call runs once and imposes no
+        fixed carry, so a first solve inside it may create the state, and the incoming and
+        outgoing states may differ in structure.
+        """
+        call_jaxpr = cast(ClosedJaxpr, eqn.params["call_jaxpr"])
+        num_consts = cast(int, eqn.params["num_consts"])
+        jvp_jaxpr_fun = eqn.params["jvp_jaxpr_fun"]
+        original_symbolic_zeros = cast(bool, eqn.params["symbolic_zeros"])
+        num_operands = len(operands)
+        state_leaves, state_treedef = jax.tree_util.tree_flatten(self.state)
+        output_state_treedef = state_treedef
+
+        def threaded_primal(*arguments: Array) -> list[Array]:
+            """Interpret the original function, threading the state alongside its arguments."""
+            nonlocal output_state_treedef
+            outputs, out_leaves, output_state_treedef = self._thread_nested_body(
+                call_jaxpr.jaxpr,
+                call_jaxpr.consts,
+                list(arguments[:num_operands]),
+                list(arguments[num_operands:]),
+                state_treedef,
+            )
+            return [*outputs, *out_leaves]
+
+        threaded_function = jax.custom_jvp(threaded_primal)
+
+        def threaded_jvp_rule(
+            primals: tuple[Array, ...], tangents: tuple[Array | SymbolicZero, ...]
+        ) -> tuple[list[Array], list[Array | SymbolicZero]]:
+            """Interpret the jaxpr of the original rule with the state threaded through it."""
+            operand_primals = list(primals[:num_operands])
+            operand_tangents = list(tangents[:num_operands])[num_consts:]
+            if not original_symbolic_zeros:
+                # A rule that did not ask for symbolic zeros gets arrays, as JAX would give.
+                operand_tangents = [
+                    _instantiate_zero(tangent)
+                    if type(tangent) is SymbolicZero
+                    else tangent
+                    for tangent in operand_tangents
+                ]
+            # The rule takes the primals after the constants, and only the nonzero tangents.
+            tangent_is_zero = [
+                type(tangent) is SymbolicZero for tangent in operand_tangents
+            ]
+            rule_jaxpr, rule_consts, output_tangent_is_zero = (
+                jvp_jaxpr_fun.call_wrapped(*tangent_is_zero)
+            )
+            nonzero_tangents = [
+                tangent
+                for tangent in operand_tangents
+                if type(tangent) is not SymbolicZero
+            ]
+            num_primals = len(operand_primals) - num_consts
+            num_rule_arguments = num_primals + len(nonzero_tangents)
+
+            def interpret_rule(*flat_arguments: Array) -> list[Array]:
+                """Interpret the rule's jaxpr, returning its outputs then the state leaves."""
+                outputs, out_leaves, _ = self._thread_nested_body(
+                    rule_jaxpr,
+                    rule_consts,
+                    list(flat_arguments[:num_rule_arguments]),
+                    list(flat_arguments[num_rule_arguments:]),
+                    state_treedef,
+                    tangent_args=[False] * num_primals + [True] * len(nonzero_tangents),
+                )
+                return [*outputs, *out_leaves]
+
+            # Staging the rule keeps its primal values traced. Run eagerly, a concrete scalar
+            # would reach a rebuilt operator as a Python scalar, which equinox treats as
+            # static, so a closure-converted function would reject it.
+            flat_results = jax.jit(interpret_rule)(
+                *operand_primals[num_consts:],
+                *nonzero_tangents,
+                *primals[num_operands:],
+            )
+            rule_outputs = flat_results[: len(rule_jaxpr.outvars)]
+            out_leaves = flat_results[len(rule_jaxpr.outvars) :]
+            num_outputs = len(output_tangent_is_zero)
+            out_primals = rule_outputs[:num_outputs]
+            nonzero_out_tangents = iter(rule_outputs[num_outputs:])
+            out_tangents = [
+                SymbolicZero(jax.typeof(primal_out).to_tangent_aval())
+                if is_zero
+                else next(nonzero_out_tangents)
+                for primal_out, is_zero in zip(out_primals, output_tangent_is_zero)
+            ]
+            state_tangents = [
+                SymbolicZero(jax.typeof(leaf).to_tangent_aval()) for leaf in out_leaves
+            ]
+            return [*out_primals, *out_leaves], [*out_tangents, *state_tangents]
+
+        # The type stubs of JAX leave symbolic zeros out of the tangent type of a rule.
+        threaded_function.defjvp(
+            cast(Callable[..., tuple[list[Array], list[Array]]], threaded_jvp_rule),
+            symbolic_zeros=True,
+        )
+        threaded_results = threaded_function(*operands, *state_leaves)
+        num_outputs = len(eqn.outvars)
+        self.state = jax.tree_util.tree_unflatten(
+            output_state_treedef, list(threaded_results[num_outputs:])
+        )
+        return list(threaded_results[:num_outputs])
+
+    def _thread_custom_vjp(self, eqn: JaxprEqn, operands: list[Array]) -> list[Array]:
+        """Thread the state through a `custom_vjp` call whose function holds a matched solve.
+
+        The function is rebuilt as a `custom_vjp` that takes the state's leaves as extra
+        arguments and returns the threaded state's leaves as extra outputs. Its primal and
+        its forward function run the original ones under the interpreter, so their solves
+        thread the state. The forward function also saves the state as a residual. Its
+        backward function is the original one, traced to a jaxpr and interpreted with that
+        state, so its solves reuse the forward factorization. The state leaves get no
+        cotangent, since a state is not a differentiable quantity.
+        """
+        call_jaxpr = cast(ClosedJaxpr, eqn.params["call_jaxpr"])
+        num_consts = cast(int, eqn.params["num_consts"])
+        fwd_jaxpr_thunk = eqn.params["fwd_jaxpr_thunk"]
+        symbolic_zeros = cast(bool, eqn.params["symbolic_zeros"])
+        _, _, original_backward = eqn.primitive.get_bind_params(eqn.params)["subfuns"]
+        num_operands = len(operands)
+        num_outputs = len(eqn.outvars)
+        state_leaves, state_treedef = jax.tree_util.tree_flatten(self.state)
+        output_state_treedef = state_treedef
+        num_original_residuals = 0
+
+        def threaded_primal(*arguments: Array) -> list[Array]:
+            """Interpret the original function, threading the state alongside its arguments."""
+            nonlocal output_state_treedef
+            outputs, out_leaves, output_state_treedef = self._thread_nested_body(
+                call_jaxpr.jaxpr,
+                call_jaxpr.consts,
+                list(arguments[:num_operands]),
+                list(arguments[num_operands:]),
+                state_treedef,
+            )
+            return [*outputs, *out_leaves]
+
+        threaded_function = jax.custom_vjp(threaded_primal)
+
+        def threaded_forward(
+            *arguments: Array | CustomVJPPrimal,
+        ) -> tuple[list[Array], list[Array]]:
+            """Interpret the original forward function, which returns the outputs and residuals.
+
+            The state it returns is a residual too, for the backward function to use.
+            """
+            nonlocal output_state_treedef, num_original_residuals
+            if symbolic_zeros:
+                # The rule sees each argument as a value with a flag for a nonzero tangent.
+                operand_values = [cast(CustomVJPPrimal, a).value for a in arguments]
+                nonzero_flags = [cast(CustomVJPPrimal, a).perturbed for a in arguments]
+            else:
+                operand_values = [cast(Array, a) for a in arguments]
+                nonzero_flags = [True] * len(arguments)
+            forward_jaxpr, forward_consts = fwd_jaxpr_thunk.call_wrapped(
+                *nonzero_flags[num_consts:num_operands]
+            )
+            results, out_leaves, output_state_treedef = self._thread_nested_body(
+                forward_jaxpr,
+                forward_consts,
+                operand_values[num_consts:num_operands],
+                operand_values[num_operands:],
+                state_treedef,
+            )
+            # The forward jaxpr returns the residuals first and leaves out the ones that are
+            # just an operand, which the original backward function expects in place. The
+            # indices count the constants, too.
+            num_residuals = len(results) - num_outputs
+            pruned_residuals = iter(results[:num_residuals])
+            _, _, input_forwards = eqn.params["out_trees"]()
+            residuals = [
+                next(pruned_residuals) if index is None else operand_values[index]
+                for index in input_forwards
+            ]
+            num_original_residuals = len(residuals)
+            return [*results[num_residuals:], *out_leaves], [*residuals, *out_leaves]
+
+        def threaded_backward(
+            residuals: list[Array], cotangents: list[Array | SymbolicZero]
+        ) -> tuple[Array | None, ...]:
+            """Interpret the original backward function, threading the state it was given.
+
+            The backward function is traced to a jaxpr, so its solves are found and run under
+            an interpreter seeded with the state that the forward function returned. A
+            solve of a cotangent reads that state without replacing it.
+            """
+            original_residuals = residuals[:num_original_residuals]
+            state_residuals = residuals[num_original_residuals:]
+            output_cotangents = cotangents[:num_outputs]
+            live_cotangents = [
+                cotangent
+                for cotangent in output_cotangents
+                if type(cotangent) is not SymbolicZero
+            ]
+            result_is_zero: list[bool] = []
+            # A residual that is a concrete value stays one while the function is traced,
+            # since a backward function may branch on it in Python.
+            residual_is_traced = [
+                isinstance(residual, jax.core.Tracer) for residual in original_residuals
+            ]
+
+            def call_backward(*flat_arguments: Array) -> list[Array]:
+                """Call the original backward function, leaving out its zero cotangents."""
+                dynamic_values = iter(flat_arguments)
+                full_residuals = [
+                    next(dynamic_values) if is_traced else residual
+                    for residual, is_traced in zip(
+                        original_residuals, residual_is_traced
+                    )
+                ]
+                restored_cotangents = [
+                    cotangent
+                    if type(cotangent) is SymbolicZero
+                    else next(dynamic_values)
+                    for cotangent in output_cotangents
+                ]
+                backward_results = original_backward.call_wrapped(
+                    *full_residuals, *restored_cotangents
+                )
+                result_is_zero[:] = [
+                    type(result) is Zero for result in backward_results
+                ]
+                return [
+                    result for result in backward_results if type(result) is not Zero
+                ]
+
+            dynamic_residuals = [
+                residual
+                for residual, is_traced in zip(original_residuals, residual_is_traced)
+                if is_traced
+            ]
+            backward_arguments = [*dynamic_residuals, *live_cotangents]
+            traced_backward = make_jaxpr(call_backward)(*backward_arguments)
+            if _jaxpr_has_selected_solve(traced_backward.jaxpr, self.filter_solver):
+                num_arguments = len(backward_arguments)
+
+                def interpret_backward(*flat_arguments: Array) -> list[Array]:
+                    """Interpret the traced backward function with the state seeded."""
+                    interpreter: _StateThreadingInterpreter[_StateT] = (
+                        _StateThreadingInterpreter(
+                            self.filter_solver,
+                            jax.tree_util.tree_unflatten(
+                                output_state_treedef,
+                                list(flat_arguments[num_arguments:]),
+                            ),
+                            self.pass_through_custom_diff,
+                        )
+                    )
+                    return interpreter.interpret(
+                        traced_backward.jaxpr,
+                        traced_backward.consts,
+                        list(flat_arguments[:num_arguments]),
+                        tangent_args=[False] * len(dynamic_residuals)
+                        + [True] * len(live_cotangents),
+                    )
+
+                # Staging the interpreted function lets the `init` that `lineax` built for
+                # each solve, which the threaded state replaces, be pruned as dead.
+                staged_backward = self._prune_dead(
+                    make_jaxpr(interpret_backward)(
+                        *backward_arguments, *state_residuals
+                    )
+                )
+                live_results = jax.core.eval_jaxpr(
+                    staged_backward.jaxpr,
+                    staged_backward.consts,
+                    *backward_arguments,
+                    *state_residuals,
+                )
+            else:
+                live_results = jax.core.eval_jaxpr(
+                    traced_backward.jaxpr, traced_backward.consts, *backward_arguments
+                )
+            live_result_iterator = iter(live_results)
+            operand_cotangents = [
+                None if is_zero else next(live_result_iterator)
+                for is_zero in result_is_zero
+            ]
+            return (*operand_cotangents, *[None] * len(state_leaves))
+
+        threaded_function.defvjp(
+            threaded_forward, threaded_backward, symbolic_zeros=symbolic_zeros
+        )
+        threaded_results = threaded_function(*operands, *state_leaves)
+        # The state is not differentiable, so later equations see it as having no tangent.
+        self.state = jax.tree_util.tree_unflatten(
+            output_state_treedef,
+            [jax.lax.stop_gradient(leaf) for leaf in threaded_results[num_outputs:]],
+        )
+        return list(threaded_results[:num_outputs])
+
 
 class _StagedComputation(NamedTuple, Generic[_StateT]):
     """The pruned jaxpr and metadata cached for one call signature."""
@@ -865,8 +1219,8 @@ def stateful_solve_transform(
         when false it returns the output alone and releases the threaded state. The default is
         true when an initial `state` is passed at call time, false otherwise.
     - `pass_through_custom_diff`: by default a matched solve inside a `custom_jvp` or
-        `custom_vjp` raises, since the state cannot cross the custom rule. Set this true to let
-        such a solve run without threading, so it works but does not reuse a factorization.
+        `custom_vjp` function is threaded, through its primal and its rule. Set this true to run
+        such a function as it is, so its solves work but do not reuse a factorization.
 
     **Returns:**
 
