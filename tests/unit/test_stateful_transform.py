@@ -551,6 +551,33 @@ def test_while_without_prior_state_threads() -> None:
 
 
 @pytest.mark.cpu_only
+def test_while_without_prior_state_batches_under_a_profile() -> None:
+    """A `vmap` of a loop-only `while_loop` still traces while a profile records, since the
+    loop is guarded by a select and not by a `cond`, which cannot hold the profile's
+    callbacks when it is batched."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _loop_only_while_fn(tag)
+    run = splx.stateful_solve_transform(fn)
+    right_hand_sides = jnp.stack([_b1(), _b2()])
+    with splx.create_solve_profile():
+        batched = jax.vmap(lambda b: run(_data(), b))(right_hand_sides)
+    expected = jnp.stack([fn(_data(), _b1()), fn(_data(), _b2())])
+    assert jnp.allclose(batched, expected, atol=1e-8)
+
+
+@pytest.mark.cpu_only
+def test_transform_leaves_a_jitted_function_unchanged() -> None:
+    """Transforming a call of a jitted loop does not rewrite the loop the jit has cached, so
+    calling the jitted function afterwards still gives the plain result."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _loop_only_while_fn(tag)
+    jitted = jax.jit(fn)
+    run = splx.stateful_solve_transform(lambda data, b: jitted(data, b))
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+    assert jnp.allclose(jitted(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+
+
+@pytest.mark.cpu_only
 def test_while_that_runs_zero_times_keeps_its_carry() -> None:
     """When the loop condition is false at once, the unrolled solve is discarded and the
     original carry is returned, matching the untransformed function."""
@@ -709,24 +736,225 @@ def test_return_final_state_paths() -> None:
     assert jnp.allclose(out_false, expected, atol=1e-8)
 
 
-@pytest.mark.cpu_only
-def test_custom_jvp_solve_raises_by_default() -> None:
-    """A matched solve inside a `custom_jvp` raises by default, since the state cannot cross
-    the custom rule."""
+def _custom_jvp_solve(tag: object):
+    """A `custom_jvp` function that solves `A x = b` for the values of `A`, with its own
+    rule.
+
+    The rule solves the tangent system `A dx = db - dA x` with the same solver, so a
+    solve appears in the primal and in the rule.
+    """
     indices = _indices()
 
+    def operator_of(data: jax.Array) -> splx.BCOOLinearOperator:
+        return splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)), tags=tag)
+
     @jax.custom_jvp
-    def solve(data, b):
-        operator = splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)))
-        return lx.linear_solve(operator, b, splx.KLU()).value
+    def solve(data: jax.Array, right_hand_side: jax.Array) -> jax.Array:
+        return lx.linear_solve(operator_of(data), right_hand_side, splx.KLU()).value
 
     @solve.defjvp
-    def _solve_jvp(primals, tangents):
-        (data, b), (_, b_dot) = primals, tangents
-        return solve(data, b), b_dot
+    def solve_jvp(primals, tangents):
+        data, right_hand_side = primals
+        data_tangent, right_hand_side_tangent = tangents
+        solution = solve(data, right_hand_side)
+        tangent_right_hand_side = right_hand_side_tangent - operator_of(
+            data_tangent
+        ).mv(solution)
+        solution_tangent = lx.linear_solve(
+            operator_of(data), tangent_right_hand_side, splx.KLU()
+        ).value
+        return solution, solution_tangent
 
-    with pytest.raises(NotImplementedError, match="custom_jvp"):
-        splx.stateful_solve_transform(solve)(_data(), _b1())
+    return solve
+
+
+def _function_calling_solve_twice(solve):
+    """A function that calls a `custom_jvp` solve twice, on two scalings of its matrix."""
+
+    def fn(data: jax.Array, right_hand_side: jax.Array) -> jax.Array:
+        return solve(data, right_hand_side) + solve(1.1 * data, right_hand_side)
+
+    return fn
+
+
+@pytest.mark.cpu_only
+def test_custom_jvp_solves_thread_one_state_by_default() -> None:
+    """Two calls of a `custom_jvp` solve share one analysis, and the output matches."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _function_calling_solve_twice(_custom_jvp_solve(tag))
+    run = splx.stateful_solve_transform(fn)
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+    threaded = make_jaxpr(lambda data: run(data, _b1()))(_data())
+    plain = make_jaxpr(lambda data: fn(data, _b1()))(_data())
+    assert _count_primitive(plain.jaxpr, "analyze") == 2
+    assert _count_primitive(threaded.jaxpr, "analyze") == 1
+
+
+@pytest.mark.cpu_only
+def test_custom_jvp_threading_keeps_its_rule() -> None:
+    """Derivatives of a threaded `custom_jvp` solve match the plain function in forward
+    mode, in reverse mode, and under `jit`.
+
+    The rule solves a tangent system. The state stays the state of the primal solve, so
+    the batched tangents of `jacfwd` and the transposed solve of `grad` still work.
+    """
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _function_calling_solve_twice(_custom_jvp_solve(tag))
+    run = splx.stateful_solve_transform(fn)
+    data, right_hand_side = _data(), _b1()
+    assert jnp.allclose(
+        jax.jacfwd(run)(data, right_hand_side),
+        jax.jacfwd(fn)(data, right_hand_side),
+        atol=1e-8,
+    )
+    _, tangent = jax.jvp(run, (data, right_hand_side), (data, right_hand_side))
+    _, expected_tangent = jax.jvp(fn, (data, right_hand_side), (data, right_hand_side))
+    assert jnp.allclose(tangent, expected_tangent, atol=1e-8)
+
+    def loss(function):
+        return lambda values: jnp.sum(function(values, right_hand_side) ** 2)
+
+    assert jnp.allclose(
+        jax.jit(jax.grad(loss(run)))(data), jax.grad(loss(fn))(data), atol=1e-8
+    )
+
+
+@pytest.mark.cpu_only
+def test_custom_jvp_solve_threads_through_a_scan() -> None:
+    """A `custom_jvp` solve in a loop body reuses the carried state on every step."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    solve = _custom_jvp_solve(tag)
+
+    def fn(data: jax.Array, right_hand_side: jax.Array) -> jax.Array:
+        def step(value, _):
+            return solve(data, right_hand_side + 0.1 * value), None
+
+        return jax.lax.scan(step, right_hand_side, None, length=4)[0]
+
+    run = splx.stateful_solve_transform(fn)
+    assert jnp.allclose(run(_data(), _b1()), fn(_data(), _b1()), atol=1e-8)
+    assert jnp.allclose(
+        jax.jacfwd(run)(_data(), _b1()), jax.jacfwd(fn)(_data(), _b1()), atol=1e-8
+    )
+
+
+def _custom_vjp_solve(tag: object, symbolic_zeros: bool):
+    """A `custom_vjp` function that solves `A x = b` for the values of `A`.
+
+    The backward function solves the transposed system `A^T y = ct` with the same solver.
+    """
+    indices = _indices()
+
+    def operator_of(data: jax.Array) -> splx.BCOOLinearOperator:
+        return splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)), tags=tag)
+
+    @jax.custom_vjp
+    def solve(data: jax.Array, right_hand_side: jax.Array) -> jax.Array:
+        return lx.linear_solve(operator_of(data), right_hand_side, splx.KLU()).value
+
+    def solve_forward(data, right_hand_side):
+        if symbolic_zeros:
+            data, right_hand_side = data.value, right_hand_side.value
+        solution = solve(data, right_hand_side)
+        return solution, (data, solution)
+
+    def solve_backward(residuals, cotangent):
+        data, solution = residuals
+        adjoint = lx.linear_solve(
+            operator_of(data).transpose(), cotangent, splx.KLU()
+        ).value
+        # `dA` receives `-y x^T`, restricted to the entries of the pattern.
+        data_cotangent = -adjoint[indices[:, 0]] * solution[indices[:, 1]]
+        return data_cotangent, adjoint
+
+    solve.defvjp(solve_forward, solve_backward, symbolic_zeros=symbolic_zeros)
+    return solve
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("symbolic_zeros", [False, True])
+def test_custom_vjp_solves_thread_one_state_by_default(symbolic_zeros: bool) -> None:
+    """Two calls of a `custom_vjp` solve share one analysis, and the gradient through
+    their forward and backward functions matches the plain function."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _function_calling_solve_twice(_custom_vjp_solve(tag, symbolic_zeros))
+    run = splx.stateful_solve_transform(fn)
+    data, right_hand_side = _data(), _b1()
+    assert jnp.allclose(
+        run(data, right_hand_side), fn(data, right_hand_side), atol=1e-8
+    )
+    threaded = make_jaxpr(lambda values: run(values, right_hand_side))(data)
+    assert _count_primitive(threaded.jaxpr, "analyze") == 1
+
+    def loss(function):
+        return lambda values: jnp.sum(function(values, right_hand_side) ** 2)
+
+    assert jnp.allclose(
+        jax.jit(jax.grad(loss(run)))(data), jax.grad(loss(fn))(data), atol=1e-8
+    )
+
+
+def _analysis_count(function, *arguments) -> int:
+    """Count the analyses in the jaxpr of `function`, which includes a backward pass."""
+    return _count_primitive(make_jaxpr(function)(*arguments).jaxpr, "analyze")
+
+
+@pytest.mark.cpu_only
+def test_custom_vjp_backward_solves_reuse_the_forward_analysis() -> None:
+    """The backward function solves the transposed system. It is traced, so its solve is
+    found, and the transposed update reuses the analysis of the forward solves."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    fn = _function_calling_solve_twice(_custom_vjp_solve(tag, False))
+    run = splx.stateful_solve_transform(fn)
+    data, right_hand_side = _data(), _b1()
+
+    def loss(function):
+        return lambda values: jnp.sum(function(values, right_hand_side) ** 2)
+
+    assert _analysis_count(jax.grad(loss(fn)), data) == 4
+    assert _analysis_count(jax.grad(loss(run)), data) == 1
+    assert jnp.allclose(jax.grad(loss(run))(data), jax.grad(loss(fn))(data), atol=1e-8)
+
+
+@pytest.mark.cpu_only
+def test_custom_vjp_backward_may_branch_on_a_concrete_residual() -> None:
+    """A backward function can branch in Python on a residual that is a concrete value,
+    as the loop adjoints of `equinox` do, so such a residual is not traced."""
+    indices = _indices()
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+
+    def operator_of(data: jax.Array) -> splx.BCOOLinearOperator:
+        return splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)), tags=tag)
+
+    @jax.custom_vjp
+    def solve(data: jax.Array, right_hand_side: jax.Array) -> jax.Array:
+        return lx.linear_solve(operator_of(data), right_hand_side, splx.KLU()).value
+
+    def solve_forward(data, right_hand_side):
+        return solve(data, right_hand_side), (data, True)
+
+    def solve_backward(residuals, cotangent):
+        data, scaled = residuals
+        adjoint = lx.linear_solve(
+            operator_of(data).transpose(), cotangent, splx.KLU()
+        ).value
+        # The branch is taken on a value, which a traced residual would not allow.
+        if scaled:
+            adjoint = 2.0 * adjoint
+        return jnp.zeros_like(data), adjoint
+
+    solve.defvjp(solve_forward, solve_backward)
+
+    def fn(data, right_hand_side):
+        return solve(data, right_hand_side) + solve(1.1 * data, right_hand_side)
+
+    run = splx.stateful_solve_transform(fn)
+    data, right_hand_side = _data(), _b1()
+    assert jnp.allclose(
+        jax.grad(lambda b: jnp.sum(run(data, b) ** 2))(right_hand_side),
+        jax.grad(lambda b: jnp.sum(fn(data, b) ** 2))(right_hand_side),
+        atol=1e-8,
+    )
 
 
 @pytest.mark.cpu_only
