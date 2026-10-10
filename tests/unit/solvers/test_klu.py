@@ -15,11 +15,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Generator
 
+import jax
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
 import pytest
-from jax.experimental.sparse import BCOO
+from jax.experimental.sparse import BCOO, BCSR
 
 import splineax as splx
 from splineax import KLU, BCOOLinearOperator
@@ -94,7 +95,7 @@ def test_update_same_pattern_reuses_symbol_and_refactors() -> None:
     assert refactor_calls, "update did not attempt a pivot-reusing refactor"
 
 
-def _square_jacobian_function(x: jnp.ndarray, args: object) -> jnp.ndarray:
+def _square_jacobian_function(x: jax.Array, args: object) -> jax.Array:
     """A square nonlinear map with an invertible banded Jacobian."""
     del args
     return 3.0 * x + x**2 + 0.5 * jnp.roll(x, 1) * x
@@ -217,3 +218,165 @@ def test_init_symbolic_defers_numeric() -> None:
     operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     updated = solver.update(state, operator)
     assert updated.numeric is not None
+
+
+def _transposed_solution(matrix: jax.Array) -> jax.Array:
+    """The solution of `matrix^T x = RIGHT_HAND_SIDE`, computed densely."""
+    return jnp.linalg.solve(np.asarray(matrix).T, np.asarray(RIGHT_HAND_SIDE))
+
+
+@pytest.mark.cpu_only
+def test_update_with_the_transposed_operator_needs_no_factorization() -> None:
+    """An operator built on the state's own values, such as its transpose, is solved
+    through `tsolve` with the factorization the state holds."""
+    operator = BCOOLinearOperator(
+        BCOO.fromdense(SQUARE_MATRIX),
+        tags=splx.sparsity_pattern_tag(BCOO.fromdense(SQUARE_MATRIX)),
+    )
+    solver = KLU()
+    with (
+        _spy("analyze") as analyze_calls,
+        _spy("factor") as factor_calls,
+        _spy("refactor_with_status") as refactor_calls,
+        _spy("tsolve_with_numeric_with_status") as tsolve_calls,
+    ):
+        state = solver.init(operator, {})
+        solution, _ = splx.linear_solve(
+            operator.transpose(), RIGHT_HAND_SIDE, solver, state=state
+        )
+    assert len(analyze_calls) == 1
+    assert len(factor_calls) == 1
+    assert not refactor_calls
+    assert tsolve_calls
+    assert jnp.allclose(solution.value, _transposed_solution(SQUARE_MATRIX), atol=1e-5)
+
+
+@pytest.mark.cpu_only
+def test_update_with_a_transposed_pattern_refactors_the_analysis() -> None:
+    """New values on the transposed pattern reuse the symbolic analysis and the pivot
+    order, so only a refactorization runs."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(SQUARE_MATRIX))
+    first = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX), tags=tag)
+    other_matrix = 1.5 * SQUARE_MATRIX
+    second = BCOOLinearOperator(BCOO.fromdense(other_matrix), tags=tag)
+    solver = KLU()
+    with (
+        _spy("analyze") as analyze_calls,
+        _spy("refactor_with_status") as refactor_calls,
+    ):
+        state = solver.init(first, {})
+        solution, updated = splx.linear_solve(
+            second.transpose(), RIGHT_HAND_SIDE, solver, state=state
+        )
+    assert updated.transposed
+    assert len(analyze_calls) == 1
+    assert refactor_calls
+    assert jnp.allclose(solution.value, _transposed_solution(other_matrix), atol=1e-5)
+
+
+@pytest.mark.cpu_only
+def test_state_follows_an_operator_between_a_pattern_and_its_transpose() -> None:
+    """A state that is already transposed accepts the transposed pattern again and the
+    original one, and each solve is correct with one analysis."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(SQUARE_MATRIX))
+    solver = KLU()
+    scales = (1.0, 1.5, 2.0, 0.75)
+    operators = [
+        BCOOLinearOperator(BCOO.fromdense(scale * SQUARE_MATRIX), tags=tag)
+        for scale in scales
+    ]
+    with _spy("analyze") as analyze_calls:
+        state = solver.init(operators[0], {})
+        orientations = []
+        for index, operator in enumerate(operators):
+            uses_transpose = index % 4 in (1, 2)
+            solved_operator = operator.transpose() if uses_transpose else operator
+            solution, state = splx.linear_solve(
+                solved_operator, RIGHT_HAND_SIDE, solver, state=state
+            )
+            expected = jnp.linalg.solve(
+                np.asarray(solved_operator.as_matrix()), np.asarray(RIGHT_HAND_SIDE)
+            )
+            assert jnp.allclose(solution.value, expected, atol=1e-5)
+            orientations.append(state.transposed)
+    assert orientations == [False, True, True, False]
+    assert len(analyze_calls) == 1
+
+
+@pytest.mark.cpu_only
+def test_symbolic_state_updates_with_a_transposed_operator() -> None:
+    """A state that holds only an analysis factorizes the transposed operator once."""
+    solver = KLU()
+    state = solver.init_symbolic(BCOO.fromdense(SQUARE_MATRIX))
+    operator = BCOOLinearOperator(
+        BCOO.fromdense(SQUARE_MATRIX),
+        tags=splx.sparsity_pattern_tag(BCOO.fromdense(SQUARE_MATRIX)),
+    )
+    with _spy("analyze") as analyze_calls, _spy("factor") as factor_calls:
+        solution, updated = splx.linear_solve(
+            operator.transpose(), RIGHT_HAND_SIDE, solver, state=state
+        )
+    assert not analyze_calls
+    assert len(factor_calls) == 1
+    assert updated.transposed
+    assert jnp.allclose(solution.value, _transposed_solution(SQUARE_MATRIX), atol=1e-5)
+
+
+@pytest.mark.cpu_only
+def test_transposed_update_composes_with_jit_and_grad() -> None:
+    """The transposed update traces under `jit`, and its gradient with respect to the
+    values matches the dense one."""
+    pattern = BCOO.fromdense(SQUARE_MATRIX)
+    tag = splx.sparsity_pattern_tag(pattern)
+    solver = KLU()
+
+    def loss(values: jax.Array) -> jax.Array:
+        operator = BCOOLinearOperator(
+            BCOO((values, pattern.indices), shape=pattern.shape), tags=tag
+        )
+        state = solver.init(operator, {})
+        solution, _ = splx.linear_solve(
+            operator.transpose(), RIGHT_HAND_SIDE, solver, state=state
+        )
+        return jnp.sum(solution.value**2)
+
+    def dense_loss(values: jax.Array) -> jax.Array:
+        matrix = BCOO((values, pattern.indices), shape=pattern.shape).todense()
+        return jnp.sum(jnp.linalg.solve(matrix.T, RIGHT_HAND_SIDE) ** 2)
+
+    values = pattern.data
+    assert jnp.allclose(jax.jit(loss)(values), dense_loss(values), atol=1e-8)
+    assert jnp.allclose(
+        jax.jit(jax.grad(loss))(values), jax.grad(dense_loss)(values), atol=1e-6
+    )
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("storage", ["bcsr", "bcoo_from_dense"])
+def test_transposed_operator_with_its_own_entry_order_reuses_the_analysis(
+    storage: str,
+) -> None:
+    """A transpose stored in its own order, as a `BCSR` or a freshly built `BCOO`, holds
+    the state's entries in another order. The values are gathered into the state's order,
+    and the analysis is reused."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(SQUARE_MATRIX))
+    first = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX), tags=tag)
+    other_matrix = 1.5 * SQUARE_MATRIX
+    transposed_matrix = other_matrix.T
+    if storage == "bcsr":
+        stored = BCSR.fromdense(transposed_matrix)
+        operator = splx.BCSRLinearOperator(
+            stored, tags=splx.sparsity_pattern_tag(stored)
+        )
+    else:
+        stored = BCOO.fromdense(transposed_matrix)
+        operator = BCOOLinearOperator(stored, tags=splx.sparsity_pattern_tag(stored))
+    solver = KLU()
+    with _spy("analyze") as analyze_calls:
+        state = solver.init(first, {})
+        solution, updated = splx.linear_solve(
+            operator, RIGHT_HAND_SIDE, solver, state=state
+        )
+    assert updated.transposed
+    assert len(analyze_calls) == 1
+    assert jnp.allclose(solution.value, _transposed_solution(other_matrix), atol=1e-5)
