@@ -202,8 +202,6 @@ listed here.
   `custom_vjp` function is threaded, and so are the solves in its rule and backward
   function. A call is only found when a solve appears in its primal function. A solve that
   appears only in a rule or a backward function runs on its own.
-- **Custom derivatives can be left alone.** Set `pass_through_custom_diff=True` to run these
-  functions as they are. Their solves then work without reusing a factorization.
 - **Multiple solve families may not work.** The transform threads one state, so a single loop that
   interleaves two different solvers or patterns may not work, or perform poorly because factorizations
   are never reused. You might be able to use `filter_solver` and to separate them and apply the

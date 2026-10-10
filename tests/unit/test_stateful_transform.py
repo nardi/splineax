@@ -4,8 +4,8 @@ The transform is checked against the untransformed function on hand-written algo
 the benchmark is exact: same output, plus a threaded state that reuses a factorization. It
 covers correctness, factorization reuse, composition with `jit`/`vmap`/`jacfwd`/`jacrev`,
 per-signature caching, the filter-primitive round-trip, threading through a `cond`, `scan`,
-`while_loop`, and `remat`, the opt-in custom-diff pass-through, the lifecycle paths, and the
-solver filter. The tests solve through the CPU-only `KLU`, and a GPU pair repeats the
+`while_loop`, `remat`, `custom_jvp`, and `custom_vjp`, the lifecycle paths, and the solver
+filter. The tests solve through the CPU-only `KLU`, and a GPU pair repeats the
 threading and reuse checks through `CuDSS`.
 """
 
@@ -955,53 +955,6 @@ def test_custom_vjp_backward_may_branch_on_a_concrete_residual() -> None:
         jax.grad(lambda b: jnp.sum(fn(data, b) ** 2))(right_hand_side),
         atol=1e-8,
     )
-
-
-@pytest.mark.cpu_only
-def test_custom_jvp_solve_passes_through_when_opted_in() -> None:
-    """With `pass_through_custom_diff`, a solve inside a `custom_jvp` runs unthreaded, so the
-    output matches and the primitive is left in the jaxpr rather than rewritten."""
-    indices = _indices()
-
-    @jax.custom_jvp
-    def solve(data, b):
-        operator = splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)))
-        return lx.linear_solve(operator, b, splx.KLU()).value
-
-    @solve.defjvp
-    def _solve_jvp(primals, tangents):
-        (data, b), (_, b_dot) = primals, tangents
-        return solve(data, b), b_dot
-
-    run = splx.stateful_solve_transform(solve, pass_through_custom_diff=True)
-    assert jnp.allclose(run(_data(), _b1()), solve(_data(), _b1()), atol=1e-8)
-    threaded = make_jaxpr(lambda d: run(d, _b1()))(_data())
-    assert _count_primitive(threaded.jaxpr, "custom_jvp_call") >= 1
-
-
-@pytest.mark.cpu_only
-def test_custom_vjp_solve_passes_through_when_opted_in() -> None:
-    """The pass-through covers `custom_vjp` too, so a solve inside one runs unthreaded and
-    the primitive is left in the jaxpr."""
-    indices = _indices()
-
-    @jax.custom_vjp
-    def solve(data, b):
-        operator = splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)))
-        return lx.linear_solve(operator, b, splx.KLU()).value
-
-    def solve_fwd(data, b):
-        return solve(data, b), None
-
-    def solve_bwd(_, cotangent):
-        return None, cotangent
-
-    solve.defvjp(solve_fwd, solve_bwd)
-
-    run = splx.stateful_solve_transform(solve, pass_through_custom_diff=True)
-    assert jnp.allclose(run(_data(), _b1()), solve(_data(), _b1()), atol=1e-8)
-    threaded = make_jaxpr(lambda d: run(d, _b1()))(_data())
-    assert _count_primitive(threaded.jaxpr, "custom_vjp_call") >= 1
 
 
 @pytest.mark.cpu_only
