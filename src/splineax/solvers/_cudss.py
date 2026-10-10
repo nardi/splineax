@@ -12,7 +12,7 @@ from jax.experimental.sparse import BCOO, BCSR
 from jax.typing import DTypeLike
 from jaxtyping import Array, Inexact, Integer, PyTree
 from lineax import AbstractLinearOperator
-from lineax._solution import RESULTS
+from lineax._solution import RESULTS, Solution
 from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
     PackedStructures,
@@ -347,7 +347,7 @@ class _CuDSSState(eqx.Module):
         in a later `update`, will be ordered after this call.
         """
         record_operation("track")
-        value = getattr(solution, "value", solution)
+        value = solution.value if isinstance(solution, Solution) else solution
         # The witness only establishes an execution-order dependency, so stop its
         # gradient: a tracked state must stay usable inside `grad` of the solve.
         witness = jax.lax.stop_gradient(value)

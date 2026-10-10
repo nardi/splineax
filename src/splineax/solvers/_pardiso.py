@@ -8,7 +8,7 @@ from entangle_jax import entangle
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from lineax import AbstractLinearOperator
-from lineax._solution import RESULTS
+from lineax._solution import RESULTS, Solution
 from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
     PackedStructures,
@@ -30,6 +30,7 @@ from splineax.solvers._sparse import (
     sparse_operator,
     sparsity_pattern_tag,
     sparsity_reuse_block,
+    update_for_transposed_pattern,
     update_then_compute,
     warn_if_unsorted,
 )
@@ -198,7 +199,7 @@ class _PardisoState(eqx.Module):
         if self.token is None:
             return self
         record_operation("track")
-        value = getattr(solution, "value", solution)
+        value = solution.value if isinstance(solution, Solution) else solution
         # The witness only establishes an execution-order dependency, so stop its
         # gradient: a tracked state must stay usable inside `grad` of the solve.
         witness = jax.lax.stop_gradient(value)
@@ -365,7 +366,6 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         the state's pattern and an analysis already exists, only the numeric factorization
         is redone. Otherwise the operator is analyzed from scratch.
         """
-        del options
         if operator is state.operator:
             # Nothing changed, so this is a no-op.
             record_operation(
@@ -383,6 +383,12 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             reuse_block: str | None = "Symbolic-only state"
         else:
             reuse_block = sparsity_reuse_block(state.sparsity_tag, tag)
+        if reuse_block is not None:
+            transposed_state = update_for_transposed_pattern(
+                self, state, operator, tag, options, "Pardiso"
+            )
+            if transposed_state is not None:
+                return transposed_state
         if reuse_block is None:
             # Same pattern, new values. Refactor against the stored analysis.
             record_operation(
@@ -494,6 +500,11 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             )
             solution = unravel_solution(solution[0], state.packed_structures)
             return solution, RESULTS.successful, {}
+
+    def transposes_cheaply(self, state: _PardisoState) -> bool:
+        """Whether `transpose` reuses the factorization. It always does, natively."""
+        del state
+        return True
 
     def transpose(
         self, state: _PardisoState, options: dict[str, Any]
