@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import lineax as lx
 import numpy as np
 import pytest
-from jax.experimental.sparse import BCOO
+from jax.experimental.sparse import BCOO, BCSR
 
 import splineax as splx
 import splineax.solvers._pardiso as _pardiso_module
@@ -149,6 +149,89 @@ def test_transpose_reuses_factorization() -> None:
     assert not analyze_calls, "transpose re-analyzed the pattern"
     assert not factor_calls, "transpose re-factored the matrix"
     assert jnp.allclose(solution, expected, atol=1e-5)
+
+
+@pytest.mark.cpu_only
+def test_update_with_the_transposed_operator_needs_no_factorization() -> None:
+    """An operator built on the state's own values, such as its transpose, is solved
+    through the factorization the state holds, with no analyze or factor."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(SQUARE_MATRIX))
+    operator = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX), tags=tag)
+    solver = Pardiso()
+    state = solver.init(operator, {})
+    with _spy("analyze") as analyze_calls, _spy("factor") as factor_calls:
+        updated = solver.update(state, operator.transpose())
+        solution = solver.compute(updated, RIGHT_HAND_SIDE, {})[0]
+    assert updated.transposed
+    assert updated.token is state.token
+    assert not analyze_calls
+    assert not factor_calls
+    expected = jnp.linalg.solve(
+        np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
+    )
+    assert jnp.allclose(solution, expected, atol=1e-5)
+
+
+@pytest.mark.cpu_only
+def test_update_with_a_transposed_pattern_refactors_the_analysis() -> None:
+    """New values on the transposed pattern are factorized against the analysis the state
+    holds, so the native analysis count stays at one."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(SQUARE_MATRIX))
+    first = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX), tags=tag)
+    other_matrix = 1.5 * SQUARE_MATRIX
+    second = BCOOLinearOperator(BCOO.fromdense(other_matrix), tags=tag)
+    solver = Pardiso()
+    with _spy("analyze") as analyze_calls:
+        state = solver.init(first, {})
+        updated = solver.update(state, second.transpose())
+    solution = solver.compute(updated, RIGHT_HAND_SIDE, {})[0]
+    assert updated.transposed
+    assert len(analyze_calls) == 1
+    assert _ffi.analysis_count(updated.token.id) == 1
+    expected = jnp.linalg.solve(np.asarray(other_matrix).T, np.asarray(RIGHT_HAND_SIDE))
+    assert jnp.allclose(solution, expected, atol=1e-5)
+    updated.release()
+
+
+@pytest.mark.cpu_only
+def test_update_with_a_transpose_in_its_own_entry_order() -> None:
+    """A transpose stored as a `BCSR` holds the state's entries in another order. The values
+    are gathered into the state's order, and the analysis is reused."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(SQUARE_MATRIX))
+    first = BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX), tags=tag)
+    other_matrix = 1.5 * SQUARE_MATRIX
+    stored = BCSR.fromdense(other_matrix.T)
+    operator = splx.BCSRLinearOperator(stored, tags=splx.sparsity_pattern_tag(stored))
+    solver = Pardiso()
+    with _spy("analyze") as analyze_calls:
+        state = solver.init(first, {})
+        updated = solver.update(state, operator)
+    solution = solver.compute(updated, RIGHT_HAND_SIDE, {})[0]
+    assert updated.transposed
+    assert len(analyze_calls) == 1
+    expected = jnp.linalg.solve(np.asarray(other_matrix).T, np.asarray(RIGHT_HAND_SIDE))
+    assert jnp.allclose(solution, expected, atol=1e-5)
+    updated.release()
+
+
+@pytest.mark.cpu_only
+def test_symbolic_state_updates_with_a_transposed_operator() -> None:
+    """A state from `init_symbolic` defers its analysis, so the first update with a
+    transposed operator analyzes once and the state solves the transposed system."""
+    solver = Pardiso()
+    state = solver.init_symbolic(BCOO.fromdense(SQUARE_MATRIX))
+    pattern = BCOO.fromdense(SQUARE_MATRIX)
+    operator = BCOOLinearOperator(pattern, tags=splx.sparsity_pattern_tag(pattern))
+    with _spy("analyze") as analyze_calls:
+        updated = solver.update(state, operator.transpose())
+    solution = solver.compute(updated, RIGHT_HAND_SIDE, {})[0]
+    assert updated.transposed
+    assert len(analyze_calls) == 1
+    expected = jnp.linalg.solve(
+        np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)
+    )
+    assert jnp.allclose(solution, expected, atol=1e-5)
+    updated.release()
 
 
 @pytest.mark.cpu_only

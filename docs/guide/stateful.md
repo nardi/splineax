@@ -125,7 +125,8 @@ separately still compare equal when their indices match. With no argument, or un
 where the indices are traced, `sparsity_pattern_tag()` instead returns a marker you thread
 onto every operator sharing the pattern. Jacobian operators at different points that carry
 one tag from [`splineax.sparsity_coloring_tag`][] reuse a factorization in the same way
-(see [Operators](operators.md#reuse-across-points)).
+(see [Operators](operators.md#reuse-across-points)). Transposing a tagged operator will
+let some solvers reuse factorizations as well.
 
 There is also a `sparse_indices_sorted` tag. Attaching it to an operator asserts its
 indices are already row-major sorted, so `Pardiso` and `Spsolve` skip the sort they would
@@ -170,23 +171,26 @@ The API is the same across solvers, but what they reuse differs.
 
 `KLU` keeps two handles, a symbolic analysis and a numeric factorization. `init` builds
 both. `update` on a matching pattern reuses the analysis and rebuilds the numeric factor
-for the new values. `transpose` reuses both and solves the transposed system directly.
+for the new values, also when the new operator has the transposed pattern. `transpose`
+reuses both and solves the transposed system directly.
 
 `Pardiso` keeps one factorization handle. Under its default weighted matching, an analysis
 that ignores the values is not sound, so `init_symbolic` defers the analysis. It records
 the pattern only, and the first `update` with real values runs analyze and factor. Later
-updates on the same pattern refactor while reusing that analysis.
+updates on the same pattern refactor while reusing that analysis. Like `KLU`, it reuses
+the handle for an operator with the transposed pattern.
 
 `CuDSS` keeps one token that carries its analysis forward. `init` analyzes and factorizes,
-`init_symbolic` analyzes only, and `update` on a matching pattern reruns the numeric factor
-from the stored token. cuDSS renames the token's cache entry as it advances a phase rather
-than dropping the analysis, so `update` reuses the analysis without re-running it. With
-`CuDSSReordering.COLAMD` or `CuDSSReordering.BTF_COLAMD`, `update` also reuses the
+`init_symbolic` analyzes only, and `update` on a matching pattern reruns the numeric
+factor from the stored token. cuDSS renames the token's cache entry as it advances a phase
+rather than dropping the analysis, so `update` reuses the analysis without re-running it.
+With `CuDSSReordering.COLAMD` or `CuDSSReordering.BTF_COLAMD`, `update` also reuses the
 previous pivots through cuDSS's refactorization, and factorizes fresh when the reused
-pivots come out badly scaled, the same guard `KLU` uses. Under the other reorderings
-cuDSS has no cheaper refactorization, so `update` always factorizes. `transpose` reuses
-the factors for a symmetric matrix, and builds a genuine `A^T`
-factorization for a general one, since cuDSS has no transpose solve.
+pivots come out badly scaled, the same guard `KLU` uses. Under the other reorderings cuDSS
+has no cheaper refactorization, so `update` always factorizes. `transpose` reuses the
+factors for a symmetric matrix, and builds a genuine `A^T` factorization for a general
+one, since cuDSS has no transpose solve. For the same reason `update` analyzes an operator
+with the transposed pattern again.
 
 `Spsolve` has no separate factorization phase, so the reuse API is a set of no-ops for
 parity. `update` rebuilds the state, `release` frees nothing, and `track` returns the

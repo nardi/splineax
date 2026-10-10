@@ -1,3 +1,4 @@
+import functools
 import warnings
 from typing import (
     Any,
@@ -31,6 +32,7 @@ from lineax._solution import RESULTS, Solution
 from splineax._profile import (
     order_slot_scope,
     profiling_active,
+    record_operation,
     reserve_order_slot,
     sparsity_hash,
 )
@@ -351,6 +353,224 @@ def sparsity_reuse_block(
     return None
 
 
+@runtime_checkable
+class TransposableTag(Protocol):
+    """A sparsity-pattern tag that can give the tag of the transposed pattern."""
+
+    def transpose(self) -> object: ...
+
+
+@runtime_checkable
+class SparseValues(Protocol):
+    """A sparse matrix that stores its values in a `data` array."""
+
+    data: Array
+
+
+@runtime_checkable
+class SparseMatrixOperator(Protocol):
+    """An operator built on a sparse matrix, such as a `BCOOLinearOperator`."""
+
+    matrix: SparseValues
+
+
+@runtime_checkable
+class OperatorWithTags(Protocol):
+    """An operator that carries a set of tags."""
+
+    tags: frozenset[object]
+
+
+@runtime_checkable
+class TrackableState(Protocol):
+    """A solver state that can order later operations after a solution."""
+
+    def track(self, solution: Any) -> Any: ...
+
+
+def _match_transposed_entries(
+    state_tag: _ContentPatternTag, operator_tag: _ContentPatternTag
+) -> Integer[np.ndarray, " nse"] | None:
+    """Find which operator entry holds each entry of the state's matrix, if the operator is
+    its transpose.
+
+    Returns `entry_order` with `operator_values[entry_order]` listing the operator's values
+    in the state's entry order, or None when the two patterns are not transposes of each
+    other.
+    """
+    rows, columns = state_tag.shape
+    if tuple(operator_tag.shape) != (columns, rows):
+        return None
+    state_indices = np.asarray(state_tag.indices, dtype=np.int64)
+    operator_indices = np.asarray(operator_tag.indices, dtype=np.int64)
+    if state_indices.shape != operator_indices.shape:
+        return None
+    # An operator entry (i, j) is the state entry (j, i), so both get the same flat key.
+    operator_keys = operator_indices[:, 0] * rows + operator_indices[:, 1]
+    state_keys = state_indices[:, 1] * rows + state_indices[:, 0]
+    ascending_order = np.argsort(operator_keys, kind="stable")
+    sorted_keys = operator_keys[ascending_order]
+    has_duplicates = np.any(sorted_keys[1:] == sorted_keys[:-1])
+    if has_duplicates or sorted_keys.size == 0:
+        return None
+    matching_position = np.minimum(
+        np.searchsorted(sorted_keys, state_keys), sorted_keys.size - 1
+    )
+    if np.any(sorted_keys[matching_position] != state_keys):
+        return None
+    return ascending_order[matching_position]
+
+
+@functools.lru_cache(maxsize=32)
+def transposed_entry_order(
+    state_tag: object | None, operator_tag: object | None
+) -> tuple[bool, Integer[np.ndarray, " nse"] | None]:
+    """Whether the operator's pattern is the transpose of the pattern a state analyzed.
+
+    Returns `(is_transpose, entry_order)`. When `entry_order` is None the entries are
+    aligned, which holds for a tag and its own transpose. Otherwise
+    `operator_values[entry_order]` lists the operator's values in the state's entry order,
+    which happens for a transpose that was sorted again, such as one stored as a `BCSR`.
+    A factorization of the state's matrix then solves the operator through a transposed
+    solve.
+    """
+    if state_tag is None or operator_tag is None or state_tag == operator_tag:
+        return False, None
+    if not isinstance(state_tag, TransposableTag):
+        return False, None
+    if state_tag.transpose() == operator_tag:
+        return True, None
+    if isinstance(state_tag, _ContentPatternTag) and isinstance(
+        operator_tag, _ContentPatternTag
+    ):
+        entry_order = _match_transposed_entries(state_tag, operator_tag)
+        return entry_order is not None, entry_order
+    return False, None
+
+
+def shares_values(
+    operator: AbstractLinearOperator, other: AbstractLinearOperator
+) -> bool:
+    """Whether two sparse operators are built on the same array of values.
+
+    This is a trace-time identity check, so it holds for an operator and its transpose, and
+    it does not hold for two operators that merely have equal values.
+    """
+    return (
+        isinstance(operator, SparseMatrixOperator)
+        and isinstance(other, SparseMatrixOperator)
+        and operator.matrix.data is other.matrix.data
+    )
+
+
+class TransposableState(Protocol):
+    """The fields of a solver state that an update with a transposed operator reads."""
+
+    @property
+    def operator(self) -> AbstractLinearOperator | None: ...
+
+    @property
+    def transposed(self) -> bool: ...
+
+    @property
+    def sparsity_tag(self) -> object | None: ...
+
+    @property
+    def shape(self) -> tuple[int, ...]: ...
+
+
+_TransposableStateT = TypeVar("_TransposableStateT", bound=TransposableState)
+
+
+class TransposingSolver(Protocol[_TransposableStateT]):
+    """A solver whose `transpose` can reuse the factorization of a state.
+
+    `options` is the solver options dictionary of lineax, whose values depend on the solver.
+    """
+
+    def transposes_cheaply(self, state: _TransposableStateT) -> bool:
+        """Whether `transpose` reuses the factorization and does not factorize again."""
+        ...
+
+    def transpose(
+        self, state: _TransposableStateT, options: dict[str, Any]
+    ) -> tuple[_TransposableStateT, dict[str, Any]]: ...
+
+    def update(
+        self,
+        state: _TransposableStateT,
+        operator: AbstractLinearOperator,
+        options: dict[str, Any],
+    ) -> _TransposableStateT: ...
+
+
+def update_for_transposed_pattern(
+    solver: TransposingSolver[_TransposableStateT],
+    state: _TransposableStateT,
+    operator: AbstractLinearOperator,
+    tag: object | None,
+    options: dict[str, Any],
+    solver_name: str,
+) -> _TransposableStateT | None:
+    """Fold in an operator whose pattern is the transpose of the state's analysis.
+
+    Returns the updated state, or None when this does not apply and the caller should go on
+    with its usual `update`. It applies when the solver reports `transposes_cheaply(state)`
+    and the operator's tag is the transpose of the state's tag.
+
+    The transposed operator is the matrix the state analyzed, so the state is folded with
+    it through the solver's own `update` and then transposed. That reuses the analysis
+    and the pivot order. An operator built on the state's own values, such as the transpose
+    of the operator the state was built on, needs no update at all.
+    """
+    is_transpose, entry_order = transposed_entry_order(state.sparsity_tag, tag)
+    if not is_transpose or not solver.transposes_cheaply(state):
+        return None
+    operator_matrix = sparse_operator(operator, solver_name)
+    if (
+        entry_order is None
+        and state.operator is not None
+        and shares_values(operator_matrix, state.operator)
+    ):
+        record_operation(
+            "update",
+            inputs=lambda: profile_inputs(operator, tag, state.shape),
+            outputs={
+                "outcome": "transposed",
+                "reason": "Transpose of the state's operator",
+            },
+        )
+        return state if state.transposed else solver.transpose(state, {})[0]
+    state_tag = state.sparsity_tag
+    if isinstance(state_tag, _ContentPatternTag):
+        # Build the state's matrix from the operator's values, in the state's entry order
+        # and with the state's own tag. The tag knows whether its entries are sorted, which
+        # a double transpose of a `BCOO` would forget.
+        matrix_values = operator_matrix.matrix.data
+        if entry_order is not None:
+            matrix_values = matrix_values[jnp.asarray(entry_order)]
+        state_indices = np.asarray(state_tag.indices, dtype=np.int64)
+        entry_keys = state_indices[:, 0] * state_tag.shape[1] + state_indices[:, 1]
+        analyzed_operator = BCOOLinearOperator(
+            BCOO(
+                (matrix_values, jnp.asarray(state_indices, dtype=jnp.int32)),
+                shape=tuple(state_tag.shape),
+                indices_sorted=bool(np.all(entry_keys[1:] >= entry_keys[:-1])),
+                unique_indices=True,
+            ),
+            tags=state_tag,
+        )
+    else:
+        # A tag without indices only supports entries that are already aligned.
+        analyzed_operator = operator_matrix.transpose()
+    # A transposed state solves the transposed orientation of the matrix it factorized,
+    # and the operator to fold in is that matrix.
+    untransposed_state = solver.transpose(state, {})[0] if state.transposed else state
+    updated_state = solver.update(untransposed_state, analyzed_operator, options)
+    record_operation("transpose", outputs={"reason": "Transposed sparsity tag"})
+    return solver.transpose(updated_state, {})[0]
+
+
 def operator_pattern_tag(operator: AbstractLinearOperator) -> PatternTag | None:
     """Return the operator's sparsity-pattern tag, or None if it carries none.
 
@@ -359,7 +579,9 @@ def operator_pattern_tag(operator: AbstractLinearOperator) -> PatternTag | None:
     by one `operator_at` factory, and any BCOO materialised from them, reuse a factorization
     without the caller tagging them.
     """
-    return find_pattern_tag(getattr(operator, "tags", frozenset()))
+    if not isinstance(operator, OperatorWithTags):
+        return None
+    return find_pattern_tag(operator.tags)
 
 
 _StateT = TypeVar("_StateT")
@@ -603,7 +825,7 @@ def _stateful_solve_impl(
     solution = Solution(value=value, result=result, state=state, stats=stats)
     # Order any later `release` after this solve. A no-op for solvers whose state owns
     # nothing, such as `Spsolve`.
-    if hasattr(state, "track"):
+    if isinstance(state, TrackableState):
         state = state.track(solution)
     return solution, state
 
@@ -662,7 +884,7 @@ def _stateful_solve_jvp(
     has_operator_tangent = _has_tangent(t_operator)
     if not (has_vector_tangent or has_operator_tangent):
         out_state = prepared
-        if hasattr(out_state, "track"):
+        if isinstance(out_state, TrackableState):
             out_state = out_state.track(solution)
         return (solution, out_state), (
             _tangent_zeros(solution),
@@ -693,7 +915,7 @@ def _stateful_solve_jvp(
     # The tangent solve still reads the prepared state's tokens, which the track
     # chains from, keeping it inside the primal's factorization window.
     out_state = prepared
-    if hasattr(out_state, "track"):
+    if isinstance(out_state, TrackableState):
         out_state = out_state.track(solution)
 
     # Only the solution value carries a tangent. The result code, the stats, and the

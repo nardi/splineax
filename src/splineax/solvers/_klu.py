@@ -9,7 +9,7 @@ from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
 from klujax import NumericToken, SymbolToken
 from lineax import AbstractLinearOperator
-from lineax._solution import RESULTS
+from lineax._solution import RESULTS, Solution
 from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import (
     PackedStructures,
@@ -30,6 +30,7 @@ from splineax.solvers._sparse import (
     sparse_operator,
     sparsity_pattern_tag,
     sparsity_reuse_block,
+    update_for_transposed_pattern,
     update_then_compute,
 )
 
@@ -119,7 +120,7 @@ class _KLUState(eqx.Module):
         this call.
         """
         record_operation("track")
-        value = getattr(solution, "value", solution)
+        value = solution.value if isinstance(solution, Solution) else solution
         # The witness only establishes an execution-order dependency, so stop its
         # gradient: a tracked state must stay usable inside `grad` of the solve.
         witness = jax.lax.stop_gradient(value)
@@ -388,6 +389,12 @@ class KLU(AbstractLinearSolver[_KLUState]):
             return state
         tag = operator_pattern_tag(operator)
         reuse_block = sparsity_reuse_block(state.sparsity_tag, tag)
+        if reuse_block is not None:
+            transposed_state = update_for_transposed_pattern(
+                self, state, operator, tag, options, "KLU"
+            )
+            if transposed_state is not None:
+                return transposed_state
         if reuse_block is None:
             # Same pattern, new values. Reuse the symbolic analysis.
             record_operation(
@@ -484,6 +491,11 @@ class KLU(AbstractLinearSolver[_KLUState]):
             record_operation(operation, "KLU", dynamic={"rebuild": rebuild})
             solution = unravel_solution(x, state.packed_structures)
             return solution, RESULTS.successful, {}
+
+    def transposes_cheaply(self, state: _KLUState) -> bool:
+        """Whether `transpose` reuses the factorization. It always does, through `tsolve`."""
+        del state
+        return True
 
     def transpose(
         self, state: _KLUState, options: dict[str, Any]

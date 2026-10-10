@@ -242,6 +242,24 @@ def test_update_same_operator_is_a_no_op(
     assert len(fake_cudss.factorize_calls) == 1
 
 
+def test_update_with_a_transposed_pattern_analyzes_again(
+    fake_cudss: FakeCuDSS,
+) -> None:
+    """cuDSS has no transposed solve, so a factorization of `A` cannot serve an operator
+    with the transposed pattern. `update` analyzes the new operator again."""
+    solver = CuDSS()
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    first = BCOOLinearOperator(sparsity, tags=splx.sparsity_pattern_tag(sparsity))
+    state = solver.init(first, {})
+    updated = solver.update(state, first.transpose())
+    solution = solver.compute(updated, RIGHT_HAND_SIDE, {})[0]
+    assert len(fake_cudss.analyze_calls) == 2
+    assert jnp.allclose(
+        solution,
+        jnp.linalg.solve(np.asarray(SQUARE_MATRIX).T, np.asarray(RIGHT_HAND_SIDE)),
+    )
+
+
 def test_update_reuses_analysis_across_shared_pattern(
     fake_cudss: FakeCuDSS,
 ) -> None:
