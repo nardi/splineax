@@ -10,6 +10,7 @@ from typing import Any
 
 import equinox as eqx
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 import pytest

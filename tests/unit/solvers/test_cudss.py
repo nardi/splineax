@@ -553,7 +553,7 @@ def test_conj_complex_refactorizes(fake_cudss: FakeCuDSS) -> None:
     state.release()
 
     assert fake_cudss.refactorize_calls, "conj on a complex state should refactorize"
-    assert jnp.allclose(solution, _expected(np.asarray(COMPLEX_MATRIX).conj(), b))
+    assert jnp.allclose(solution, _expected(jnp.asarray(COMPLEX_MATRIX).conj(), b))
 
 
 # ---------------------------------------------------------------------------

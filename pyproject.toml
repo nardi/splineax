@@ -45,6 +45,14 @@ dev = [
 addopts = "--markdown-docs --markdown-docs-syntax superfences"
 testpaths = ["tests", "docs", "README.md"]
 
+[tool.ty.analysis]
+# The `cudss` extra is CUDA-only and not installed in CI, so `spineax` stays unresolved.
+allowed-unresolved-imports = ["spineax", "spineax.**"]
+
+[tool.ty.src]
+# Colab notebooks run outside the package and are not checked.
+exclude = ["notebooks"]
+
 [tool.ruff.lint]
 ignore = ["F722"]
 select = ["E4", "E7", "E9", "F", "I"]
