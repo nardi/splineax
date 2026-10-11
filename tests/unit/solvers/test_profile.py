@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import equinox as eqx
 import jax
@@ -29,9 +29,9 @@ from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 
 import splineax as splx
-from splineax import IterativeRefinement, ProfileRecord
+from splineax import HybridDirectIterative, IterativeRefinement, ProfileRecord
 from splineax._profile import _active, record_operation
-from splineax.solvers._sparse import _Sparsity
+from splineax.solvers._sparse import SparseLinearSolver, _Sparsity
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
@@ -472,12 +472,20 @@ class _JacobiSolver(lx.AbstractLinearSolver[_JacobiState]):
         )
 
 
+def _jacobi_refinement(tol: float, max_steps: int) -> HybridDirectIterative:
+    # The stand-in implements only `AbstractLinearSolver`, so the sparse protocol check
+    # rejects it. At runtime `IterativeRefinement` calls only the shared solver methods.
+    return IterativeRefinement(
+        cast(SparseLinearSolver[Any], _JacobiSolver()), tol=tol, max_steps=max_steps
+    )
+
+
 def test_iterative_refinement_records_steps(enable_x64: None) -> None:
     """Iterative refinement records one `refine_start`, one `refine_step` per correction with
     an increasing step and a non-increasing residual, and a converged `refine_result`, all as
     `IterativeRefinement.*` operations nested under a single `compute`."""
     operator = splx.BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
-    solver = IterativeRefinement(_JacobiSolver(), tol=1e-8, max_steps=50)
+    solver = _jacobi_refinement(tol=1e-8, max_steps=50)
     profile = splx.create_solve_profile()
     with profile:
         solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver).value
@@ -522,7 +530,7 @@ def test_refinement_exhausting_steps_still_records(enable_x64: None) -> None:
     """A refinement that exhausts `max_steps` without converging still records its
     `refine_start`, every `refine_step`, and a `refine_result` with
     `converged=False`."""
-    solver = IterativeRefinement(_JacobiSolver(), tol=1e-14, max_steps=3)
+    solver = _jacobi_refinement(tol=1e-14, max_steps=3)
     operator = splx.BCOOLinearOperator(BCOO.fromdense(SQUARE_MATRIX))
     profile = splx.create_solve_profile()
     with profile:

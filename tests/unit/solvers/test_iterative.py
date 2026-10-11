@@ -18,7 +18,7 @@ the tolerance.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import equinox as eqx
 import jax
@@ -46,6 +46,7 @@ from splineax import (
 )
 from splineax.solvers._iterative import HybridState
 from splineax.solvers._pardiso import _pardiso_available
+from splineax.solvers._sparse import SparseLinearSolver
 
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
@@ -115,6 +116,14 @@ class _JacobiSolver(lx.AbstractLinearSolver[_JacobiState]):
         return True
 
 
+def _jacobi_refinement(tol: float, max_steps: int) -> HybridDirectIterative:
+    # The stand-in implements only `AbstractLinearSolver`, so the sparse protocol check
+    # rejects it. At runtime `IterativeRefinement` calls only the shared solver methods.
+    return IterativeRefinement(
+        cast(SparseLinearSolver[Any], _JacobiSolver()), tol=tol, max_steps=max_steps
+    )
+
+
 def _relative_residual(
     operator: AbstractLinearOperator, solution: Array, vector: Array
 ) -> Array:
@@ -161,7 +170,7 @@ def test_refinement_converges_a_weak_solver(
     expected = jnp.linalg.solve(
         np.asarray(SQUARE_MATRIX, dtype=np.float64), np.asarray(right_hand_side)
     )
-    solver = IterativeRefinement(_JacobiSolver(), tol=1e-10, max_steps=200)
+    solver = _jacobi_refinement(tol=1e-10, max_steps=200)
     solution = lx.linear_solve(operator, right_hand_side, solver=solver)
     assert solution.result == RESULTS.successful
     assert jnp.allclose(solution.value, expected, atol=1e-8)
@@ -173,7 +182,7 @@ def test_returns_nan_when_max_steps_exhausted(
     """With too few steps to converge, the weak solver's refinement hits the step cap and
     returns NaN with `max_steps_reached` rather than a wrong answer reported as success."""
     operator = make_operator(SQUARE_MATRIX)
-    solver = IterativeRefinement(_JacobiSolver(), tol=1e-12, max_steps=1)
+    solver = _jacobi_refinement(tol=1e-12, max_steps=1)
     solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=solver, throw=False)
     assert solution.result == RESULTS.max_steps_reached
     assert jnp.all(jnp.isnan(solution.value))
@@ -185,8 +194,8 @@ def test_tighter_tol_reduces_the_residual(
     """A tighter tolerance runs more Jacobi corrections and leaves a smaller residual,
     confirming each step corrects the solution and that `tol` controls where it stops."""
     operator = make_operator(SQUARE_MATRIX)
-    coarse = IterativeRefinement(_JacobiSolver(), tol=1e-2, max_steps=50)
-    fine = IterativeRefinement(_JacobiSolver(), tol=1e-8, max_steps=50)
+    coarse = _jacobi_refinement(tol=1e-2, max_steps=50)
+    fine = _jacobi_refinement(tol=1e-8, max_steps=50)
     coarse_solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=coarse).value
     fine_solution = lx.linear_solve(operator, RIGHT_HAND_SIDE, solver=fine).value
     coarse_residual = _relative_residual(operator, coarse_solution, RIGHT_HAND_SIDE)
@@ -391,7 +400,7 @@ def _tagged_operators(
     one, so the operator stays close to the unperturbed matrix.
     """
     base_matrix = np.asarray(SQUARE_MATRIX, dtype=np.float64)
-    sparsity = BCOO.fromdense(base_matrix)
+    sparsity = BCOO.fromdense(jnp.asarray(base_matrix))
     tag = splx.sparsity_pattern_tag(sparsity)
     random_state = np.random.default_rng(seed)
     operators, matrices = [], []
@@ -550,7 +559,7 @@ def test_solution_meets_the_tolerance_for_any_change(
 def test_pattern_change_rebuilds(direct: splx.SparseLinearSolver) -> None:
     """An operator with a different sparsity pattern is analyzed and factored again."""
     base_matrix = np.asarray(SQUARE_MATRIX, dtype=np.float64)
-    first = BCOOLinearOperator(BCOO.fromdense(base_matrix))
+    first = BCOOLinearOperator(BCOO.fromdense(jnp.asarray(base_matrix)))
     other_matrix = base_matrix + np.diag([1.0, 1.0, 1.0], k=-1)
     second = BCOOLinearOperator(BCOO.fromdense(other_matrix))
     solver = HybridDirectIterative(direct)
