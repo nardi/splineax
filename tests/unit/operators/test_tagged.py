@@ -281,3 +281,32 @@ def test_linearised_operator_keeps_its_tag() -> None:
         dense_jacobian(banded_function, EVALUATION_POINT),
         rtol=1e-6,
     )
+
+
+def test_mv_matches_the_dense_jacobian() -> None:
+    """The matrix-vector product of a tagged Jacobian operator matches the dense Jacobian."""
+    tag = sparsity_coloring_tag(banded_function, EVALUATION_POINT)
+    operator = lx.JacobianLinearOperator(banded_function, EVALUATION_POINT, tags=tag)
+    vector = jnp.arange(1.0, 7.0)
+    expected = dense_jacobian(banded_function, EVALUATION_POINT) @ vector
+    np.testing.assert_allclose(operator.mv(vector), expected, rtol=1e-6)
+
+
+def test_tags_drive_property_predicates() -> None:
+    """Tags flow through to the lineax structural predicates, and an untagged Jacobian
+    operator reports no properties."""
+    plain = lx.JacobianLinearOperator(elementwise_function, EVALUATION_POINT)
+    assert lx.is_symmetric(plain) is False
+    assert lx.is_diagonal(plain) is False
+
+    symmetric = lx.JacobianLinearOperator(
+        elementwise_function, EVALUATION_POINT, tags=lx.symmetric_tag
+    )
+    assert lx.is_symmetric(symmetric) is True
+    # A symmetric operator transposes to itself.
+    assert symmetric.transpose() is symmetric
+
+    diagonal = lx.JacobianLinearOperator(
+        elementwise_function, EVALUATION_POINT, tags=lx.diagonal_tag
+    )
+    assert lx.is_diagonal(diagonal) is True

@@ -12,6 +12,7 @@ from splineax import (
     BCOOLinearOperator,
     BCSRLinearOperator,
     JacobianDirection,
+    materialise_as_bcoo,
     sparsity_coloring_tag,
     sparsity_pattern_tag,
 )
@@ -231,3 +232,16 @@ def test_bcsr_transpose_keeps_a_valid_coloring() -> None:
     )(jnp.zeros(4))
     np.testing.assert_array_equal(np.asarray(jacobian.indices), tag.indices)
     np.testing.assert_allclose(jacobian.todense(), SQUARE_MATRIX.T)
+
+
+def test_colored_pattern_tag_materialises_the_jacobian() -> None:
+    """A tag built from an `asdex.ColoredPattern` keeps that coloring, so a Jacobian
+    operator with the tag materialises to the dense Jacobian of the function."""
+    coloring = asdex.jacobian_coloring_from_sparsity(banded_pattern(6), mode="fwd")
+    tag = sparsity_coloring_tag(coloring)
+    point = jnp.linspace(1.0, 2.0, 6)
+    operator = lx.JacobianLinearOperator(banded_function, point, tags=tag)
+    expected = jax.jacfwd(lambda value: banded_function(value, None))(point)
+    np.testing.assert_allclose(
+        materialise_as_bcoo(operator).as_matrix(), expected, rtol=1e-6
+    )
