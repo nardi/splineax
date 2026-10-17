@@ -186,6 +186,10 @@ batched = jax.vmap(
 )(jnp.stack([b1, b2]))
 ```
 
+Under `vmap` the check for reusing a factorization reads every lane. If any lane fails it,
+all lanes factor afresh, which is correct and costs the same as a check that ran per lane.
+When every lane passes, the batch reuses the factorization and skips the fresh factor.
+
 ## Limitations
 
 The transform threads a single state and covers most control flow. A few cases have limits,

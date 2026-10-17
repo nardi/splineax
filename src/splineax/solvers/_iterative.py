@@ -22,6 +22,7 @@ from functools import cached_property
 from typing import Any, Generic, Protocol, Self, TypeVar, runtime_checkable
 
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -811,7 +812,9 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
             condition=attempt,
         )
 
-        refactor = state.stale & ~accepted_stale
+        # Reduced across a `vmap` batch, so the flags below describe the refactor that
+        # `conditional_update` runs for every lane (see its docstring).
+        refactor = eqxi.unvmap_any(state.stale & ~accepted_stale)
         inner_state = conditional_update(
             self.direct.update, state.inner_state, operator, options, refactor
         )
