@@ -445,6 +445,37 @@ def test_transform_reuses_as_much_as_the_explicit_threading() -> None:
 
 
 @pytest.mark.cpu_only
+def test_batched_transform_keeps_the_reuse_branch() -> None:
+    """A batch of second matrices keeps one `cond` per reuse and solves each lane.
+
+    The reuse check reads the status and condition of every lane. A predicate left
+    batched would turn the `cond` into a select that factors afresh in every lane, which
+    removes the `cond` from the jaxpr.
+    """
+    transformed = splx.stateful_solve_transform(_two_matrix_fn(_tag(), splx.KLU()))
+    values1, values2, b1, b2 = _args()
+    scales = jnp.array([1.0, 1.1, 0.9])
+    batched_values2 = scales[:, None] * values2
+
+    def batched(batch_values2: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return jax.vmap(transformed, in_axes=(None, 0, None, None))(
+            values1, batch_values2, b1, b2
+        )
+
+    single = make_jaxpr(lambda v: transformed(values1, v, b1, b2))(values2)
+    vmapped = make_jaxpr(batched)(batched_values2)
+    assert _count_primitive(vmapped.jaxpr, "cond") == _count_primitive(
+        single.jaxpr, "cond"
+    )
+    assert _count_primitive(single.jaxpr, "cond") > 0
+
+    _, x2 = batched(batched_values2)
+    for lane, scale in enumerate(np.asarray(scales)):
+        expected = _dense_reference(values1, scale * values2)[1]
+        assert np.allclose(x2[lane], expected, atol=1e-10)
+
+
+@pytest.mark.cpu_only
 def test_transform_before_or_after_the_derivative_agrees() -> None:
     """Differentiating the transform and transforming the derivative agree, both jitted.
 

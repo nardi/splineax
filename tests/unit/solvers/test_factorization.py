@@ -250,6 +250,25 @@ def test_conditional_update_selects_the_state_at_runtime(
     assert jnp.allclose(kept, _EXPECTED, atol=1e-5)
 
 
+def test_conditional_update_keeps_its_branch_under_vmap(
+    solver: splx.SparseLinearSolver,
+) -> None:
+    """A batched predicate stays a `cond` under `vmap` instead of becoming a select.
+
+    A select would run the update for every lane even when no lane asks for it.
+    """
+    first, second = _shared_pattern_operators()
+    state = solver.init(first, {})
+
+    def update(refactor: jax.Array) -> object:
+        return conditional_update(solver.update, state, second, {}, refactor)
+
+    batched = jax.make_jaxpr(jax.vmap(update))(jnp.array([True, False]))
+    state.release()
+
+    assert "cond" in {eqn.primitive.name for eqn in batched.jaxpr.eqns}
+
+
 def test_update_and_compute_matches_update_then_solve(
     solver: splx.SparseLinearSolver,
 ) -> None:
