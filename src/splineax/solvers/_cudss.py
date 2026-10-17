@@ -3,6 +3,7 @@ from enum import IntEnum
 from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.core
 import jax.numpy as jnp
@@ -240,7 +241,9 @@ def _refactorize_or_factorize(
     pivots = jnp.abs(cudss.query(refreshed)["diag"])
     # A zero largest pivot gives NaN, which fails the comparison and so falls back.
     reciprocal_condition = jnp.min(pivots) / jnp.max(pivots)
-    reuse_is_safe = reciprocal_condition > _REFACTOR_RCOND_FLOOR
+    # Reduced across a `vmap` batch so the `cond` below stays a branch (see
+    # `_reuse_or_refresh_numeric`).
+    reuse_is_safe = eqxi.unvmap_all(reciprocal_condition > _REFACTOR_RCOND_FLOOR)
     floor = _REFACTOR_RCOND_FLOOR
 
     # The cond picks only the token, so no record callback sits inside it (an IO effect in
