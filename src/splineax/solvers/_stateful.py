@@ -22,6 +22,7 @@ from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 
 from splineax._profile import record_operation, suppress_records
+from splineax.solvers._diagnostics import SolverDiagnostics
 
 _StateT = TypeVar("_StateT")
 _TreeT = TypeVar("_TreeT")
@@ -36,7 +37,15 @@ class TrackingSolverState(Protocol):
     `release` frees that memory once the state is done. Both live on the state, so a caller
     releases without a reference to the solver. A state that owns nothing implements `track`
     as a no-op returning `self`, and `release` as a no-op.
+
+    A state also reports what its solver knows about the factorization it holds, as
+    `diagnostics`. A solver that reports nothing holds an all-`None` `SolverDiagnostics`.
     """
+
+    @property
+    def diagnostics(self) -> SolverDiagnostics:
+        """What the solver reports about the factorization this state holds."""
+        ...
 
     def track(self, solution: PyTree[Array]) -> Self:
         """Return a new state whose eventual `release` is ordered after `solution`."""

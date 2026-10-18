@@ -23,6 +23,7 @@ from lineax._solver.misc import (
 from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.solvers._diagnostics import SolverDiagnostics
 from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
@@ -112,6 +113,8 @@ class _KLUState(eqx.Module):
     shape: tuple[int, ...] = eqx.field(static=True)
     transposed: bool = eqx.field(static=True, default=False)
     sparsity_tag: object | None = eqx.field(static=True, default=None)
+    diagnostics: SolverDiagnostics = eqx.field(default_factory=SolverDiagnostics)
+    """Always empty, since KLU reports nothing about its factorization."""
 
     def track(self, solution: Any) -> "_KLUState":
         """Return a copy of the state dependent on `solution`.
@@ -499,7 +502,7 @@ class KLU(AbstractLinearSolver[_KLUState]):
             x, rebuild = solve(numeric, b, state.symbol)
             record_operation(operation, "KLU", dynamic={"rebuild": rebuild})
             solution = unravel_solution(x, state.packed_structures)
-            return solution, RESULTS.successful, {}
+            return solution, RESULTS.successful, {"diagnostics": state.diagnostics}
 
     def transposes_cheaply(self, state: _KLUState) -> bool:
         """Whether `transpose` reuses the factorization. It always does, through `tsolve`."""
