@@ -70,6 +70,18 @@ pip install splineax[pardiso]
 solver = splx.Pardiso()
 ```
 
+`Pardiso` follows the lineax tags of the operator. An operator tagged
+`lineax.symmetric_tag` that also carries a
+[`sparsity_pattern_tag`][splineax.sparsity_pattern_tag] is factored as a real symmetric
+indefinite matrix, from its upper triangle. That includes positive semidefinite
+operators, because only the indefinite type reports the inertia (see
+[Factorization diagnostics](#factorization-diagnostics)). Any other operator is factored
+as a general matrix and reports no diagnostics. A symmetric operator without a sparsity
+tag takes the general path too, since the upper triangle is selected once per pattern and
+the pattern is not known without a tag. Earlier releases factored every operator as a general
+matrix, so a tagged symmetric operator now pivots differently and its solution may differ
+at the level of the solver tolerance.
+
 !!! warning "CPU, real-valued, and double precision only, and requires installation"
 
     `pardiso_mkl_jax` wraps a CPU-only library and only supports real-valued matrices
@@ -109,6 +121,11 @@ new values refactorizes with the previous pivots, which is cheaper than a fresh
 factorization. When the reused pivots come out badly scaled for the new values, `update`
 factorizes fresh instead, like `KLU` does.
 
+`CuDSS` picks its matrix type from the lineax tags too. A symmetric operator is factored
+as LDL^T, a symmetric positive semidefinite one with Cholesky, and anything else as a
+general matrix. See [Factorization diagnostics](#factorization-diagnostics) for what each
+type reports.
+
 !!! warning "CUDA GPU only, and requires installation"
 
     cuDSS is a CUDA-only library: `CuDSS` raises an error at trace time if solved on any
@@ -117,6 +134,65 @@ factorizes fresh instead, like `KLU` does.
     `ImportError` if the optional dependency isn't installed. Use
     [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] for code that should work
     whether or not it is.
+
+## Factorization diagnostics
+
+A direct solver can report facts about the factorization it holds. A Newton trust-region
+minimiser, for example, needs to know whether `H + sigma I` is positive definite before it
+accepts a step. Every solver state has a `diagnostics` property, and every solve returns
+the same object as `solution.stats["diagnostics"]`. Inside
+[`stateful_solve_transform`][splineax.stateful_solve_transform] the final state is only
+returned at the end, so the stats are the way to read them there.
+
+[`SolverDiagnostics`][splineax.SolverDiagnostics] has four fields. A field is `None` when
+the solver does not report it, so test for `None` before using a count.
+
+| Field | Meaning |
+| --- | --- |
+| `positive_definite` | Every pivot is positive and none was perturbed. |
+| `positive`, `negative` | The number of positive and negative eigenvalues. |
+| `perturbed_pivots` | The pivots the solver replaced by a small number. |
+
+```{.python notest}
+sparsity = BCOO.fromdense(matrix)
+tags = {lx.symmetric_tag, splx.sparsity_pattern_tag(sparsity)}
+operator = splx.BCOOLinearOperator(sparsity, tags=tags)
+
+solution, state = splx.linear_solve(operator, b, splx.Pardiso())
+diagnostics = solution.stats["diagnostics"]
+
+if diagnostics.positive_definite:
+    ...
+```
+
+What each solver reports:
+
+| Solver | Matrix type | Reports |
+| --- | --- | --- |
+| `Pardiso` | symmetric, with a sparsity tag | all four fields |
+| `CuDSS` | symmetric | all four fields |
+| `CuDSS` | symmetric positive semidefinite | `positive_definite` only |
+| `Pardiso`, `CuDSS` | anything else | nothing |
+| `KLU`, `Spsolve` | any | nothing |
+
+A singular matrix is never reported as positive definite. The solver replaces its zero
+pivot by a small number, which shows in `perturbed_pivots`. `Pardiso` also counts a
+perturbed pivot for a structurally zero diagonal entry, even when the matrix is
+nonsingular. The `positive` and `negative` counts are still correct in that case, so for a
+matrix with such entries prefer them to `perturbed_pivots`.
+
+The fields are scalar arrays, and a field that is `None` is part of the pytree structure.
+A state therefore keeps the same structure through `jax.jit`, `jax.lax.while_loop` and
+`jax.lax.cond`, and the diagnostics of a solve can drive a loop such as a search for the
+smallest shift that makes a matrix definite.
+
+[`HybridDirectIterative`][splineax.HybridDirectIterative], `IterativeRefinement` and
+[`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] pass on the diagnostics of the
+solver they wrap. While a hybrid solver reuses an older factorization for a changed
+operator, the diagnostics describe that older factorization.
+
+With `jax.vmap`, `CuDSS` factors the batch as one block-diagonal matrix, so its counts and
+perturbed pivots cover the whole batch.
 
 ## `AutoSparseLinearSolver`
 

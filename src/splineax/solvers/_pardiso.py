@@ -392,6 +392,12 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
     JAX's x64 mode or force the CPU platform on import, so `jax_enable_x64` must already
     be on before this solver runs.
 
+    The matrix type follows the operator's lineax tags. An operator tagged
+    `lineax.symmetric_tag` that carries a `sparsity_pattern_tag` is factored as real
+    symmetric indefinite, from its upper triangle, and the state reports the inertia of the
+    matrix in `state.diagnostics` and in `stats["diagnostics"]`. Any other operator is
+    factored as a general matrix and reports nothing.
+
     This solver can only handle square nonsingular operators.
 
     Requires the optional `pardiso-mkl-jax` dependency (`pip install

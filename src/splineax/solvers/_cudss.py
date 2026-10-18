@@ -455,6 +455,11 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
     Supports `float32`, `float64`, `complex64`, and `complex128` directly, with no
     upcasting, unlike `KLU`/`Pardiso`.
 
+    The matrix type follows the operator's lineax tags: general (LU), symmetric (LDL^T), or
+    symmetric positive semidefinite (Cholesky). A real symmetric operator reports the
+    inertia of its matrix in `state.diagnostics` and in `stats["diagnostics"]`, and a
+    positive semidefinite one reports whether it was positive definite.
+
     This solver can only handle square nonsingular operators, and only runs on a CUDA GPU
     (not ROCm, not CPU, not TPU): an error is raised at trace time otherwise.
 

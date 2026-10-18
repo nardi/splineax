@@ -78,6 +78,14 @@
 
 ::: splineax.solvers.CuDSSMemory
 
+## Diagnostics
+
+What a solver reports about its factorization, in `state.diagnostics` and in
+`solution.stats["diagnostics"]`. See
+[Factorization diagnostics](../guide/solvers.md#factorization-diagnostics).
+
+::: splineax.SolverDiagnostics
+
 ## Stateful solve transform
 
 Threads a solver state through a function's `lineax.linear_solve` calls, so its solves reuse
