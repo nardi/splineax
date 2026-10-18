@@ -546,3 +546,28 @@ def test_gpu_singular_matrix_has_perturbed_pivots(enable_x64: None) -> None:
     state.release()
     assert _count(state.diagnostics.perturbed_pivots) > 0
     assert not bool(state.diagnostics.positive_definite)
+
+
+@pytest.mark.cpu_only
+def test_symmetric_pardiso_is_differentiable(pardiso: Pardiso) -> None:
+    """Diagnostics in the stats do not get in the way of a gradient, which matches the
+    gradient of a dense solve."""
+    sparsity = BCOO.fromdense(jnp.asarray(DEFINITE))
+    pattern = splx.sparsity_pattern_tag(sparsity)
+    rhs = _rhs(DEFINITE)
+
+    def sparse_loss(scale: jax.Array) -> jax.Array:
+        matrix = BCOO(
+            (sparsity.data * scale, sparsity.indices),
+            shape=sparsity.shape,
+            indices_sorted=True,
+        )
+        operator = splx.BCOOLinearOperator(matrix, tags={lx.symmetric_tag, pattern})
+        return lx.linear_solve(operator, rhs, pardiso).value.sum()
+
+    def dense_loss(scale: jax.Array) -> jax.Array:
+        return jnp.linalg.solve(scale * jnp.asarray(DEFINITE), rhs).sum()
+
+    np.testing.assert_allclose(
+        jax.jit(jax.grad(sparse_loss))(1.5), jax.grad(dense_loss)(1.5), rtol=1e-8
+    )
