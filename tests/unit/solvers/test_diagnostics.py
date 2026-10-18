@@ -374,3 +374,59 @@ def test_shift_search_through_the_transform(
 
     threaded = jax.jit(splx.stateful_solve_transform(search))
     assert float(threaded()) == _smallest_definite_shift(dense)
+
+
+@pytest.mark.cpu_only
+def test_refinement_passes_the_inner_diagnostics(pardiso: Pardiso) -> None:
+    """A refined solve reports the diagnostics of the wrapped solver, in its state and in
+    its stats."""
+    solver = splx.IterativeRefinement(pardiso)
+    solution, state = splx.linear_solve(
+        _symmetric_operator(INDEFINITE), _rhs(INDEFINITE), solver
+    )
+    state.release()
+    positive, negative = _inertia(INDEFINITE)
+    for diagnostics in (state.diagnostics, solution.stats["diagnostics"]):
+        assert _count(diagnostics.positive) == positive
+        assert _count(diagnostics.negative) == negative
+
+
+@pytest.mark.cpu_only
+def test_hybrid_reports_the_stale_factorization(pardiso: Pardiso) -> None:
+    """While a nearby operator is solved with the old factorization, the diagnostics are
+    the ones of that factorization, and a refactorization replaces them."""
+    solver = splx.HybridDirectIterative(
+        pardiso, splx.RichardsonOptions(max_steps_stale=8)
+    )
+    first = _symmetric_operator(DEFINITE)
+    nearby = _symmetric_operator(DEFINITE + 1e-3 * np.eye(len(DEFINITE)))
+    _, state = splx.linear_solve(first, _rhs(DEFINITE), solver)
+    solution, state = splx.linear_solve(nearby, _rhs(DEFINITE), solver, state=state)
+    state.release()
+    assert solution.stats["reused"]
+    assert bool(solution.stats["diagnostics"].positive_definite)
+    assert _count(solution.stats["diagnostics"].positive) == len(DEFINITE)
+
+    far = _tridiagonal([-2.0, 5.0, 6.0, 7.0, 8.0])
+    state = solver.init(first, {})
+    solution, _, stats, state = solver.update_and_compute(
+        state, _symmetric_operator(far), _rhs(far), {}
+    )
+    state.release()
+    positive, negative = _inertia(far)
+    assert _count(stats["diagnostics"].positive) == positive
+    assert _count(stats["diagnostics"].negative) == negative
+
+
+@pytest.mark.cpu_only
+def test_auto_passes_the_inner_diagnostics(pardiso: Pardiso) -> None:
+    """`AutoSparseLinearSolver` reports the diagnostics of the solver it picked."""
+    solution, state = splx.linear_solve(
+        _symmetric_operator(INDEFINITE),
+        _rhs(INDEFINITE),
+        splx.AutoSparseLinearSolver(),
+    )
+    state.release()
+    positive, negative = _inertia(INDEFINITE)
+    assert _count(solution.stats["diagnostics"].positive) == positive
+    assert _count(solution.stats["diagnostics"].negative) == negative
