@@ -3,8 +3,8 @@
 `Pardiso` and `CuDSS` report the inertia of a symmetric matrix, which these tests check
 against `numpy.linalg.eigvalsh`. A solver that reports nothing holds an all-`None`
 `SolverDiagnostics`. The tests that take the `diagnostics_solver` fixture run on both
-solvers, and `CuDSS` runs only on a GPU. The `CuDSS` logic is also tested against the fake
-in [test_cudss.py](test_cudss.py).
+solvers, and `CuDSS` runs only on a GPU. The `CuDSS` logic is also tested eagerly against
+the fake `spineax.cudss` module, which runs on CPU.
 """
 
 from __future__ import annotations
@@ -20,9 +20,10 @@ import scipy.sparse
 from jax.experimental.sparse import BCOO
 
 import splineax as splx
-from splineax import KLU, Pardiso, SolverDiagnostics, Spsolve
+from splineax import KLU, CuDSS, Pardiso, SolverDiagnostics, Spsolve
 from splineax.solvers._pardiso import upper_triangle_selection
 
+from ...fake_cudss import FakeCuDSS
 from .conftest import (
     RIGHT_HAND_SIDE,
     SQUARE_MATRIX,
@@ -430,3 +431,118 @@ def test_auto_passes_the_inner_diagnostics(pardiso: Pardiso) -> None:
     positive, negative = _inertia(INDEFINITE)
     assert _count(solution.stats["diagnostics"].positive) == positive
     assert _count(solution.stats["diagnostics"].negative) == negative
+
+
+def _cudss_state(
+    dense: np.ndarray, tags: frozenset[object] = frozenset({lx.symmetric_tag})
+):
+    return CuDSS().init(_symmetric_operator(dense, tags=tags), {})
+
+
+@pytest.mark.parametrize(
+    "dense", [DEFINITE, INDEFINITE], ids=["definite", "indefinite"]
+)
+def test_cudss_symmetric_reports_the_inertia(
+    dense: np.ndarray, fake_cudss: FakeCuDSS
+) -> None:
+    """A symmetric matrix is factored as LDL^T, and the state and the stats of a solve
+    both carry its inertia."""
+    solver = CuDSS()
+    state = solver.init(_symmetric_operator(dense), {})
+    _, _, stats = solver.compute(state, _rhs(dense), {})
+    state.release()
+    positive, negative = _inertia(dense)
+    for diagnostics in (state.diagnostics, stats["diagnostics"]):
+        assert _count(diagnostics.positive) == positive
+        assert _count(diagnostics.negative) == negative
+        assert _count(diagnostics.perturbed_pivots) == 0
+        assert bool(diagnostics.positive_definite) == (negative == 0)
+
+
+def test_cudss_flags_a_singular_symmetric_matrix(fake_cudss: FakeCuDSS) -> None:
+    """A zero eigenvalue is a perturbed pivot, so the matrix is not definite."""
+    state = _cudss_state(SINGULAR)
+    state.release()
+    assert not bool(state.diagnostics.positive_definite)
+    assert _count(state.diagnostics.perturbed_pivots) == 1
+    assert _count(state.diagnostics.positive) == len(SINGULAR) - 1
+
+
+@pytest.mark.parametrize(
+    ("dense", "definite"),
+    [(DEFINITE, True), (INDEFINITE, False), (SINGULAR, False)],
+    ids=["definite", "indefinite", "singular"],
+)
+def test_cudss_cholesky_reports_only_definiteness(
+    dense: np.ndarray, definite: bool, fake_cudss: FakeCuDSS
+) -> None:
+    """A positive semidefinite tag selects Cholesky, which reports whether the matrix was
+    definite and no counts."""
+    tags = frozenset({lx.symmetric_tag, lx.positive_semidefinite_tag})
+    state = _cudss_state(dense, tags)
+    state.release()
+    diagnostics = state.diagnostics
+    assert bool(diagnostics.positive_definite) == definite
+    assert diagnostics.positive is None
+    assert diagnostics.negative is None
+    assert diagnostics.perturbed_pivots is None
+
+
+def test_cudss_general_matrix_reports_nothing(fake_cudss: FakeCuDSS) -> None:
+    """Without a symmetric tag the matrix is factored as LU, which reports nothing."""
+    state = CuDSS().init(_make_bcoo_operator(jnp.asarray(DEFINITE)), {})
+    state.release()
+    assert _is_empty(state.diagnostics)
+
+
+def test_cudss_refactor_updates_the_counts(fake_cudss: FakeCuDSS) -> None:
+    """A new operator on the same pattern replaces the counts, and `track` and a
+    transpose keep them."""
+    solver = CuDSS()
+    state = solver.init(_symmetric_operator(DEFINITE), {})
+    other = _tridiagonal([2.0, -3.0, 1.0, 4.0, -1.0])
+    state = solver.update(state, _symmetric_operator(other), {})
+    positive, negative = _inertia(other)
+    assert _count(state.diagnostics.positive) == positive
+    assert _count(state.diagnostics.negative) == negative
+    tracked = state.track(jnp.zeros(1))
+    transposed, _ = solver.transpose(state, {})
+    state.release()
+    assert tracked.diagnostics is state.diagnostics
+    assert transposed.diagnostics is state.diagnostics
+
+
+def test_cudss_symbolic_state_reports_nothing(fake_cudss: FakeCuDSS) -> None:
+    """A state from `init_symbolic` has no factorization to report."""
+    sparsity = BCOO.fromdense(jnp.asarray(DEFINITE))
+    state = CuDSS().init_symbolic(sparsity)
+    state.release()
+    assert _is_empty(state.diagnostics)
+
+
+@pytest.mark.cudss_gpu
+@pytest.mark.parametrize(
+    ("dense", "definite"),
+    [(DEFINITE, True), (INDEFINITE, False), (SINGULAR, False)],
+    ids=["definite", "indefinite", "singular"],
+)
+def test_gpu_cholesky_reports_definiteness(
+    dense: np.ndarray, definite: bool, enable_x64: None
+) -> None:
+    """Real cuDSS factors a positive semidefinite tag with Cholesky. The factor's
+    diagonal says whether the matrix was positive definite, which pins down how cuDSS
+    reports a failed Cholesky."""
+    tags = frozenset({lx.symmetric_tag, lx.positive_semidefinite_tag})
+    state = CuDSS().init(_symmetric_operator(dense, tags=tags), {})
+    state.release()
+    assert bool(state.diagnostics.positive_definite) == definite
+
+
+@pytest.mark.cudss_gpu
+def test_gpu_singular_matrix_has_perturbed_pivots(enable_x64: None) -> None:
+    """A singular matrix gives a perturbed pivot and is not reported as definite, which
+    pins down what `npivots` counts."""
+    state = CuDSS().init(_symmetric_operator(SINGULAR), {})
+    state.release()
+    assert _count(state.diagnostics.perturbed_pivots) > 0
+    assert not bool(state.diagnostics.positive_definite)

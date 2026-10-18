@@ -26,6 +26,7 @@ from lineax._solver.misc import (
 from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.solvers._diagnostics import SolverDiagnostics
 from splineax.solvers._klu import _REFACTOR_RCOND_FLOOR, COMPLEX_DTYPES
 from splineax.solvers._sparse import (
     _Sparsity,
@@ -269,6 +270,40 @@ def _refactorize_or_factorize(
     return chosen
 
 
+def _read_diagnostics(
+    cudss: Any, token: "FactorToken", mtype_id: int
+) -> SolverDiagnostics:
+    """Read what a factorized `token` reports about its matrix, by the matrix type.
+
+    - Type `1` (symmetric, LDL^T): the inertia and the perturbed pivots, both from `query`.
+      cuDSS factors a batch as one block-diagonal matrix, so under `vmap` the counts and
+      the pivots are those of the whole batch, which is why the definiteness test asks
+      for at least `n` positive eigenvalues rather than exactly `n`.
+    - Type `3` (positive definite, Cholesky): `query` reports no counts. The factor's
+      diagonal is positive and finite exactly when the matrix is positive definite.
+    - Type `0`, or any complex matrix: nothing, since the inertia of a complex symmetric
+      matrix is not defined.
+    """
+    if mtype_id not in (1, 3) or token.dtype in COMPLEX_DTYPES:
+        return SolverDiagnostics()
+    data = cudss.query(token)
+    if mtype_id == 3:
+        diagonal = data["diag"]
+        return SolverDiagnostics(
+            positive_definite=jnp.all(jnp.isfinite(diagonal) & (diagonal > 0))
+        )
+    positive, negative = data["inertia"][0], data["inertia"][1]
+    perturbed_pivots = data["npivots"][0]
+    return SolverDiagnostics(
+        positive_definite=(negative == 0)
+        & (positive >= token.n)
+        & (perturbed_pivots == 0),
+        positive=positive,
+        negative=negative,
+        perturbed_pivots=perturbed_pivots,
+    )
+
+
 def _transpose_csr(
     offsets: Integer[Array, " n+1"],
     columns: Integer[Array, " nse"],
@@ -341,6 +376,9 @@ class _CuDSSState(eqx.Module):
     shape: tuple[int, ...] = eqx.field(static=True)
     conjugate_solve: bool = eqx.field(static=True, default=False)
     sparsity_tag: object | None = eqx.field(static=True, default=None)
+    diagnostics: SolverDiagnostics = eqx.field(default_factory=SolverDiagnostics)
+    """What the factorization reports about its matrix, see `_read_diagnostics`. Empty for
+    a symbolic-only state and for the matrix types that report nothing."""
 
     def track(self, solution: Any) -> "_CuDSSState":
         """Return a copy of the state dependent on `solution`.
@@ -361,6 +399,7 @@ class _CuDSSState(eqx.Module):
             self.shape,
             self.conjugate_solve,
             self.sparsity_tag,
+            self.diagnostics,
         )
 
     def release(self) -> None:
@@ -508,7 +547,8 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         # Analyze then factorize right away, so the state is ready to solve and reusable
         # across right-hand sides.
         cudss = _spineax_cudss()
-        token = self._analyze(csr, _mtype_id(operator))
+        mtype_id = _mtype_id(operator)
+        token = self._analyze(csr, mtype_id)
         record_operation("factorize", "CuDSS")
         token = cudss.factorize(token, csr[2])
         return _CuDSSState(
@@ -518,6 +558,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             shape,
             False,
             operator_pattern_tag(operator),
+            _read_diagnostics(cudss, token, mtype_id),
         )
 
     def init_symbolic(
@@ -635,6 +676,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             shape,
             False,
             tag,
+            _read_diagnostics(cudss, token, token.mtype_id),
         )
 
     def compute(
@@ -665,7 +707,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
                 inputs={"conjugated": True} if state.conjugate_solve else None,
             )
             solution = unravel_solution(x, state.packed_structures)
-            return solution, RESULTS.successful, {}
+            return solution, RESULTS.successful, {"diagnostics": state.diagnostics}
 
     def transpose(
         self, state: _CuDSSState, options: dict[str, Any]
@@ -719,6 +761,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             state.shape[::-1],
             conjugate_solve,
             state.sparsity_tag,
+            state.diagnostics,
         ), {}
 
     def conj(
@@ -745,6 +788,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             state.shape,
             False,
             state.sparsity_tag,
+            state.diagnostics,
         ), {}
 
     def assume_full_rank(self) -> bool:
