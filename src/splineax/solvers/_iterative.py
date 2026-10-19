@@ -22,6 +22,7 @@ from functools import cached_property
 from typing import Any, Generic, Protocol, Self, TypeVar, runtime_checkable
 
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -48,6 +49,7 @@ from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import preconditioner_and_y0
 
 from splineax._profile import compute_scope, record_operation, suppress_records
+from splineax.solvers._diagnostics import SolverDiagnostics
 from splineax.solvers._sparse import (
     SparseLinearSolver,
     _Sparsity,
@@ -470,6 +472,18 @@ class HybridState(eqx.Module, Generic[_StateT]):
         if isinstance(inner, TrackingSolverState):
             inner.release()
 
+    @property
+    def diagnostics(self) -> SolverDiagnostics:
+        """The diagnostics of the inner state.
+
+        They describe the inner factorization, which is stale while `stale` is true, so
+        they belong to an earlier operator until the next refactorization.
+        """
+        inner = self.inner_state
+        if isinstance(inner, TrackingSolverState):
+            return inner.diagnostics
+        return SolverDiagnostics()
+
 
 def _initial_state(
     inner_state: _StateT, operator: AbstractLinearOperator | None
@@ -776,6 +790,7 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
                 "num_steps": steps,
                 "refactored": jnp.array(False),
                 "reused": jnp.array(False),
+                "diagnostics": state.diagnostics,
             }
             checked, result = _nan_unless_accepted(solution, accepted, vector)
             return checked, result, stats, state
@@ -811,7 +826,9 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
             condition=attempt,
         )
 
-        refactor = state.stale & ~accepted_stale
+        # Reduced across a `vmap` batch, so the flags below describe the refactor that
+        # `conditional_update` runs for every lane (see its docstring).
+        refactor = eqxi.unvmap_any(state.stale & ~accepted_stale)
         inner_state = conditional_update(
             self.direct.update, state.inner_state, operator, options, refactor
         )
@@ -860,6 +877,7 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
             "num_steps": steps_stale + steps_fresh,
             "refactored": refactor,
             "reused": accepted_stale,
+            "diagnostics": new_state.diagnostics,
         }
         checked, result = _nan_unless_accepted(
             solution, accepted_stale | accepted_fresh, vector

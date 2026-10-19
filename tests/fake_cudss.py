@@ -124,17 +124,31 @@ class FakeCuDSS:
         return refactorized
 
     def query(self, token: FakeFactorToken) -> dict[str, jax.Array]:
-        """Return the factor's diagonal, the only `query` field `_cudss.py` reads.
+        """Return the query fields `_cudss.py` reads: `diag`, `inertia` and `npivots`.
 
         A refactorized token keeps the first factorization's pivots. The reference
         matrices are diagonally dominant, so those pivots are the diagonal itself, which
         elimination without row swaps models. Any other token gets partial pivoting.
+
+        A real symmetric matrix (types 1 and 3) reports its eigenvalues as the diagonal,
+        so that the signs of `diag` and the inertia agree. An eigenvalue below the
+        tolerance counts as a perturbed pivot and as neither positive nor negative.
         """
         dense = np.array(
             BCSR(
                 (token.values, token.columns, token.offsets), shape=(token.n, token.n)
             ).todense()
         )
+        if token.mtype_id in (1, 3) and not np.iscomplexobj(dense):
+            eigenvalues = np.linalg.eigvalsh(dense)
+            small = np.abs(eigenvalues) <= 1e-12 * max(np.abs(eigenvalues).max(), 1.0)
+            positive = (eigenvalues > 0) & ~small
+            negative = (eigenvalues < 0) & ~small
+            return {
+                "diag": jnp.asarray(eigenvalues),
+                "inertia": jnp.asarray([positive.sum(), negative.sum()], jnp.int32),
+                "npivots": jnp.asarray([small.sum()], jnp.int32),
+            }
         if int(jax.device_get(token.id).ravel()[0]) not in self._refactorized_ids:
             return {"diag": jnp.diag(jax.scipy.linalg.lu(dense)[2])}
         for k in range(token.n):

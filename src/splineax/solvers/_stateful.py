@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any, Protocol, Self, TypeVar, runtime_checkable
 
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -21,6 +22,7 @@ from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 
 from splineax._profile import record_operation, suppress_records
+from splineax.solvers._diagnostics import SolverDiagnostics
 
 _StateT = TypeVar("_StateT")
 _TreeT = TypeVar("_TreeT")
@@ -35,7 +37,15 @@ class TrackingSolverState(Protocol):
     `release` frees that memory once the state is done. Both live on the state, so a caller
     releases without a reference to the solver. A state that owns nothing implements `track`
     as a no-op returning `self`, and `release` as a no-op.
+
+    A state also reports what its solver knows about the factorization it holds, as
+    `diagnostics`. A solver that reports nothing holds an all-`None` `SolverDiagnostics`.
     """
+
+    @property
+    def diagnostics(self) -> SolverDiagnostics:
+        """What the solver reports about the factorization this state holds."""
+        ...
 
     def track(self, solution: PyTree[Array]) -> Self:
         """Return a new state whose eventual `release` is ordered after `solution`."""
@@ -123,7 +133,13 @@ def conditional_update(
     when `operator` shares the sparsity pattern of the operator in `state`. Records inside
     the branch are dropped (see `suppress_records`), and one record outside carries the
     outcome.
+
+    Under `vmap` the predicate is reduced with any across the batch, so the cond stays a
+    branch instead of becoming a select that runs `update` for every lane. One lane that
+    needs a refactor will then refresh the state of all lanes, which costs no more than
+    that select would.
     """
+    refactor = eqxi.unvmap_any(refactor)
     # Static fields, such as the shape, are not arrays. They come from the refreshed
     # state and must equal the ones in `state`, which the matching pattern guarantees.
     static_parts: list[_StateT] = []

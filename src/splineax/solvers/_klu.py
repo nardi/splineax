@@ -1,6 +1,7 @@
 from typing import Any, TypeVar
 
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -22,6 +23,7 @@ from lineax._solver.misc import (
 from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.solvers._diagnostics import SolverDiagnostics
 from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
@@ -111,6 +113,8 @@ class _KLUState(eqx.Module):
     shape: tuple[int, ...] = eqx.field(static=True)
     transposed: bool = eqx.field(static=True, default=False)
     sparsity_tag: object | None = eqx.field(static=True, default=None)
+    diagnostics: SolverDiagnostics = eqx.field(default_factory=SolverDiagnostics)
+    """Always empty, since KLU reports nothing about its factorization."""
 
     def track(self, solution: Any) -> "_KLUState":
         """Return a copy of the state dependent on `solution`.
@@ -223,8 +227,13 @@ def _reuse_or_refresh_numeric(
     )
     dtype = jnp.complex128 if values.dtype in COMPLEX_DTYPES else jnp.float64
     reciprocal_condition = klujax.rcond(symbol, refreshed, dtype=dtype)
-    reuse_is_safe = jnp.all(status == klujax.KLUStatus.OK) & jnp.all(
-        reciprocal_condition > _REFACTOR_RCOND_FLOOR
+    # Under `vmap` the status and condition are batched. Reducing the predicate across the
+    # batch keeps the `cond` below a real branch, since a batched predicate would turn it
+    # into a select that runs `factor_fresh` for every lane. One unstable lane sends the
+    # whole batch to a fresh factor, which is correct and no slower than that select.
+    reuse_is_safe = eqxi.unvmap_all(
+        jnp.all(status == klujax.KLUStatus.OK)
+        & jnp.all(reciprocal_condition > _REFACTOR_RCOND_FLOOR)
     )
     floor = _REFACTOR_RCOND_FLOOR
 
@@ -232,7 +241,10 @@ def _reuse_or_refresh_numeric(
         return refreshed
 
     def factor_fresh() -> NumericToken:
-        return klujax.factor(row, col, values, symbol)
+        # The symbol is batched when a solve it is ordered after is. The batching rule of
+        # `factor` then needs the values batched too, and entangling them carries the
+        # batch axis over. Outside `vmap` this changes nothing.
+        return klujax.factor(row, col, entangle(values, symbol), symbol)
 
     # The cond picks only the token, so no record callback sits inside it (an IO effect in
     # a cond breaks `vmap`-of-cond under a jitted forward-mode derivative). The branch flag
@@ -490,7 +502,7 @@ class KLU(AbstractLinearSolver[_KLUState]):
             x, rebuild = solve(numeric, b, state.symbol)
             record_operation(operation, "KLU", dynamic={"rebuild": rebuild})
             solution = unravel_solution(x, state.packed_structures)
-            return solution, RESULTS.successful, {}
+            return solution, RESULTS.successful, {"diagnostics": state.diagnostics}
 
     def transposes_cheaply(self, state: _KLUState) -> bool:
         """Whether `transpose` reuses the factorization. It always does, through `tsolve`."""

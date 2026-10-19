@@ -5,6 +5,7 @@ solvers and both operator formats); [test_klu.py](test_klu.py) holds the KLU-spe
 factorization tests. Both draw their operators and reference matrices from here.
 """
 
+from functools import partial
 from typing import Protocol
 
 import jax
@@ -154,4 +155,27 @@ def solver(request: pytest.FixtureRequest, enable_x64: None) -> lx.AbstractLinea
     it but no longer enable it themselves. `CuDSS` has no such requirement, but running
     under x64 does not hurt it either.
     """
+    return request.param()
+
+
+@pytest.fixture(
+    params=[
+        pytest.param(
+            Pardiso,
+            marks=[
+                pytest.mark.skipif(
+                    not _pardiso_available(),
+                    reason="pardiso-mkl-jax is not installed",
+                ),
+                pytest.mark.cpu_only,
+            ],
+        ),
+        pytest.param(partial(CuDSS, diagnostics=True), marks=pytest.mark.cudss_gpu),
+    ],
+    ids=["pardiso", "cudss"],
+)
+def diagnostics_solver(
+    request: pytest.FixtureRequest, enable_x64: None
+) -> lx.AbstractLinearSolver:
+    """Yields each solver that reports the inertia of a symmetric matrix."""
     return request.param()
