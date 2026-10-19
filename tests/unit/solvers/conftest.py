@@ -5,6 +5,7 @@ solvers and both operator formats); [test_klu.py](test_klu.py) holds the KLU-spe
 factorization tests. Both draw their operators and reference matrices from here.
 """
 
+from functools import partial
 from typing import Protocol
 
 import jax
@@ -169,7 +170,7 @@ def solver(request: pytest.FixtureRequest, enable_x64: None) -> lx.AbstractLinea
                 pytest.mark.cpu_only,
             ],
         ),
-        pytest.param(CuDSS, marks=pytest.mark.cudss_gpu),
+        pytest.param(partial(CuDSS, diagnostics=True), marks=pytest.mark.cudss_gpu),
     ],
     ids=["pardiso", "cudss"],
 )

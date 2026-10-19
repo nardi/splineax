@@ -124,7 +124,8 @@ factorizes fresh instead, like `KLU` does.
 `CuDSS` picks its matrix type from the lineax tags too. A symmetric operator is factored
 as LDL^T, a symmetric positive semidefinite one with Cholesky, and anything else as a
 general matrix. See [Factorization diagnostics](#factorization-diagnostics) for what each
-type reports.
+type reports. `CuDSS` reports nothing unless you construct it with `diagnostics=True`,
+because reading the inertia costs one extra query per factorization.
 
 !!! warning "CUDA GPU only, and requires installation"
 
@@ -170,8 +171,9 @@ What each solver reports:
 | Solver | Matrix type | Reports |
 | --- | --- | --- |
 | `Pardiso` | symmetric, with a sparsity tag | all four fields |
-| `CuDSS` | symmetric | all four fields |
-| `CuDSS` | symmetric positive semidefinite | `positive_definite` only |
+| `CuDSS(diagnostics=True)` | symmetric | all four fields |
+| `CuDSS(diagnostics=True)` | symmetric positive semidefinite | `positive_definite` only |
+| `CuDSS` without the flag | any | nothing |
 | `Pardiso`, `CuDSS` | anything else | nothing |
 | `KLU`, `Spsolve` | any | nothing |
 
@@ -190,6 +192,9 @@ smallest shift that makes a matrix definite.
 [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] pass on the diagnostics of the
 solver they wrap. While a hybrid solver reuses an older factorization for a changed
 operator, the diagnostics describe that older factorization.
+
+[`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] picks `CuDSS()` on a GPU, so it
+reports nothing there. Construct `CuDSS(diagnostics=True)` to read the inertia on a GPU.
 
 With `jax.vmap`, `CuDSS` factors the batch as one block-diagonal matrix, so its counts and
 perturbed pivots cover the whole batch.

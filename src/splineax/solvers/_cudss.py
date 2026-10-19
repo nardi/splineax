@@ -456,9 +456,12 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
     upcasting, unlike `KLU`/`Pardiso`.
 
     The matrix type follows the operator's lineax tags: general (LU), symmetric (LDL^T), or
-    symmetric positive semidefinite (Cholesky). A real symmetric operator reports the
-    inertia of its matrix in `state.diagnostics` and in `stats["diagnostics"]`, and a
-    positive semidefinite one reports whether it was positive definite.
+    symmetric positive semidefinite (Cholesky). With `diagnostics=True`, a real symmetric
+    operator reports the inertia of its matrix in `state.diagnostics` and in
+    `stats["diagnostics"]`, and a positive semidefinite one reports whether it was positive
+    definite. Reading them costs one extra cuDSS `query` per factorization, so they are off
+    by default and the diagnostics are empty. `AutoSparseLinearSolver` picks `CuDSS()`
+    without them, so construct `CuDSS(diagnostics=True)` to get them.
 
     This solver can only handle square nonsingular operators, and only runs on a CUDA GPU
     (not ROCm, not CPU, not TPU): an error is raised at trace time otherwise.
@@ -489,12 +492,14 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
     reordering: CuDSSReordering = eqx.field(static=True)
     memory: CuDSSMemory = eqx.field(static=True)
     device_id: int = eqx.field(static=True)
+    diagnostics: bool = eqx.field(static=True)
 
     def __init__(
         self,
         reordering: CuDSSReordering = CuDSSReordering.DEFAULT,
         memory: CuDSSMemory = CuDSSMemory.DEVICE,
         device_id: int = 0,
+        diagnostics: bool = False,
     ) -> None:
         if not _cudss_available():
             raise ImportError(
@@ -504,6 +509,13 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         self.reordering = reordering
         self.memory = memory
         self.device_id = device_id
+        self.diagnostics = diagnostics
+
+    def _read_diagnostics(self, cudss: Any, token: "FactorToken") -> SolverDiagnostics:
+        """The diagnostics of `token`, or empty ones when `diagnostics` is off."""
+        if not self.diagnostics:
+            return SolverDiagnostics()
+        return _read_diagnostics(cudss, token, token.mtype_id)
 
     def _analyze(self, csr: _CSR, mtype_id: int) -> "FactorToken":
         """Run cuDSS's analysis phase for a CSR pattern, returning an analyzed token."""
@@ -563,7 +575,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             shape,
             False,
             operator_pattern_tag(operator),
-            _read_diagnostics(cudss, token, mtype_id),
+            self._read_diagnostics(cudss, token),
         )
 
     def init_symbolic(
@@ -681,7 +693,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             shape,
             False,
             tag,
-            _read_diagnostics(cudss, token, token.mtype_id),
+            self._read_diagnostics(cudss, token),
         )
 
     def compute(
