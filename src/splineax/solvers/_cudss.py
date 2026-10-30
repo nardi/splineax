@@ -26,6 +26,7 @@ from lineax._solver.misc import (
 from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.solvers._diagnostics import SolverDiagnostics
 from splineax.solvers._klu import _REFACTOR_RCOND_FLOOR, COMPLEX_DTYPES
 from splineax.solvers._sparse import (
     _Sparsity,
@@ -101,7 +102,11 @@ def _ensure_gpu(args: PyTree[Array]) -> PyTree[Array]:
     )
 
 
-def _mtype_id(operator: AbstractLinearOperator) -> int:
+def _mtype_id(
+    operator: AbstractLinearOperator,
+    diagnostics: bool = False,
+    matrix_type: "CuDSSMatrixType | None" = None,
+) -> int:
     """The cuDSS matrix-type id for `operator`, read off its lineax tags.
 
     `0` general (LU), `1` symmetric (LDL^T), `3` symmetric positive semidefinite
@@ -109,24 +114,40 @@ def _mtype_id(operator: AbstractLinearOperator) -> int:
     `is_hermitian` check to drive them from here, so they never come out of this
     function. `CuDSS.transpose`'s Hermitian handling is written to support them anyway,
     for when that tag exists to select one.
+
+    With `diagnostics`, a positive semidefinite operator is factored as LDL^T instead.
+    Cholesky reports no counts, and it replaces the zero pivot of a singular matrix by a
+    healthy-looking one without counting it, so it cannot tell a singular matrix from a
+    definite one.
+
+    An explicit `matrix_type` overrides all of this. It is the caller's word that the
+    matrix has that structure, so a symmetric type is not checked against the tags.
     """
+    if matrix_type is not None:
+        return int(matrix_type)
     if lx.is_symmetric(operator):
+        if diagnostics:
+            return 1
         return 3 if lx.is_positive_semidefinite(operator) else 1
     return 0
 
 
-def _mtype_id_for_sparsity(sparsity: _Sparsity) -> int:
+def _mtype_id_for_sparsity(
+    sparsity: _Sparsity,
+    diagnostics: bool = False,
+    matrix_type: "CuDSSMatrixType | None" = None,
+) -> int:
     """The cuDSS matrix-type id for a bare `init_symbolic` sparsity pattern.
 
     Only the operator forms of `_Sparsity` carry lineax tags. A bare `BCOO`/`BCSR`, tag
     or coloring carries none, so there is nothing to read and this falls back to `0`
-    (general), the always-correct choice.
+    (general), the always-correct choice, unless the caller forces a `matrix_type`.
     """
     match sparsity:
         case lx.AbstractLinearOperator():
-            return _mtype_id(sparsity)
+            return _mtype_id(sparsity, diagnostics, matrix_type)
         case _:
-            return 0
+            return 0 if matrix_type is None else int(matrix_type)
 
 
 def _operator_to_bcsr(
@@ -269,6 +290,36 @@ def _refactorize_or_factorize(
     return chosen
 
 
+def _read_diagnostics(
+    cudss: Any, token: "FactorToken", mtype_id: int
+) -> SolverDiagnostics:
+    """Read what a factorized `token` reports about its matrix, by the matrix type.
+
+    - Type `1` (symmetric, LDL^T): the inertia and the perturbed pivots, both from `query`.
+      A perturbed pivot is counted as positive in the inertia, so a singular matrix has
+      `perturbed_pivots > 0` and is not definite. cuDSS factors a batch as one
+      block-diagonal matrix, so under `vmap` the counts and the pivots are those of the
+      whole batch, which is why the definiteness test asks for at least `n` positive
+      eigenvalues rather than exactly `n`.
+    - Any other type, or any complex matrix: nothing. Cholesky (type `3`) reports no
+      counts and hides a perturbed pivot, and the inertia of a complex symmetric matrix
+      is not defined.
+    """
+    if mtype_id != 1 or token.dtype in COMPLEX_DTYPES:
+        return SolverDiagnostics()
+    data = cudss.query(token)
+    positive, negative = data["inertia"][0], data["inertia"][1]
+    perturbed_pivots = data["npivots"][0]
+    return SolverDiagnostics(
+        positive_definite=(negative == 0)
+        & (positive >= token.n)
+        & (perturbed_pivots == 0),
+        positive=positive,
+        negative=negative,
+        perturbed_pivots=perturbed_pivots,
+    )
+
+
 def _transpose_csr(
     offsets: Integer[Array, " n+1"],
     columns: Integer[Array, " nse"],
@@ -341,6 +392,9 @@ class _CuDSSState(eqx.Module):
     shape: tuple[int, ...] = eqx.field(static=True)
     conjugate_solve: bool = eqx.field(static=True, default=False)
     sparsity_tag: object | None = eqx.field(static=True, default=None)
+    diagnostics: SolverDiagnostics = eqx.field(default_factory=SolverDiagnostics)
+    """What the factorization reports about its matrix, see `_read_diagnostics`. Empty for
+    a symbolic-only state and for the matrix types that report nothing."""
 
     def track(self, solution: Any) -> "_CuDSSState":
         """Return a copy of the state dependent on `solution`.
@@ -361,6 +415,7 @@ class _CuDSSState(eqx.Module):
             self.shape,
             self.conjugate_solve,
             self.sparsity_tag,
+            self.diagnostics,
         )
 
     def release(self) -> None:
@@ -395,6 +450,17 @@ _REFACTORIZING_REORDERINGS = frozenset(
 Under every other reordering it runs the same phase as a fresh factorization."""
 
 
+class CuDSSMatrixType(IntEnum):
+    """The factorization cuDSS runs, which `CuDSS(matrix_type=...)` can force."""
+
+    GENERAL = 0
+    """LU, for any square matrix."""
+    SYMMETRIC = 1
+    """LDL^T, for a symmetric matrix. Reports the inertia under `diagnostics=True`."""
+    POSITIVE_DEFINITE = 3
+    """Cholesky, for a symmetric positive (semi)definite matrix. Reports no diagnostics."""
+
+
 class CuDSSMemory(IntEnum):
     """Where cuDSS keeps the numeric factors."""
 
@@ -415,6 +481,16 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
 
     Supports `float32`, `float64`, `complex64`, and `complex128` directly, with no
     upcasting, unlike `KLU`/`Pardiso`.
+
+    The matrix type follows the operator's lineax tags: general (LU), symmetric (LDL^T), or
+    symmetric positive semidefinite (Cholesky). Pass `matrix_type` to force one instead,
+    which also applies to `init_symbolic` on a bare sparsity pattern that has no tags. With `diagnostics=True`, a real symmetric
+    operator reports the inertia of its matrix in `state.diagnostics` and in
+    `stats["diagnostics"]`. Cholesky reports nothing usable, so a positive semidefinite
+    operator is then factored as LDL^T like any other symmetric one. Reading them costs one
+    extra cuDSS `query` per factorization, so they are off by default and the diagnostics
+    are empty. `AutoSparseLinearSolver` picks `CuDSS()` without them, so construct
+    `CuDSS(diagnostics=True)` to get them.
 
     This solver can only handle square nonsingular operators, and only runs on a CUDA GPU
     (not ROCm, not CPU, not TPU): an error is raised at trace time otherwise.
@@ -445,12 +521,16 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
     reordering: CuDSSReordering = eqx.field(static=True)
     memory: CuDSSMemory = eqx.field(static=True)
     device_id: int = eqx.field(static=True)
+    diagnostics: bool = eqx.field(static=True)
+    matrix_type: CuDSSMatrixType | None = eqx.field(static=True)
 
     def __init__(
         self,
         reordering: CuDSSReordering = CuDSSReordering.DEFAULT,
         memory: CuDSSMemory = CuDSSMemory.DEVICE,
         device_id: int = 0,
+        diagnostics: bool = False,
+        matrix_type: CuDSSMatrixType | None = None,
     ) -> None:
         if not _cudss_available():
             raise ImportError(
@@ -460,6 +540,14 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         self.reordering = reordering
         self.memory = memory
         self.device_id = device_id
+        self.diagnostics = diagnostics
+        self.matrix_type = matrix_type
+
+    def _read_diagnostics(self, cudss: Any, token: "FactorToken") -> SolverDiagnostics:
+        """The diagnostics of `token`, or empty ones when `diagnostics` is off."""
+        if not self.diagnostics:
+            return SolverDiagnostics()
+        return _read_diagnostics(cudss, token, token.mtype_id)
 
     def _analyze(self, csr: _CSR, mtype_id: int) -> "FactorToken":
         """Run cuDSS's analysis phase for a CSR pattern, returning an analyzed token."""
@@ -508,7 +596,8 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         # Analyze then factorize right away, so the state is ready to solve and reusable
         # across right-hand sides.
         cudss = _spineax_cudss()
-        token = self._analyze(csr, _mtype_id(operator))
+        mtype_id = _mtype_id(operator, self.diagnostics, self.matrix_type)
+        token = self._analyze(csr, mtype_id)
         record_operation("factorize", "CuDSS")
         token = cudss.factorize(token, csr[2])
         return _CuDSSState(
@@ -518,6 +607,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             shape,
             False,
             operator_pattern_tag(operator),
+            self._read_diagnostics(cudss, token),
         )
 
     def init_symbolic(
@@ -543,7 +633,9 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
                 sparsity, sparsity_pattern_tag(sparsity), shape
             ),
         )
-        token = self._analyze(csr, _mtype_id_for_sparsity(sparsity))
+        token = self._analyze(
+            csr, _mtype_id_for_sparsity(sparsity, self.diagnostics, self.matrix_type)
+        )
         return _CuDSSState(
             None, token, None, shape, False, sparsity_pattern_tag(sparsity)
         )
@@ -635,6 +727,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             shape,
             False,
             tag,
+            self._read_diagnostics(cudss, token),
         )
 
     def compute(
@@ -665,7 +758,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
                 inputs={"conjugated": True} if state.conjugate_solve else None,
             )
             solution = unravel_solution(x, state.packed_structures)
-            return solution, RESULTS.successful, {}
+            return solution, RESULTS.successful, {"diagnostics": state.diagnostics}
 
     def transpose(
         self, state: _CuDSSState, options: dict[str, Any]
@@ -719,6 +812,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             state.shape[::-1],
             conjugate_solve,
             state.sparsity_tag,
+            state.diagnostics,
         ), {}
 
     def conj(
@@ -745,6 +839,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             state.shape,
             False,
             state.sparsity_tag,
+            state.diagnostics,
         ), {}
 
     def assume_full_rank(self) -> bool:
@@ -757,4 +852,10 @@ CuDSS.__init__.__doc__ = """**Arguments:**
     `CuDSSReordering.DEFAULT`.
 - `memory`: where cuDSS keeps the numeric factors. Defaults to `CuDSSMemory.DEVICE`.
 - `device_id`: CUDA device index to run on. Defaults to `0`.
+- `diagnostics`: whether to read the factorization diagnostics, at the cost of one extra
+    cuDSS query per factorization. Defaults to `False`.
+- `matrix_type`: a `CuDSSMatrixType` to force the factorization, for example `SYMMETRIC`
+    for an operator without lineax tags. `None`, the default, follows the lineax tags, and
+    factors a symmetric operator as LDL^T when `diagnostics` is on. A forced symmetric
+    type is not checked against the matrix. `POSITIVE_DEFINITE` reports no diagnostics.
 """

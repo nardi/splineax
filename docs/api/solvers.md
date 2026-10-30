@@ -76,6 +76,10 @@
 
 ---
 
+::: splineax.solvers.CuDSSMatrixType
+
+---
+
 ::: splineax.solvers.CuDSSMemory
 
 ## Diagnostics
