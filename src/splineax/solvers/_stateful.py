@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any, Protocol, Self, TypeVar, runtime_checkable
 
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -123,7 +124,13 @@ def conditional_update(
     when `operator` shares the sparsity pattern of the operator in `state`. Records inside
     the branch are dropped (see `suppress_records`), and one record outside carries the
     outcome.
+
+    Under `vmap` the predicate is reduced with any across the batch dimension, so the cond
+    stays a branch instead of becoming a select that runs `update` at every index. A
+    refactor needed at one index will then refresh the state for the whole batch, which
+    costs no more than that select would.
     """
+    refactor = eqxi.unvmap_any(refactor)
     # Static fields, such as the shape, are not arrays. They come from the refreshed
     # state and must equal the ones in `state`, which the matching pattern guarantees.
     static_parts: list[_StateT] = []

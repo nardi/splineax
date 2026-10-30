@@ -22,6 +22,7 @@ from typing import Any, cast
 
 import equinox as eqx
 import jax
+import jax.extend.core
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
@@ -655,6 +656,62 @@ def test_vmap_over_right_hand_sides(direct: splx.SparseLinearSolver) -> None:
 
     expected = np.linalg.solve(matrices[1], np.asarray(right_hand_sides).T).T
     assert jnp.allclose(solutions, expected, atol=1e-8)
+
+
+@pytest.mark.cpu_only
+def test_vmap_over_operators_keeps_the_branches(
+    direct: splx.SparseLinearSolver,
+) -> None:
+    """A batch of operators solves each index correctly, with the same `cond`s as one.
+
+    One index is close enough to reuse the factorization and the other is not, so the
+    batch dimension disagrees on whether to refactor and to run the fresh solve. A
+    predicate left batched would turn each `cond` into a select, which removes it from
+    the jaxpr.
+    """
+    if isinstance(direct, splx.Pardiso):
+        pytest.skip("`Pardiso` has no batching rule for its solve.")
+    operators, matrices = _tagged_operators([0.0, 1e-3, 0.9])
+    solver = HybridDirectIterative(direct, RichardsonOptions(max_steps_stale=2))
+    state = solver.init(operators[0], {})
+    template = operators[1].matrix
+    values = jnp.stack([operators[1].matrix.data, operators[2].matrix.data])
+
+    def solve(batch_values: jax.Array) -> jax.Array:
+        matrix = BCOO(
+            (batch_values, template.indices),
+            shape=template.shape,
+            indices_sorted=template.indices_sorted,
+            unique_indices=template.unique_indices,
+        )
+        operator = BCOOLinearOperator(matrix, tags=operators[1].tags)
+        solution, _, _, _ = solver.update_and_compute(
+            state, operator, jnp.asarray(_right_hand_side()), {}
+        )
+        return solution
+
+    single = jax.make_jaxpr(solve)(values[0])
+    batched = jax.make_jaxpr(jax.vmap(solve))(values)
+    solutions = jax.vmap(solve)(values)
+    state.release()
+
+    assert _count_conds(batched.jaxpr) == _count_conds(single.jaxpr)
+    for index, matrix in enumerate(matrices[1:]):
+        expected = np.linalg.solve(matrix, _right_hand_side())
+        assert jnp.allclose(solutions[index], expected, atol=1e-8)
+
+
+def _count_conds(jaxpr: jax.extend.core.Jaxpr) -> int:
+    """Count the `cond` equations in a jaxpr, including those in nested jaxprs."""
+    total = 0
+    for equation in jaxpr.eqns:
+        total += equation.primitive.name == "cond"
+        for value in equation.params.values():
+            for item in value if isinstance(value, (list, tuple)) else [value]:
+                inner = getattr(item, "jaxpr", item)
+                if hasattr(inner, "eqns"):
+                    total += _count_conds(inner)
+    return total
 
 
 def test_richardson_solves_with_a_preconditioner(enable_x64: None) -> None:

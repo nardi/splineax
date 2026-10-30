@@ -2,6 +2,7 @@ import importlib.util
 from typing import Any
 
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 from entangle_jax import entangle
@@ -141,7 +142,9 @@ def _reanalyze_if_unstable(
     always correct, only slower, and equivalent to a fresh `init`.
     """
     primitive = pmj.primitive
-    unstable = (iparm[13] > 0) | (iparm[29] != 0)
+    # Reduced across a `vmap` batch so the `cond` below stays a branch (see
+    # `_reuse_or_refresh_numeric`).
+    unstable = eqxi.unvmap_any((iparm[13] > 0) | (iparm[29] != 0))
 
     def refresh() -> Any:
         reanalyzed, _ = primitive.reanalyze(

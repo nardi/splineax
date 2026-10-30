@@ -22,6 +22,7 @@ from functools import cached_property
 from typing import Any, Generic, Protocol, Self, TypeVar, runtime_checkable
 
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -529,6 +530,11 @@ def _skip_unless(
 
     The branch that does not run returns zeros of the same structure. Records inside
     `run` are dropped, since a record in a cond breaks `vmap`.
+
+    Under `vmap` the predicate is reduced with any across the batch dimension, so the
+    cond stays a branch instead of becoming a select that runs `run` at every index. An
+    index where the predicate is false still gets zeros, as `run_masked` replaces its
+    output.
     """
 
     def run_silently() -> tuple[PyTree[Array], Int[Array, ""]]:
@@ -537,7 +543,17 @@ def _skip_unless(
 
     shapes = jax.eval_shape(run_silently)
     zeros = jtu.tree_map(lambda shape: jnp.zeros(shape.shape, shape.dtype), shapes)
-    return jax.lax.cond(predicate, run_silently, lambda: zeros)
+
+    def run_masked() -> tuple[PyTree[Array], Int[Array, ""]]:
+        # The predicate is batched here when it is batched outside the cond, so the
+        # select below applies at each index of the batch dimension.
+        return jtu.tree_map(
+            lambda result, zero: jnp.where(predicate, result, zero),
+            run_silently(),
+            zeros,
+        )
+
+    return jax.lax.cond(eqxi.unvmap_any(predicate), run_masked, lambda: zeros)
 
 
 class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
@@ -811,7 +827,9 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
             condition=attempt,
         )
 
-        refactor = state.stale & ~accepted_stale
+        # Reduced across the batch dimension under `vmap`, so the flags below describe the
+        # refactor that `conditional_update` runs for the whole batch (see its docstring).
+        refactor = eqxi.unvmap_any(state.stale & ~accepted_stale)
         inner_state = conditional_update(
             self.direct.update, state.inner_state, operator, options, refactor
         )
