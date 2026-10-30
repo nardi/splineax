@@ -124,17 +124,40 @@ class FakeCuDSS:
         return refactorized
 
     def query(self, token: FakeFactorToken) -> dict[str, jax.Array]:
-        """Return the factor's diagonal, the only `query` field `_cudss.py` reads.
+        """Return the query fields `_cudss.py` reads: `diag`, `inertia` and `npivots`.
 
         A refactorized token keeps the first factorization's pivots. The reference
         matrices are diagonally dominant, so those pivots are the diagonal itself, which
         elimination without row swaps models. Any other token gets partial pivoting.
+
+        A real symmetric matrix reports like cuDSS does on a GPU. LDL^T (type 1) reports its
+        eigenvalues as the diagonal, so that the signs of `diag` and the inertia agree. An
+        eigenvalue below the tolerance is a perturbed pivot, replaced in `diag` by 1e-13
+        and counted as positive. Cholesky (type 3) reports the signed square roots of the
+        eigenvalues, no inertia and no perturbed pivots, and hides a zero pivot behind 1.
         """
         dense = np.array(
             BCSR(
                 (token.values, token.columns, token.offsets), shape=(token.n, token.n)
             ).todense()
         )
+        if token.mtype_id in (1, 3) and not np.iscomplexobj(dense):
+            eigenvalues = np.linalg.eigvalsh(dense)
+            small = np.abs(eigenvalues) <= 1e-12 * max(np.abs(eigenvalues).max(), 1.0)
+            if token.mtype_id == 3:
+                roots = np.sign(eigenvalues) * np.sqrt(np.abs(eigenvalues))
+                return {
+                    "diag": jnp.asarray(np.where(small, 1.0, roots)),
+                    "inertia": jnp.zeros(2, jnp.int32),
+                    "npivots": jnp.zeros(1, jnp.int32),
+                }
+            positive = (eigenvalues > 0) | small
+            negative = (eigenvalues < 0) & ~small
+            return {
+                "diag": jnp.asarray(np.where(small, 1e-13, eigenvalues)),
+                "inertia": jnp.asarray([positive.sum(), negative.sum()], jnp.int32),
+                "npivots": jnp.asarray([small.sum()], jnp.int32),
+            }
         if int(jax.device_get(token.id).ravel()[0]) not in self._refactorized_ids:
             return {"diag": jnp.diag(jax.scipy.linalg.lu(dense)[2])}
         for k in range(token.n):

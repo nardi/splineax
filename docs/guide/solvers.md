@@ -116,6 +116,14 @@ new values refactorizes with the previous pivots, which is cheaper than a fresh
 factorization. When the reused pivots come out badly scaled for the new values, `update`
 factorizes fresh instead, like `KLU` does.
 
+`CuDSS` also picks its matrix type from the lineax tags: LDL^T for a symmetric operator,
+Cholesky for a symmetric positive semidefinite one, and general (LU) otherwise. It
+reports diagnostics only when constructed with `diagnostics=True`, which costs one extra
+query per factorization and factors positive semidefinite operators as LDL^T too, since
+Cholesky cannot tell a singular matrix from a definite one. Pass a `CuDSSMatrixType` as
+`matrix_type` to choose the factorization yourself. It overrides the tags and is not
+checked against the matrix, and `POSITIVE_DEFINITE` reports nothing.
+
 !!! warning "CUDA GPU only, and requires installation"
 
     cuDSS is a CUDA-only library: `CuDSS` raises an error at trace time if solved on any
@@ -157,6 +165,7 @@ if diagnostics.positive_definite:
 | Solver | Reports |
 | --- | --- |
 | `Pardiso` | All four fields, for a symmetric operator with a sparsity tag. |
+| `CuDSS(diagnostics=True)` | All four fields, for a symmetric operator. |
 | Any other solver or operator | Nothing. |
 
 A singular matrix is never reported as positive definite.
@@ -164,6 +173,11 @@ A singular matrix is never reported as positive definite.
 [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] report the diagnostics of
 the solver they wrap. While a hybrid solver reuses an older factorization for a changed
 operator, the diagnostics describe that older factorization.
+
+On a GPU `AutoSparseLinearSolver` picks `CuDSS()`, which reports nothing, so construct
+`CuDSS(diagnostics=True)` to read the inertia there. Under `jax.vmap` over the matrix
+values, `CuDSS` reports the counts of the whole batch, so `positive_definite` is `True`
+only when every element is definite.
 
 The diagnostics keep a fixed structure, so they can drive a loop under `jax.jit`. See
 [Diagnostics in a loop](stateful.md#diagnostics-in-a-loop).
