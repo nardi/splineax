@@ -1,10 +1,13 @@
+import functools
 import importlib.util
-from typing import Any
+from typing import Any, NamedTuple
 
 import equinox as eqx
 import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
+import lineax as lx
+import numpy as np
 from entangle_jax import entangle
 from jax.experimental.sparse import BCOO, BCSR
 from jaxtyping import Array, Inexact, Integer, PyTree
@@ -22,6 +25,8 @@ from lineax._solver.misc import (
 from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.operators._tags import _ContentPatternTag
+from splineax.solvers._diagnostics import SolverDiagnostics
 from splineax.solvers._klu import COMPLEX_DTYPES, _extract_pattern
 from splineax.solvers._sparse import (
     _Sparsity,
@@ -125,6 +130,142 @@ def _extract_csr(
     return indptr, indices, values, matrix_bcsr.shape
 
 
+class _UpperTriangle(NamedTuple):
+    """Where the upper triangle of a sorted CSR matrix comes from, as host-side constants."""
+
+    indptr: np.ndarray
+    """The int32 row pointer of the upper triangle."""
+
+    indices: np.ndarray
+    """The int32 column indices of the upper triangle."""
+
+    gather: np.ndarray
+    """For each entry of the upper triangle, its position in the values of the full matrix.
+    The position `nse` is a structural zero that stands in for a missing diagonal entry."""
+
+
+@functools.lru_cache(maxsize=32)
+def upper_triangle_selection(tag: _ContentPatternTag) -> _UpperTriangle:
+    """Select the upper triangle, diagonal included, of the matrix a tag describes.
+
+    The symmetric Pardiso matrix types read only the upper triangle in CSR form, and they
+    need every diagonal entry stored, even a zero one. A matrix is first sorted into CSR
+    order, which is row-major with sorted columns, so the selection is made in that order. A
+    diagonal entry that the pattern does not hold is added and points at a zero value.
+
+    This reads the tag on the host, so it costs nothing per solve, and it is cached per tag.
+    """
+    size = int(tag.shape[0])
+    entries = tag.indices
+    nse = entries.shape[0]
+    order = np.lexsort((entries[:, 1], entries[:, 0]))
+    rows, columns = entries[order, 0], entries[order, 1]
+    positions = np.arange(nse)
+    upper = columns >= rows
+    has_diagonal = np.zeros(size, dtype=bool)
+    has_diagonal[rows[columns == rows]] = True
+    missing = np.flatnonzero(~has_diagonal)
+    selected_rows = np.concatenate([rows[upper], missing])
+    selected_columns = np.concatenate([columns[upper], missing])
+    selected_positions = np.concatenate(
+        [positions[upper], np.full(missing.shape, nse, dtype=positions.dtype)]
+    )
+    final_order = np.lexsort((selected_columns, selected_rows))
+    indptr = np.zeros(size + 1, dtype=np.int32)
+    np.cumsum(np.bincount(selected_rows, minlength=size), out=indptr[1:])
+    selection = _UpperTriangle(
+        indptr,
+        selected_columns[final_order].astype(np.int32),
+        selected_positions[final_order],
+    )
+    for array in selection:
+        array.flags.writeable = False
+    return selection
+
+
+def _symmetric_tag(
+    operator: AbstractLinearOperator, tag: object | None, nse: int
+) -> _ContentPatternTag | None:
+    """The tag to select the upper triangle with, or None if `operator` is factored as is.
+
+    The symmetric matrix types need the pattern on the host. An operator that is tagged
+    symmetric but has no tag with concrete indices, or whose tag does not describe a matrix
+    with `nse` stored entries, is factored as a nonsymmetric matrix instead.
+    """
+    if not lx.is_symmetric(operator):
+        return None
+    if not isinstance(tag, _ContentPatternTag) or tag.indices.shape[0] != nse:
+        return None
+    if tag.shape[0] != tag.shape[1]:
+        return None
+    return tag
+
+
+def _upper_triangle_csr(csr: "_CSR", tag: _ContentPatternTag) -> "_CSR":
+    """The upper triangle of a sorted CSR matrix, gathering its values on the device."""
+    selection = upper_triangle_selection(tag)
+    _, _, values = csr
+    padded = jnp.concatenate([values, jnp.zeros((1,), values.dtype)])
+    return (
+        jnp.asarray(selection.indptr),
+        jnp.asarray(selection.indices),
+        padded[jnp.asarray(selection.gather)],
+    )
+
+
+def _matrix_type(pmj: Any, symmetric: bool) -> Any:
+    """The Pardiso matrix type for a state, indefinite for every symmetric matrix.
+
+    The indefinite type is also used for a positive semidefinite matrix, since only it
+    reports the eigenvalue counts.
+    """
+    if symmetric:
+        return pmj.MatrixType.REAL_SYMMETRIC_INDEFINITE
+    return pmj.MatrixType.REAL_NONSYMMETRIC
+
+
+def _factorization_inputs(
+    operator: AbstractLinearOperator,
+    tag: object | None,
+    symmetric: bool | None,
+) -> tuple[AbstractLinearOperator, _CSR, tuple[int, ...], bool]:
+    """Read `operator` as the CSR matrix to factor.
+
+    Returns the sparse operator, the CSR triple, the shape and whether the matrix is
+    symmetric. A symmetric matrix is reduced to its upper triangle. Pass `symmetric` to
+    follow an existing state, and None to decide from the operator's tags.
+    """
+    sparse = sparse_operator(operator, "Pardiso")
+    indptr, indices, values, shape = _extract_csr(sparse)
+    csr = (indptr, indices, values)
+    pattern_tag = tag if symmetric else None
+    if symmetric is None:
+        pattern_tag = _symmetric_tag(operator, tag, values.shape[0])
+    if pattern_tag is None:
+        return sparse, csr, shape, False
+    assert isinstance(pattern_tag, _ContentPatternTag)
+    return sparse, _upper_triangle_csr(csr, pattern_tag), shape, True
+
+
+def _read_diagnostics(iparm: Array, size: int, symmetric: bool) -> SolverDiagnostics:
+    """Decode the diagnostics of a factorization from its final `iparm`.
+
+    Only the symmetric indefinite type reports the eigenvalue counts, in entries 21 and 22.
+    Entry 13 counts the pivots that were perturbed.
+    """
+    if not symmetric:
+        return SolverDiagnostics()
+    positive = iparm[21].astype(jnp.int32)
+    negative = iparm[22].astype(jnp.int32)
+    perturbed_pivots = iparm[13].astype(jnp.int32)
+    return SolverDiagnostics(
+        positive_definite=(positive == size) & (perturbed_pivots == 0),
+        positive=positive,
+        negative=negative,
+        perturbed_pivots=perturbed_pivots,
+    )
+
+
 def _reanalyze_if_unstable(
     pmj: Any,
     token: Any,
@@ -132,7 +273,7 @@ def _reanalyze_if_unstable(
     indptr: Array,
     indices: Array,
     values: Array,
-) -> Any:
+) -> tuple[Any, Array]:
     """Redo the analysis for these values if the reused matching factored badly.
 
     A `factor` that reuses a matching tuned for older values can perturb tiny pivots or
@@ -140,13 +281,16 @@ def _reanalyze_if_unstable(
     13, `zero_or_negative_pivot_position` at index 29). When it does, `reanalyze` rebuilds
     the analysis and matching for these values in place, then factor again. Falling back is
     always correct, only slower, and equivalent to a fresh `init`.
+
+    Returns the token and the `iparm` of the factorization that is kept. Only a nonsymmetric
+    matrix is matched on its values, so a symmetric state does not call this.
     """
     primitive = pmj.primitive
     # Reduced across a `vmap` batch so the `cond` below stays a branch (see
     # `_reuse_or_refresh_numeric`).
     unstable = eqxi.unvmap_any((iparm[13] > 0) | (iparm[29] != 0))
 
-    def refresh() -> Any:
+    def refresh() -> tuple[Any, Array]:
         reanalyzed, _ = primitive.reanalyze(
             token,
             indptr,
@@ -154,20 +298,19 @@ def _reanalyze_if_unstable(
             values,
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
-        refactored, _ = primitive.factor(
+        return primitive.factor(
             reanalyzed,
             indptr,
             indices,
             values,
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
-        return refactored
 
-    # The cond picks only the token, so no record callback sits inside it (an IO effect in
+    # The cond picks only the token and iparm, so no record callback sits inside it (an IO effect in
     # a cond breaks `vmap`-of-cond under a jitted forward-mode derivative). The caller
     # records the branch through the `perturbed_pivots`/`zero_pivot` flags it already
     # carries, building the reason on the host.
-    return jax.lax.cond(unstable, refresh, lambda: token)
+    return jax.lax.cond(unstable, refresh, lambda: (token, iparm))
 
 
 class _PardisoState(eqx.Module):
@@ -191,6 +334,11 @@ class _PardisoState(eqx.Module):
     shape: tuple[int, ...] = eqx.field(static=True)
     transposed: bool = eqx.field(static=True, default=False)
     sparsity_tag: object | None = eqx.field(static=True, default=None)
+    symmetric: bool = eqx.field(static=True, default=False)
+    """Whether the matrix is factored as symmetric, which stores only its upper triangle
+    in `csr`."""
+    diagnostics: SolverDiagnostics = eqx.field(default_factory=SolverDiagnostics)
+    """What the factorization reports, empty unless the matrix is factored as symmetric."""
 
     def track(self, solution: Any) -> "_PardisoState":
         """Return a copy of the state dependent on `solution`.
@@ -218,6 +366,8 @@ class _PardisoState(eqx.Module):
             self.shape,
             self.transposed,
             self.sparsity_tag,
+            self.symmetric,
+            self.diagnostics,
         )
 
     def release(self) -> None:
@@ -241,6 +391,12 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
     complex matrix types are not supported by `pardiso_mkl_jax` yet). It does not enable
     JAX's x64 mode or force the CPU platform on import, so `jax_enable_x64` must already
     be on before this solver runs.
+
+    The matrix type follows the operator's lineax tags. An operator tagged
+    `lineax.symmetric_tag` that carries a `sparsity_pattern_tag` is factored as real
+    symmetric indefinite, from its upper triangle, and the state reports the inertia of the
+    matrix in `state.diagnostics` and in `stats["diagnostics"]`. Any other operator is
+    factored as a general matrix and reports nothing.
 
     This solver can only handle square nonsingular operators.
 
@@ -267,32 +423,29 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         operator: AbstractLinearOperator,
         tag: object | None,
     ) -> _PardisoState:
-        sparse = sparse_operator(operator, "Pardiso")
-        indptr, indices, values, shape = _extract_csr(sparse)
+        sparse, csr, shape, symmetric = _factorization_inputs(operator, tag, None)
+        indptr, indices, values = csr
         pmj = _pardiso_mkl_jax()
         primitive = pmj.primitive
-        # `analyze` and `factor` return `(token, final_iparm)`. Only the token is kept;
-        # the diagnostics iparm is dropped.
+        matrix_type = _matrix_type(pmj, symmetric)
+        # `analyze` and `factor` return `(token, final_iparm)`. The iparm of `factor` holds
+        # the diagnostics.
         record_operation("analyze", "Pardiso")
-        token, _ = primitive.analyze(
-            indptr, indices, values, matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC
-        )
+        token, _ = primitive.analyze(indptr, indices, values, matrix_type=matrix_type)
         record_operation("factor", "Pardiso")
-        token, _ = primitive.factor(
-            token,
-            indptr,
-            indices,
-            values,
-            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+        token, iparm = primitive.factor(
+            token, indptr, indices, values, matrix_type=matrix_type
         )
         return _PardisoState(
             sparse,
-            (indptr, indices, values),
+            csr,
             token,
             pack_structures(operator),
             shape,
             False,
             tag,
+            symmetric,
+            _read_diagnostics(iparm, shape[0], symmetric),
         )
 
     def init(
@@ -415,30 +568,31 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         operator: AbstractLinearOperator,
         tag: object,
     ) -> _PardisoState:
-        sparse = sparse_operator(operator, "Pardiso")
-        indptr, indices, values, shape = _extract_csr(sparse)
+        sparse, csr, shape, symmetric = _factorization_inputs(
+            operator, tag, state.symmetric
+        )
+        indptr, indices, values = csr
         pmj = _pardiso_mkl_jax()
+        matrix_type = _matrix_type(pmj, symmetric)
         # `factor` reuses the analysis stored under the token's id, including the weighted
         # matching, and returns a fresh token for the new values. That matching was tuned
         # for the previous values, so it can be a poor fit for these ones.
         token, iparm = pmj.primitive.factor(
-            state.token,
-            indptr,
-            indices,
-            values,
-            matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
+            state.token, indptr, indices, values, matrix_type=matrix_type
         )
         # `perturbed_pivots`/`zero_pivot` (iparm[13]/iparm[29]) are used to decide whether
         # the factorization is still usable, or whether it needs to be rebuilt. `reused` is True
         # when the reused matching factored stably, and `reanalyzed` says the fallback
         # rebuilt the analysis for these values. See `_reanalyze_if_unstable` for the concrete logic.
+        # A symmetric matrix has no matching to tune, so it is never reanalyzed.
         unstable = (iparm[13] > 0) | (iparm[29] != 0)
+        reanalyzed = jnp.zeros((), bool) if symmetric else unstable
         record_operation(
             "refactor",
             "Pardiso",
             dynamic={
-                "reused": ~unstable,
-                "reanalyzed": unstable,
+                "reused": ~reanalyzed,
+                "reanalyzed": reanalyzed,
                 "perturbed_pivots": iparm[13],
                 "zero_pivot": iparm[29] != 0,
             },
@@ -450,15 +604,20 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
                 )
             },
         )
-        token = _reanalyze_if_unstable(pmj, token, iparm, indptr, indices, values)
+        if not symmetric:
+            token, iparm = _reanalyze_if_unstable(
+                pmj, token, iparm, indptr, indices, values
+            )
         return _PardisoState(
             sparse,
-            (indptr, indices, values),
+            csr,
             token,
             pack_structures(operator),
             shape,
             False,
             tag,
+            symmetric,
+            _read_diagnostics(iparm, shape[0], symmetric),
         )
 
     def compute(
@@ -492,8 +651,9 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
                 indices,
                 values,
                 b[None, :],
-                matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
-                transpose=state.transposed,
+                matrix_type=_matrix_type(pmj, state.symmetric),
+                # A symmetric matrix is its own transpose.
+                transpose=state.transposed and not state.symmetric,
             )
             record_operation(
                 "solve_stateful",
@@ -502,7 +662,7 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
                 dynamic={"rebuild": rebuild},
             )
             solution = unravel_solution(solution[0], state.packed_structures)
-            return solution, RESULTS.successful, {}
+            return solution, RESULTS.successful, {"diagnostics": state.diagnostics}
 
     def transposes_cheaply(self, state: _PardisoState) -> bool:
         """Whether `transpose` reuses the factorization. It always does, natively."""
@@ -526,6 +686,8 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             state.shape[::-1],
             not state.transposed,
             state.sparsity_tag,
+            state.symmetric,
+            state.diagnostics,
         )
         return transposed_state, {}
 

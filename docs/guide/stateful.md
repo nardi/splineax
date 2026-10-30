@@ -197,6 +197,42 @@ parity. `update` rebuilds the state, `release` frees nothing, and `track` return
 state unchanged. Code written against the API runs unchanged on any backend, and
 `AutoSparseLinearSolver` forwards to whichever it picked.
 
+## Diagnostics in a loop
+
+A solve returns the diagnostics of its factorization in `solution.stats["diagnostics"]`
+(see [Factorization diagnostics](solvers.md#factorization-diagnostics)). Inside
+`stateful_solve_transform` these stats are the way to read them, since the final state
+only comes back at the end. The example below searches for the smallest shift that makes
+`matrix + shift * I` positive definite. It makes the factorization again for every
+shift, and the loop condition reads the flag.
+
+```{.python notest}
+shifts = jnp.array([0.0, 1.0, 2.0, 4.0, 8.0])
+
+
+def search():
+    def not_definite(carry):
+        index, definite = carry
+        return ~definite & (index + 1 < len(shifts))
+
+    def next_shift(carry):
+        index = carry[0] + 1
+        shifted = operator_at(shifts[index])
+        solution = lx.linear_solve(shifted, b, splx.Pardiso())
+        return index, solution.stats["diagnostics"].positive_definite
+
+    index, _ = jax.lax.while_loop(
+        not_definite, next_shift, (jnp.int32(0), jnp.bool_(False))
+    )
+    return shifts[index]
+
+
+smallest = jax.jit(splx.stateful_solve_transform(search))()
+```
+
+The helper `operator_at` builds the symmetric operator of `matrix + shift * I` on one
+sparsity pattern, so the transform reuses a single analysis.
+
 ## Backend-agnostic code
 
 Type a routine against the [`splineax.SparseLinearSolver`][] protocol and let the caller
