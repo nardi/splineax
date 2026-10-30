@@ -20,6 +20,7 @@ from lineax._solver.misc import (
 from splineax._profile import compute_scope, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
+from splineax.solvers._diagnostics import SolverDiagnostics
 from splineax.solvers._sparse import (
     _Sparsity,
     operator_pattern_tag,
@@ -47,6 +48,8 @@ class _SpsolveState(eqx.Module):
     """The sorted CSR matrix to solve, or None for a symbolic-only state."""
     packed_structures: PackedStructures | None
     """The lineax structure for ravel and unravel, None for a symbolic-only state."""
+    diagnostics: SolverDiagnostics = eqx.field(default_factory=SolverDiagnostics)
+    """Always empty, since `spsolve` reports nothing about its factorization."""
 
     def track(self, solution: Any) -> "_SpsolveState":
         """No-op, since a Spsolve state owns no memory to order a release after."""
@@ -241,7 +244,7 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
                 reorder=self.reorder,
             )
             solution = unravel_solution(solution, packed_structures)
-            return solution, RESULTS.successful, {}
+            return solution, RESULTS.successful, {"diagnostics": state.diagnostics}
 
     def transpose(
         self, state: _SpsolveState, options: dict[str, Any]

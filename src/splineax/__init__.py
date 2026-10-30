@@ -80,6 +80,9 @@ from .solvers import (
     RichardsonOptions as RichardsonOptions,
 )
 from .solvers import (
+    SolverDiagnostics as SolverDiagnostics,
+)
+from .solvers import (
     SparseLinearSolver as SparseLinearSolver,
 )
 from .solvers import (
