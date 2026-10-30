@@ -70,6 +70,13 @@ pip install splineax[pardiso]
 solver = splx.Pardiso()
 ```
 
+`Pardiso` follows the lineax tags. An operator tagged `lineax.symmetric_tag` that also
+carries a [`sparsity_pattern_tag`][splineax.sparsity_pattern_tag] is factored as a
+symmetric indefinite matrix and reports diagnostics (see [Factorization
+diagnostics](#factorization-diagnostics)). Any other operator is factored as a general
+matrix and reports nothing. `perturbed_pivots` also counts structurally zero diagonal
+entries, so prefer `positive` and `negative` for a matrix that has them.
+
 !!! warning "CPU, real-valued, and double precision only, and requires installation"
 
     `pardiso_mkl_jax` wraps a CPU-only library and only supports real-valued matrices
@@ -117,6 +124,49 @@ factorizes fresh instead, like `KLU` does.
     `ImportError` if the optional dependency isn't installed. Use
     [`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] for code that should work
     whether or not it is.
+
+## Factorization diagnostics
+
+A direct solver can report facts about the factorization it holds, such as whether the
+matrix is positive definite. A solve returns them as `solution.stats["diagnostics"]`,
+and a solver state holds them as `state.diagnostics`. Inside
+[`stateful_solve_transform`][splineax.stateful_solve_transform] use the stats, since the
+final state only comes back at the end.
+
+[`SolverDiagnostics`][splineax.SolverDiagnostics] has four fields. A field is `None`
+when the solver does not report it.
+
+| Field | Meaning |
+| --- | --- |
+| `positive_definite` | Every pivot is positive and none was perturbed. |
+| `positive`, `negative` | The number of positive and negative eigenvalues. |
+| `perturbed_pivots` | The pivots the solver replaced by a small number. |
+
+```{.python notest}
+sparsity = BCOO.fromdense(matrix)
+tags = {lx.symmetric_tag, splx.sparsity_pattern_tag(sparsity)}
+operator = splx.BCOOLinearOperator(sparsity, tags=tags)
+
+solution, state = splx.linear_solve(operator, b, splx.Pardiso())
+diagnostics = solution.stats["diagnostics"]
+
+if diagnostics.positive_definite:
+    ...
+```
+
+| Solver | Reports |
+| --- | --- |
+| `Pardiso` | All four fields, for a symmetric operator with a sparsity tag. |
+| Any other solver or operator | Nothing. |
+
+A singular matrix is never reported as positive definite.
+[`HybridDirectIterative`][splineax.HybridDirectIterative], `IterativeRefinement` and
+[`AutoSparseLinearSolver`][splineax.AutoSparseLinearSolver] report the diagnostics of
+the solver they wrap. While a hybrid solver reuses an older factorization for a changed
+operator, the diagnostics describe that older factorization.
+
+The diagnostics keep a fixed structure, so they can drive a loop under `jax.jit`. See
+[Diagnostics in a loop](stateful.md#diagnostics-in-a-loop).
 
 ## `AutoSparseLinearSolver`
 

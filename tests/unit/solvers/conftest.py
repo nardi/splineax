@@ -155,3 +155,25 @@ def solver(request: pytest.FixtureRequest, enable_x64: None) -> lx.AbstractLinea
     under x64 does not hurt it either.
     """
     return request.param()
+
+
+@pytest.fixture(
+    params=[
+        pytest.param(
+            Pardiso,
+            marks=[
+                pytest.mark.skipif(
+                    not _pardiso_available(),
+                    reason="pardiso-mkl-jax is not installed",
+                ),
+                pytest.mark.cpu_only,
+            ],
+        ),
+    ],
+    ids=["pardiso"],
+)
+def diagnostics_solver(
+    request: pytest.FixtureRequest, enable_x64: None
+) -> lx.AbstractLinearSolver:
+    """Yields each solver that reports the inertia of a symmetric matrix."""
+    return request.param()
