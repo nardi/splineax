@@ -22,7 +22,7 @@ from jax.experimental.sparse import BCOO
 import splineax as splx
 from splineax import KLU, CuDSS, Pardiso, SolverDiagnostics, Spsolve
 from splineax.solvers import CuDSSMatrixType
-from splineax.solvers._pardiso import upper_triangle_selection
+from splineax.solvers._pardiso import _pardiso_available, upper_triangle_selection
 
 from ...fake_cudss import FakeCuDSS
 from .conftest import (
@@ -37,6 +37,8 @@ from .conftest import (
 @pytest.fixture
 def pardiso(enable_x64: None) -> Pardiso:
     """A `Pardiso` solver, with x64 enabled, skipped when it is not installed."""
+    if not _pardiso_available():
+        pytest.skip("The optional `pardiso-mkl-jax` dependency is not installed.")
     return Pardiso()
 
 
