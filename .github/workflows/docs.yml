@@ -13,7 +13,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # The documentation site uses the Tufte theme as a submodule.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -29,7 +32,7 @@ jobs:
         run: uv sync --locked
 
       - name: Build site
-        run: uv run mkdocs build --strict
+        run: uv run zensical build --strict
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
