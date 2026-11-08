@@ -1,0 +1,67 @@
+[project]
+site_name = "splineax"
+site_description = "Sparse linear operators and solvers for Lineax"
+repo_url = "https://github.com/nardi/splineax"
+repo_name = "nardi/splineax"
+
+# The dropdown of the page title that switches to the other documentation sites,
+# which the theme lists by default.
+[project.extra.site_switcher]
+current = "splineax"
+
+nav = [
+  { "Home" = "index.md" },
+  { "User guide" = [
+    { "Basic usage" = "guide/basic.md" },
+    { "Operators" = "guide/operators.md" },
+    { "Solvers" = "guide/solvers.md" },
+    { "Stateful solves" = "guide/stateful.md" },
+    { "Transforming existing Lineax code" = "guide/transform.md" },
+    { "Profiling solves" = "guide/profiling.md" },
+  ] },
+  { "API reference" = [
+    { "Operators" = "api/operators.md" },
+    { "Solvers" = "api/solvers.md" },
+    { "Solve profiling" = "api/profiling.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+# The Tufte theme comes from the `theme` submodule and extends the built-in theme. It
+# loads its own fonts, so the built-in theme loads none from Google Fonts.
+custom_dir = "theme/zensical_tufte"
+font = false
+features = [
+  "navigation.sections",
+  "navigation.top",
+  "content.code.copy",
+  "search.suggest",
+]
+
+# The directory of the theme contains two files of its Python packaging, which the site
+# does not need.
+[project.plugins.exclude]
+glob = ["mkdocs_theme.yml", "__init__.py", "__pycache__/*"]
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+show_source = false
+show_root_heading = true
+show_root_full_path = false
+heading_level = 2
+members_order = "source"
+merge_init_into_class = true
+separate_signature = true
+show_signature_annotations = true
+
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.pymdownx.details]
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+[project.markdown_extensions.pymdownx.superfences]
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.toc]
+permalink = true

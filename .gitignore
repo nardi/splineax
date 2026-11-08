@@ -9,5 +9,6 @@ wheels/
 # Virtual environments
 .venv
 
-# MkDocs build output
+# Documentation build output
 site/
+.cache/

@@ -89,4 +89,4 @@ a GPU, the tests marked `cpu_only` skip, since they solve through `KLU` or `Pard
 
 ## Documentation
 
-Build the docs locally with `uv run mkdocs serve`, or view the [user guide and API reference here](https://nardi.github.io/splineax).
+Build the docs locally with `uv run zensical serve`, or view the [user guide and API reference here](https://nardi.github.io/splineax).
