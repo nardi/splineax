@@ -549,7 +549,7 @@ class _ProfileOrderedSolver(AbstractLinearSolver):
     lineax's `linear_solve` primitive traces `compute` late, during abstract evaluation,
     lowering, and batching. By then the code after the solve has already been traced, so
     the solve's records would sort after it. This wrapper's `compute` records inside the
-    order slot its `_OrderedSolveState` carries, which `_solve_factorization` reserves at
+    order slot its `_OrderedSolveState` carries, which `solve_factorization` reserves at
     the call site.
     """
 
@@ -611,11 +611,11 @@ class _ProfileOrderedSolver(AbstractLinearSolver):
         return self.solver.assume_full_rank()
 
 
-def _solve_factorization(
+def solve_factorization(
     operator: AbstractLinearOperator,
     vector: PyTree[Any],
     solver: Any,
-    opts: dict[str, Any],
+    options: dict[str, Any],
     state: Any,
     throw: bool,
 ) -> Solution:
@@ -628,10 +628,13 @@ def _solve_factorization(
     While a `SolveProfile` is active, the solver and state are wrapped in
     `_ProfileOrderedSolver` and `_OrderedSolveState`. The solve's records then sort at
     this call site. With no profile active, the solve goes to lineax unchanged.
+
+    The `solver` and the `state` have the types of one solver, which this function does not
+    name.
     """
     if not profiling_active():
         return _lx_linear_solve(
-            operator, vector, solver, options=opts, state=state, throw=throw
+            operator, vector, solver, options=options, state=state, throw=throw
         )
     # Reserve the slot now, while the code around this solve is being traced.
     ordered_state = _OrderedSolveState(state, reserve_order_slot())
@@ -639,7 +642,7 @@ def _solve_factorization(
         operator,
         vector,
         _ProfileOrderedSolver(solver),
-        options=opts,
+        options=options,
         state=ordered_state,
         throw=throw,
     )
@@ -649,6 +652,26 @@ def _solve_factorization(
         result=solution.result,
         state=state,
         stats=solution.stats,
+    )
+
+
+def solve_prepared_tangent(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    solver: Any,
+    options: dict[str, Any],
+    state: Any,
+) -> Solution:
+    """Solve for a tangent vector against the factorization in `state`.
+
+    The solve is linear in `vector`, so it calls `lineax.linear_solve` without the
+    `custom_jvp` of `linear_solve`. The returned `Solution` has the state after `update`
+    and before any `track`. The solve has no error check, because the primal solve that it
+    follows has been checked already.
+    """
+    updated_state = solver.update(state, operator, options)
+    return solve_factorization(
+        operator, vector, solver, options, updated_state, throw=False
     )
 
 
@@ -665,7 +688,7 @@ def update_then_compute(
     solve. It never raises on a failed result. The caller checks the result code.
     """
     updated_state = solver.update(state, operator, options)
-    solution = _solve_factorization(
+    solution = solve_factorization(
         operator, vector, solver, options, updated_state, throw=False
     )
     return solution.value, solution.result, solution.stats, updated_state
@@ -689,7 +712,7 @@ def _stateful_solve_impl(
     if state is None:
         # A state fresh from `init` matches the operator, so there is nothing to update.
         state = solver.init(operator, opts)
-        initial = _solve_factorization(
+        initial = solve_factorization(
             operator, vector, solver, opts, state, throw=False
         )
         value, result, stats = initial.value, initial.result, initial.stats
@@ -752,7 +775,7 @@ def _stateful_solve_jvp(
         )
     opts = {} if options is None else options
     prepared = _prepare_state(operator, state, solver, opts)
-    solution = _solve_factorization(operator, vector, solver, opts, prepared, throw)
+    solution = solve_factorization(operator, vector, solver, opts, prepared, throw)
 
     # Build the tangent right-hand side `b' - A'x`. With no tangent on the vector or
     # the operator, the tangent solve is skipped entirely: the tangent outputs are
@@ -783,7 +806,7 @@ def _stateful_solve_jvp(
 
     # The tangent solve: the same operator object and the same prepared state, so
     # `update` is a no-op and the factorization is shared with the primal solve.
-    t_solution = _solve_factorization(operator, t_rhs, solver, opts, prepared, throw)
+    t_solution = solve_factorization(operator, t_rhs, solver, opts, prepared, throw)
 
     # Track the primal solution onto the state once, after both solves. Only the
     # primal solution can be a witness: JAX requires a custom-JVP rule's primal
