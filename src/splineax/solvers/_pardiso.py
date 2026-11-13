@@ -1,5 +1,6 @@
 import functools
 import importlib.util
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import equinox as eqx
@@ -22,7 +23,7 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
-from splineax._profile import compute_scope, record_operation
+from splineax._profile import EventRecord, compute_scope, record_event, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._tags import _ContentPatternTag
@@ -306,10 +307,9 @@ def _reanalyze_if_unstable(
             matrix_type=pmj.MatrixType.REAL_NONSYMMETRIC,
         )
 
-    # The cond picks only the token and iparm, so no record callback sits inside it (an IO effect in
-    # a cond breaks `vmap`-of-cond under a jitted forward-mode derivative). The caller
-    # records the branch through the `perturbed_pivots`/`zero_pivot` flags it already
-    # carries, building the reason on the host.
+    # Under `vmap` the cond becomes a select that runs both branches, so a record inside a
+    # branch would fire for both. The caller records the outcome through the
+    # `perturbed_pivots` and `zero_pivot` flags, and builds the reason on the host.
     return jax.lax.cond(unstable, refresh, lambda: (token, iparm))
 
 
@@ -349,8 +349,8 @@ class _PardisoState(eqx.Module):
         """
         if self.token is None:
             return self
-        record_operation("track")
         value = solution.value if isinstance(solution, Solution) else solution
+        value = record_operation(value, "track")
         # The witness only establishes an execution-order dependency, so stop its
         # gradient: a tracked state must stay usable inside `grad` of the solve.
         witness = jax.lax.stop_gradient(value)
@@ -374,9 +374,9 @@ class _PardisoState(eqx.Module):
         """Free the native factorization, ordered after any tracked solves."""
         if self.token is None:
             return
-        record_operation("release")
-        record_operation("release", "Pardiso")
-        _pardiso_mkl_jax().primitive.release(self.token)
+        token = record_operation(self.token, "release")
+        token = record_operation(token, "release", "Pardiso")
+        _pardiso_mkl_jax().primitive.release(token)
 
 
 class Pardiso(AbstractLinearSolver[_PardisoState]):
@@ -422,17 +422,28 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         self,
         operator: AbstractLinearOperator,
         tag: object | None,
+        record_boundary: Callable[[_CSR], _CSR],
     ) -> _PardisoState:
+        """Analyze and factor `operator` into a ready-to-solve state.
+
+        Shared by `init` and by `update`'s rebuild path. Each of them passes the function
+        that records its own generic operation, so a rebuild does not record an `init`.
+        """
         sparse, csr, shape, symmetric = _factorization_inputs(operator, tag, None)
+        csr = record_boundary(csr)
         indptr, indices, values = csr
         pmj = _pardiso_mkl_jax()
         primitive = pmj.primitive
         matrix_type = _matrix_type(pmj, symmetric)
         # `analyze` and `factor` return `(token, final_iparm)`. The iparm of `factor` holds
         # the diagnostics.
-        record_operation("analyze", "Pardiso")
+        indptr, indices, values = record_operation(
+            (indptr, indices, values), "analyze", "Pardiso"
+        )
         token, _ = primitive.analyze(indptr, indices, values, matrix_type=matrix_type)
-        record_operation("factor", "Pardiso")
+        token, indptr, indices, values = record_operation(
+            (token, indptr, indices, values), "factor", "Pardiso"
+        )
         token, iparm = primitive.factor(
             token, indptr, indices, values, matrix_type=matrix_type
         )
@@ -456,15 +467,19 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             raise ValueError(
                 "`Pardiso` may only be used for linear solves with square matrices"
             )
-        record_operation(
-            "init",
-            inputs=lambda: profile_inputs(
-                operator,
-                operator_pattern_tag(operator),
-                (operator.out_size(), operator.in_size()),
+        return self._analyze_and_factor(
+            operator,
+            operator_pattern_tag(operator),
+            lambda csr: record_operation(
+                csr,
+                "init",
+                inputs=lambda: profile_inputs(
+                    operator,
+                    operator_pattern_tag(operator),
+                    (operator.out_size(), operator.in_size()),
+                ),
             ),
         )
-        return self._analyze_and_factor(operator, operator_pattern_tag(operator))
 
     def init_symbolic(
         self, sparsity: _Sparsity, options: dict[str, Any] = {}
@@ -482,13 +497,16 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             raise ValueError(
                 f"`Pardiso.init_symbolic` requires a square matrix; got shape {shape}."
             )
-        # Deferred: no analyze runs here, only the pattern is recorded (see the docstring).
-        record_operation(
-            "init_symbolic",
-            inputs=lambda: profile_inputs(
-                sparsity, sparsity_pattern_tag(sparsity), shape
-            ),
-            outputs={"note": "deferred"},
+        # Deferred: no analyze runs here (see the docstring). The state contains no JAX
+        # arrays for `record_operation` to entangle with, so the record is an event.
+        record_event(
+            EventRecord(
+                "init_symbolic",
+                inputs=lambda: profile_inputs(
+                    sparsity, sparsity_pattern_tag(sparsity), shape
+                ),
+                outputs={"note": "deferred"},
+            )
         )
         return _PardisoState(
             None,
@@ -524,14 +542,14 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         """
         if operator is state.operator:
             # Nothing changed, so this is a no-op.
-            record_operation(
+            return record_operation(
+                state,
                 "update",
                 inputs=lambda: profile_inputs(
                     operator, operator_pattern_tag(operator), state.shape
                 ),
                 outputs={"outcome": "noop", "reason": "Same operator"},
             )
-            return state
         tag = operator_pattern_tag(operator)
         if state.token is None:
             # A symbolic-only state from `init_symbolic` deferred the analysis, so the first
@@ -547,7 +565,8 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
                 return transposed_state
         if reuse_block is None:
             # Same pattern, new values. Refactor against the stored analysis.
-            record_operation(
+            state = record_operation(
+                state,
                 "update",
                 inputs=lambda: profile_inputs(operator, tag, state.shape),
                 outputs={"outcome": "reused", "reason": "Identical sparsity tag"},
@@ -555,12 +574,16 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
             return self._refactor(state, operator, tag)
         # Cannot reuse the analysis, so analyze from scratch. Recorded as a rebuild, with the
         # reason, so the analyze below is attributed to it rather than read as a first init.
-        record_operation(
-            "update",
-            inputs=lambda: profile_inputs(operator, tag, state.shape),
-            outputs={"outcome": "rebuilt", "reason": reuse_block},
+        return self._analyze_and_factor(
+            operator,
+            tag,
+            lambda csr: record_operation(
+                csr,
+                "update",
+                inputs=lambda: profile_inputs(operator, tag, state.shape),
+                outputs={"outcome": "rebuilt", "reason": reuse_block},
+            ),
         )
-        return self._analyze_and_factor(operator, tag)
 
     def _refactor(
         self,
@@ -587,7 +610,8 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
         # A symmetric matrix has no matching to tune, so it is never reanalyzed.
         unstable = (iparm[13] > 0) | (iparm[29] != 0)
         reanalyzed = jnp.zeros((), bool) if symmetric else unstable
-        record_operation(
+        token, iparm = record_operation(
+            (token, iparm),
             "refactor",
             "Pardiso",
             dynamic={
@@ -632,7 +656,7 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
                 "`Pardiso` cannot solve with a symbolic-only state; call `update` with "
                 "an operator first."
             )
-        with compute_scope():
+        with compute_scope(vector, after=state) as vector:
             b = ravel_vector(vector, state.packed_structures)
             b = _ensure_cpu(b)
             b = b.astype(jnp.float64)
@@ -655,7 +679,8 @@ class Pardiso(AbstractLinearSolver[_PardisoState]):
                 # A symmetric matrix is its own transpose.
                 transpose=state.transposed and not state.symmetric,
             )
-            record_operation(
+            solution = record_operation(
+                solution,
                 "solve_stateful",
                 "Pardiso",
                 inputs={"transposed": state.transposed} if state.transposed else None,

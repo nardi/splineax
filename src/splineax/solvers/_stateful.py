@@ -21,7 +21,7 @@ from jaxtyping import Array, Bool, PyTree
 from lineax import AbstractLinearOperator
 from lineax._solution import RESULTS
 
-from splineax._profile import record_operation, suppress_records
+from splineax._profile import record_operation
 from splineax.solvers._diagnostics import SolverDiagnostics
 
 _StateT = TypeVar("_StateT")
@@ -130,9 +130,8 @@ def conditional_update(
 
     The cond covers the whole `update`, so the factorization work is skipped at runtime
     when `refactor` is false. Both branches must return one pytree structure, which holds
-    when `operator` shares the sparsity pattern of the operator in `state`. Records inside
-    the branch are dropped (see `suppress_records`), and one record outside carries the
-    outcome.
+    when `operator` shares the sparsity pattern of the operator in `state`. One record
+    outside the branch carries the outcome.
 
     Under `vmap` the predicate is reduced with any across the batch dimension, so the cond
     stays a branch instead of becoming a select that runs `update` at every index. A
@@ -145,8 +144,7 @@ def conditional_update(
     static_parts: list[_StateT] = []
 
     def refresh() -> _StateT:
-        with suppress_records():
-            refreshed = update(state, operator, options)
+        refreshed = update(state, operator, options)
         dynamic, static = eqx.partition(refreshed, eqx.is_array)
         static_parts.append(static)
         return dynamic
@@ -161,7 +159,8 @@ def conditional_update(
             "A traced `refactor` requires an operator with the same sparsity pattern as "
             "the operator in the state."
         ) from error
-    record_operation(
+    dynamic = record_operation(
+        dynamic,
         "update",
         dynamic={"refactored": refactor},
         outputs=lambda values: {

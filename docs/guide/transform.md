@@ -235,8 +235,8 @@ listed here.
   function. A call is only found when a solve appears in its primal function. A solve that
   appears only in a rule or a backward function runs on its own.
 - **A batched operator is not threaded.** A solve inside `jax.vmap` is threaded only if
-  its vector is the only batched operand. If the operator or the state is batched as well,
-  the solve builds its own state.
+  its vector is the only batched operand. Otherwise it runs as it does without the
+  transform, so it analyzes and factorizes the matrix again.
 - **Multiple solve families may not work.** The transform threads one state, so a single loop that
   interleaves two different solvers or patterns may not work, or perform poorly because factorizations
   are never reused. You might be able to use `filter_solver` and to separate them and apply the
