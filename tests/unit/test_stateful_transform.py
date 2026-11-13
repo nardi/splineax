@@ -21,6 +21,8 @@ from jax.experimental.sparse import BCOO
 
 import splineax as splx
 
+from ..conftest import SparseSolverCase
+
 pytestmark = pytest.mark.usefixtures("enable_x64")
 
 # Kept as float64 numpy arrays. This module is imported before x64 is enabled, so a `jnp`
@@ -356,6 +358,82 @@ def test_cond_without_prior_state_raises() -> None:
 
     with pytest.raises(NotImplementedError, match="cond"):
         splx.stateful_solve_transform(fn)(_data(), _b1(), jnp.array(1.0))
+
+
+def _static_argument_fn():
+    """A function that takes its tag, solver, and two other static values as arguments."""
+    indices = _indices()
+    traces: list[bool] = []
+
+    def function(data, b, tag, solver, label, postprocess):
+        traces.append(True)
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=(3, 3)), tags=tag
+        )
+        solution = lx.linear_solve(operator, b, solver).value
+        return postprocess["function"](solution) if label == "apply" else solution
+
+    return function, traces
+
+
+class _UnhashableSetting:
+    """A static argument leaf that is not hashable and that equals each other instance."""
+
+    __hash__ = None
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _UnhashableSetting)
+
+
+def test_accepts_static_argument_leaves(sparse_solver: SparseSolverCase) -> None:
+    """A tag, a solver, a string, and a callable are valid arguments, also under `jit`."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    function, _ = _static_argument_fn()
+    run = splx.stateful_solve_transform(function)
+    static_arguments = (
+        tag,
+        sparse_solver.make_solver(),
+        "apply",
+        {"function": jnp.sin},
+    )
+    expected = function(_data(), _b1(), *static_arguments)
+    assert jnp.allclose(run(_data(), _b1(), *static_arguments), expected, atol=1e-8)
+    jitted = jax.jit(lambda data, b: run(data, b, *static_arguments))
+    assert jnp.allclose(jitted(_data(), _b1()), expected, atol=1e-8)
+
+
+def test_caches_the_staged_jaxpr_per_static_argument(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """Equal static leaves share one staged jaxpr, and a new static value stages again."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    function, traces = _static_argument_fn()
+    run = splx.stateful_solve_transform(function)
+    solver = sparse_solver.make_solver()
+    run(_data(), _b1(), tag, solver, "apply", {"function": jnp.sin})
+    run(_data(), _b2(), tag, solver, "apply", {"function": jnp.sin})
+    assert len(traces) == 1, "equal static leaves staged the function more than once"
+    plain = run(_data(), _b1(), tag, solver, "skip", {"function": jnp.sin})
+    assert len(traces) == 2, "a new string did not stage exactly once"
+    assert jnp.allclose(plain, jnp.linalg.solve(_dense(), _b1()), atol=1e-8)
+    run(_data(), _b1(), tag, solver, "apply", {"function": jnp.cos})
+    assert len(traces) == 3, "a new callable did not stage exactly once"
+
+
+def test_caches_an_unhashable_static_leaf_by_identity(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """A static leaf that is not hashable shares a staged jaxpr only with itself."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    function, traces = _static_argument_fn()
+    run = splx.stateful_solve_transform(function)
+    solver = sparse_solver.make_solver()
+    setting = _UnhashableSetting()
+    run(_data(), _b1(), tag, solver, "skip", {"function": setting})
+    run(_data(), _b2(), tag, solver, "skip", {"function": setting})
+    assert len(traces) == 1, "one unhashable leaf staged the function more than once"
+    run(_data(), _b1(), tag, solver, "skip", {"function": _UnhashableSetting()})
+    assert len(traces) == 2, "another unhashable leaf did not stage exactly once"
 
 
 def _scan_fn(tag: object, solver: lx.AbstractLinearSolver | None = None):
