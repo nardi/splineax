@@ -32,7 +32,7 @@ from lineax import AbstractLinearOperator, AbstractLinearSolver, Solution
 from lineax._solution import RESULTS
 from lineax._solve import linear_solve_p
 
-from splineax._profile import is_record_callback
+from splineax._profile import profiling_active
 from splineax.solvers._sparse import (
     TrackableState,
     solve_factorization,
@@ -228,14 +228,6 @@ def _is_selected_solve(eqn: JaxprEqn, filter_solver: _FilterSolver) -> bool:
     return _solver_matches(arguments[4], filter_solver)
 
 
-def _is_profile_record(eqn: JaxprEqn) -> bool:
-    """Whether an equation is the `io_callback` that appends a solve-profile record."""
-    if eqn.primitive.name != "io_callback":
-        return False
-    callback = getattr(eqn.params.get("callback"), "callback_func", None)
-    return is_record_callback(callback)
-
-
 def _state_substitutions(eqn: JaxprEqn, new_state: PyTree) -> dict[Var, Any]:
     """Map the invars carrying a solve's own state to the matching leaves of `new_state`.
 
@@ -310,7 +302,6 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         jaxpr: Jaxpr,
         consts: list[Any],
         args: list[Any],
-        drop_profile_records: bool = False,
         tangent_args: Sequence[bool] | None = None,
     ) -> list[Any]:
         """Evaluate the jaxpr against these argument values, returning its output values.
@@ -318,12 +309,6 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         `tangent_args` flags the arguments that carry tangents. A solve that depends on
         one of them runs with the threaded state, and the state stays a function of the
         primal values alone, see `_thread_solve`.
-
-        Profile records that come before a threaded solve in the same jaxpr are dropped,
-        and so are all records when `drop_profile_records` is true. A jaxpr that binds a
-        solve itself is the body of `lineax.linear_solve`, where everything before the bind
-        is `lineax`'s own `init`. The threaded state replaces that init, so its records
-        describe work that no longer runs.
         """
         env: dict[Var, Any] = {}
 
@@ -343,26 +328,13 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             if is_tangent
         }
 
-        last_solve_index = max(
-            (
-                index
-                for index, eqn in enumerate(jaxpr.eqns)
-                if _is_selected_solve(eqn, self.filter_solver)
-            ),
-            default=-1,
-        )
-        for index, eqn in enumerate(jaxpr.eqns):
-            drops_records = drop_profile_records or index < last_solve_index
-            if drops_records and _is_profile_record(eqn):
-                continue
+        for eqn in jaxpr.eqns:
             operands = [read(v) for v in eqn.invars]
             operand_is_tangent = [
                 not isinstance(v, Literal) and v in tangent_vars for v in eqn.invars
             ]
             has_tangent_operand = any(operand_is_tangent)
-            outputs = self._process_equation(
-                eqn, operands, env, drops_records, operand_is_tangent
-            )
+            outputs = self._process_equation(eqn, operands, env, operand_is_tangent)
             if has_tangent_operand:
                 tangent_vars.update(eqn.outvars)
             for outvar, value in zip(eqn.outvars, outputs):
@@ -375,7 +347,6 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         eqn: JaxprEqn,
         operands: list[Any],
         env: dict[Var, Any],
-        drop_profile_records: bool,
         operand_is_tangent: Sequence[bool] = (),
     ) -> list[Any]:
         """Produce one equation's output values, threading the state through a matched solve.
@@ -384,8 +355,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         batched if only its vector is batched. An inline primitive has its body interpreted
         in place, a higher-order primitive that nests a matched solve raises, and everything
         else is rebound as `jax.core.eval_jaxpr` would. A threaded solve may rewrite `env`,
-        see `_thread_solve`, and an inlined body drops its profile records when
-        `drop_profile_records` is true.
+        see `_thread_solve`.
         """
         primitive: Primitive = eqn.primitive
         if primitive is linear_solve_p:
@@ -411,11 +381,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         if primitive.name in _INLINE_PRIMITIVES:
             inner = cast(ClosedJaxpr, eqn.params["jaxpr"])
             return self.interpret(
-                inner.jaxpr,
-                inner.consts,
-                operands,
-                drop_profile_records,
-                operand_is_tangent,
+                inner.jaxpr, inner.consts, operands, operand_is_tangent
             )
 
         nested = _nested_jaxprs(eqn)
@@ -1502,6 +1468,8 @@ def stateful_solve_transform(
             state_treedef,
             tuple(jax.typeof(leaf) for leaf in state_leaves),
             keep_state,
+            # A jaxpr that was staged without a profile contains no record callbacks.
+            profiling_active(),
         )
         computation = staged_by_signature.get(signature)
         if computation is None:

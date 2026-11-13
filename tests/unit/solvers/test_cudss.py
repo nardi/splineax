@@ -459,6 +459,23 @@ def test_release_under_jit_is_skipped(
     assert len(fake_cudss.release_calls) == 1
 
 
+def test_release_under_jit_is_recorded_as_skipped(
+    make_operator: OperatorFactory, fake_cudss: FakeCuDSS
+) -> None:
+    """A traced `release` is skipped, and a profile records that it was skipped, even
+    though no result of the function depends on the record."""
+    state = CuDSS().init(make_operator(SQUARE_MATRIX), {})
+    profile = splx.create_solve_profile()
+    with profile:
+        eqx.filter_jit(lambda traced_state: traced_state.release())(state)
+    releases = [record for record in profile.records if record.operation == "release"]
+    assert [(record.solver, record.outputs.get("note")) for record in releases] == [
+        (None, None),
+        ("CuDSS", "skipped under jit"),
+    ]
+    state.release()
+
+
 def test_profile_records_cudss_operations(fake_cudss: FakeCuDSS) -> None:
     """A solve profile records the analyze, the factorize per operator, the solves, and
     the release, with the `update` marked as reusing the analysis."""
