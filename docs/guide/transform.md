@@ -27,6 +27,8 @@ the transform it runs the function, and each time it encounters a
 equivalent to `splx.linear_solve`. The first solve builds the state with `init`,
 and every later solve folds the operator in with `update`, so a new matrix that
 shares the same pattern as the previous one will reuse the previous analysis.
+The transformed function handles its arguments like `equinox.filter_jit`, except
+that Python scalars are traced, as in `jax.jit`.
 
 ```python
 import jax

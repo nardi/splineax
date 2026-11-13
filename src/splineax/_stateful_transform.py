@@ -16,6 +16,7 @@ the function as a custom derivative that takes and returns the state.
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar, cast, overload
 
+import equinox as eqx
 import equinox.internal as eqxi
 import jax
 import jax.core
@@ -1151,6 +1152,39 @@ class _StagedComputation(NamedTuple, Generic[_StateT]):
     """How many leading result leaves belong to the output, the rest being the state."""
 
 
+class _StaticLeafIdentity:
+    """A cache key for a static argument leaf that is not hashable.
+
+    Two keys are equal if they contain the same object. The key has a reference to the
+    leaf, so the `id` of the leaf cannot be reused while the key is in the cache.
+    """
+
+    leaf: object
+    """The static leaf that this key identifies."""
+
+    def __init__(self, leaf: object) -> None:
+        self.leaf = leaf
+
+    def __hash__(self) -> int:
+        return id(self.leaf)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _StaticLeafIdentity) and other.leaf is self.leaf
+
+
+def _static_leaf_key(leaf: object) -> object:
+    """Return the cache key of a static argument leaf.
+
+    A hashable leaf is its own key, so two equal leaves share one staged jaxpr. A leaf
+    that is not hashable is compared by identity.
+    """
+    try:
+        hash(leaf)
+    except TypeError:
+        return _StaticLeafIdentity(leaf)
+    return leaf
+
+
 class _WrappedFunction(Protocol[_OutputT]):
     """The function `stateful_solve_transform` returns.
 
@@ -1182,6 +1216,12 @@ def stateful_solve_transform(
     whose own signature already has a `state` argument cannot be wrapped, since the keyword
     is taken.
 
+    The arguments can be pytrees with leaves of any type. A leaf that is a JAX array, a
+    NumPy array or a Python scalar is a traced input of the staged jaxpr. Each other
+    leaf, such as a sparsity tag, a string or a callable, is static. The staged jaxpr is
+    cached for each combination of static leaves, so a new static value causes a new
+    trace of `fn`.
+
     **Arguments:**
 
     - `fn`: the function to transform. It calls `lineax.linear_solve` internally.
@@ -1199,15 +1239,17 @@ def stateful_solve_transform(
     staged_by_signature: dict[Any, _StagedComputation[Any]] = {}
 
     def stage(
-        call: tuple[tuple[Any, ...], dict[str, Any]], state: Any
+        dynamic_call: PyTree[Any], static_call: PyTree[Any], state: Any
     ) -> _StagedComputation[Any]:
         """Trace `fn` under this call and state, interpret it, and prune the result.
 
         Runs the state-threading interpreter once to build the transformed jaxpr, then drops
         the dead init with `dce_jaxpr`. The output and state structures the interpreter
         discovers are captured here so the caller can rebuild both from the evaluated leaves.
+        Only the leaves of `dynamic_call` are inputs of the jaxpr. The leaves of
+        `static_call` are constants of the trace.
         """
-        call_leaves, call_treedef = jax.tree_util.tree_flatten(call)
+        call_leaves, call_treedef = jax.tree_util.tree_flatten(dynamic_call)
         state_leaves, state_treedef = jax.tree_util.tree_flatten(state)
         num_call_leaves = len(call_leaves)
 
@@ -1216,9 +1258,9 @@ def stateful_solve_transform(
         num_output_leaves = 0
 
         def call_flat(*flat: Any) -> _OutputT:
-            """Call `fn` from a flat list of the call's argument leaves."""
-            these_args, these_kwargs = jax.tree_util.tree_unflatten(
-                call_treedef, list(flat)
+            """Call `fn` from a flat list of the dynamic argument leaves of the call."""
+            these_args, these_kwargs = eqx.combine(
+                jax.tree_util.tree_unflatten(call_treedef, list(flat)), static_call
             )
             return fn(*these_args, **these_kwargs)
 
@@ -1273,19 +1315,23 @@ def stateful_solve_transform(
             state is not None if return_final_state is None else return_final_state
         )
 
-        call = (args, kwargs)
-        call_leaves, call_treedef = jax.tree_util.tree_flatten(call)
+        # Only an array-like leaf can be an input of a jaxpr. Each other leaf is static.
+        dynamic_call, static_call = eqx.partition((args, kwargs), eqx.is_array_like)
+        call_leaves, call_treedef = jax.tree_util.tree_flatten(dynamic_call)
+        static_leaves, static_treedef = jax.tree_util.tree_flatten(static_call)
         state_leaves, state_treedef = jax.tree_util.tree_flatten(state)
         signature = (
             call_treedef,
             tuple(jax.typeof(leaf) for leaf in call_leaves),
+            static_treedef,
+            tuple(_static_leaf_key(leaf) for leaf in static_leaves),
             state_treedef,
             tuple(jax.typeof(leaf) for leaf in state_leaves),
             keep_state,
         )
         computation = staged_by_signature.get(signature)
         if computation is None:
-            computation = stage(call, state)
+            computation = stage(dynamic_call, static_call, state)
             staged_by_signature[signature] = computation
 
         results = jax.core.eval_jaxpr(
