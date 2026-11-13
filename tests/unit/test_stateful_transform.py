@@ -436,6 +436,19 @@ def test_caches_an_unhashable_static_leaf_by_identity(
     assert len(traces) == 2, "another unhashable leaf did not stage exactly once"
 
 
+def test_stages_again_when_a_profile_becomes_active(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """A jaxpr that was staged without a profile is not used while a profile records."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    run = splx.stateful_solve_transform(_two_solve_fn(tag, sparse_solver.make_solver()))
+    run(_data(), _b1(), _b2())
+    profile = splx.create_solve_profile()
+    with profile:
+        jax.block_until_ready(run(_data(), _b1(), _b2()))
+    assert [record.operation for record in profile.records].count("init") == 1
+
+
 def _scan_fn(tag: object, solver: lx.AbstractLinearSolver | None = None):
     """A function that solves once, then solves each step of a `scan` over right-hand sides.
 
@@ -1066,6 +1079,72 @@ def test_jacobian_inside_the_transform_does_not_rebuild(
             record.operation for record in profile.records if record.solver is None
         ]
         assert generic_operations.count("init") == 1
+
+
+def _fresh_system(size: int) -> tuple[jax.Array, object]:
+    """A tridiagonal matrix of this size and its sparsity tag.
+
+    `lineax` caches the trace of a solve for each solver and shape. A cached trace has the
+    records of the profile that was active when `lineax` made it. A test that counts records
+    uses a size that no other test uses.
+    """
+    dense = 3.0 * jnp.eye(size) - jnp.eye(size, k=1) - jnp.eye(size, k=-1)
+    return dense, splx.sparsity_pattern_tag(BCOO.fromdense(dense))
+
+
+def test_jacrev_inside_the_transform_records_one_state(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """The profile of a root find below `jax.jacrev` has one `init`.
+
+    The backward pass of `jax.jacrev` holds the `init` of the adjoint solve in a different
+    jaxpr than the solve. The transform replaces that `init`, so nothing uses its result
+    and the compiler removes its records.
+    """
+    optx = pytest.importorskip("optimistix")
+    size = 5
+    dense, tag = _fresh_system(size)
+
+    def find_root(right_hand_side: jax.Array) -> jax.Array:
+        return optx.root_find(
+            lambda value, target: dense @ value + 0.1 * value**3 - target,
+            optx.Newton(
+                rtol=1e-10, atol=1e-10, linear_solver=sparse_solver.make_solver()
+            ),
+            jnp.zeros(size),
+            args=right_hand_side,
+            tags=frozenset({tag}),
+            adjoint=optx.ImplicitAdjoint(linear_solver=sparse_solver.make_solver()),
+        ).value
+
+    run = jax.jit(splx.stateful_solve_transform(jax.jacrev(find_root)))
+    profile = splx.create_solve_profile()
+    with profile:
+        jax.block_until_ready(run(jnp.linspace(1.0, 2.0, size)))
+    assert len(profile.sequences) == 1
+
+
+def test_keeps_the_records_of_a_solve_that_the_filter_rejects(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """A solve that the transform does not thread keeps the records of its own `init`."""
+    dense, tag = _fresh_system(6)
+    solver = sparse_solver.make_solver()
+    indices = BCOO.fromdense(dense).indices
+
+    def function(data: jax.Array, vector: jax.Array) -> jax.Array:
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=dense.shape), tags=tag
+        )
+        return lx.linear_solve(operator, vector, solver).value
+
+    run = splx.stateful_solve_transform(function, filter_solver=lambda solver: False)
+    profile = splx.create_solve_profile()
+    with profile:
+        jax.block_until_ready(run(BCOO.fromdense(dense).data, jnp.ones(dense.shape[0])))
+    operations = [record.operation for record in profile.records]
+    assert operations.count("init") == 1
+    assert operations.count("compute") == 1
 
 
 @pytest.mark.cpu_only

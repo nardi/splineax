@@ -1,4 +1,5 @@
 import importlib.util
+from collections.abc import Callable
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +24,12 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
-from splineax._profile import compute_scope, record_operation
+from splineax._profile import (
+    EventRecord,
+    compute_scope,
+    record_event,
+    record_operation,
+)
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.solvers._diagnostics import SolverDiagnostics
@@ -267,15 +273,16 @@ def _refactorize_or_factorize(
     reuse_is_safe = eqxi.unvmap_all(reciprocal_condition > _REFACTOR_RCOND_FLOOR)
     floor = _REFACTOR_RCOND_FLOOR
 
-    # The cond picks only the token, so no record callback sits inside it (an IO effect in
-    # a cond breaks `vmap`-of-cond under a jitted forward-mode derivative). The branch flag
-    # rides out as a dynamic value, and the host callback picks the reason below.
+    # Under `vmap` the cond becomes a select that runs both branches, so a record inside a
+    # branch would fire for both. The flag of the chosen branch is a dynamic value of one
+    # record outside the cond, and the host callback picks the reason below.
     chosen = jax.lax.cond(
         reuse_is_safe,
         lambda: refreshed,
         lambda: cudss.factorize(refreshed, values),
     )
-    record_operation(
+    return record_operation(
+        chosen,
         "refactorize",
         "CuDSS",
         dynamic={"reused": reuse_is_safe, "rcond": reciprocal_condition},
@@ -287,7 +294,6 @@ def _refactorize_or_factorize(
             )
         },
     )
-    return chosen
 
 
 def _read_diagnostics(
@@ -403,8 +409,8 @@ class _CuDSSState(eqx.Module):
         on the solution values, so that further operations on it, like the `factorize`
         in a later `update`, will be ordered after this call.
         """
-        record_operation("track")
         value = solution.value if isinstance(solution, Solution) else solution
+        value = record_operation(value, "track")
         # The witness only establishes an execution-order dependency, so stop its
         # gradient: a tracked state must stay usable inside `grad` of the solve.
         witness = jax.lax.stop_gradient(value)
@@ -420,13 +426,17 @@ class _CuDSSState(eqx.Module):
 
     def release(self) -> None:
         """Release the state's cache entry, unless traced (see `_maybe_release`)."""
-        record_operation("release")
-        released = _maybe_release(_spineax_cudss(), self.token)
-        record_operation(
-            "release",
-            "CuDSS",
-            outputs=None if released else {"note": "skipped under jit"},
-        )
+        # Under `jit` the release does not run, so the records are events that state this.
+        # Outside `jit` they follow the token like the records of any other operation.
+        if isinstance(self.token.id, jax.core.Tracer):
+            record_event(
+                EventRecord("release"),
+                EventRecord("release", "CuDSS", outputs={"note": "skipped under jit"}),
+            )
+            return
+        token = record_operation(self.token, "release")
+        token = record_operation(token, "release", "CuDSS")
+        _maybe_release(_spineax_cudss(), token)
 
 
 class CuDSSReordering(IntEnum):
@@ -552,7 +562,9 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
     def _analyze(self, csr: _CSR, mtype_id: int) -> "FactorToken":
         """Run cuDSS's analysis phase for a CSR pattern, returning an analyzed token."""
         offsets, columns, values = csr
-        record_operation("analyze", "CuDSS")
+        offsets, columns, values = record_operation(
+            (offsets, columns, values), "analyze", "CuDSS"
+        )
         return _spineax_cudss().analyze(
             values,
             offsets,
@@ -567,24 +579,30 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _CuDSSState:
-        record_operation(
-            "init",
-            inputs=lambda: profile_inputs(
-                operator,
-                operator_pattern_tag(operator),
-                (operator.out_size(), operator.in_size()),
+        return self._analyze_and_factor(
+            operator,
+            options,
+            lambda csr: record_operation(
+                csr,
+                "init",
+                inputs=lambda: profile_inputs(
+                    operator,
+                    operator_pattern_tag(operator),
+                    (operator.out_size(), operator.in_size()),
+                ),
             ),
         )
-        return self._analyze_and_factor(operator, options)
 
     def _analyze_and_factor(
-        self, operator: AbstractLinearOperator, options: dict[str, Any]
+        self,
+        operator: AbstractLinearOperator,
+        options: dict[str, Any],
+        record_boundary: Callable[[_CSR], _CSR],
     ) -> _CuDSSState:
         """Analyze and factorize `operator` into a ready-to-solve state.
 
-        Shared by `init` and by `update`'s rebuild path, so the profile records the
-        analyze and factorize without a second `init` boundary when a changed pattern
-        forces a rebuild.
+        Shared by `init` and by `update`'s rebuild path. Each of them passes the function
+        that records its own generic operation, so a rebuild does not record an `init`.
         """
         del options
         if operator.in_size() != operator.out_size():
@@ -593,13 +611,14 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             )
         sparse = sparse_operator(operator, "CuDSS")
         csr, shape = _extract_csr(sparse)
+        csr = record_boundary(csr)
         # Analyze then factorize right away, so the state is ready to solve and reusable
         # across right-hand sides.
         cudss = _spineax_cudss()
         mtype_id = _mtype_id(operator, self.diagnostics, self.matrix_type)
         token = self._analyze(csr, mtype_id)
-        record_operation("factorize", "CuDSS")
-        token = cudss.factorize(token, csr[2])
+        token, values = record_operation((token, csr[2]), "factorize", "CuDSS")
+        token = cudss.factorize(token, values)
         return _CuDSSState(
             sparse,
             token,
@@ -627,7 +646,8 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             raise ValueError(
                 f"`CuDSS.init_symbolic` requires a square matrix; got shape {shape}."
             )
-        record_operation(
+        csr = record_operation(
+            csr,
             "init_symbolic",
             inputs=lambda: profile_inputs(
                 sparsity, sparsity_pattern_tag(sparsity), shape
@@ -664,19 +684,20 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         """
         if operator is state.operator:
             # Nothing changed, so this is a no-op.
-            record_operation(
+            return record_operation(
+                state,
                 "update",
                 inputs=lambda: profile_inputs(
                     operator, operator_pattern_tag(operator), state.shape
                 ),
                 outputs={"outcome": "noop", "reason": "Same operator"},
             )
-            return state
         tag = operator_pattern_tag(operator)
         reuse_block = sparsity_reuse_block(state.sparsity_tag, tag)
         if reuse_block is None:
             # Same pattern, new values. Reuse the analysis the stored token carries.
-            record_operation(
+            state = record_operation(
+                state,
                 "update",
                 inputs=lambda: profile_inputs(operator, tag, state.shape),
                 outputs={"outcome": "reused", "reason": "Identical sparsity tag"},
@@ -685,12 +706,16 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         # Cannot reuse the analysis, so analyze from scratch. Recorded as a rebuild, with
         # the reason, so the analyze below is attributed to it rather than read as a
         # first init.
-        record_operation(
-            "update",
-            inputs=lambda: profile_inputs(operator, tag, state.shape),
-            outputs={"outcome": "rebuilt", "reason": reuse_block},
+        return self._analyze_and_factor(
+            operator,
+            options,
+            lambda csr: record_operation(
+                csr,
+                "update",
+                inputs=lambda: profile_inputs(operator, tag, state.shape),
+                outputs={"outcome": "rebuilt", "reason": reuse_block},
+            ),
         )
-        return self._analyze_and_factor(operator, options)
 
     def _refactor(
         self, state: _CuDSSState, operator: AbstractLinearOperator, tag: object
@@ -709,17 +734,23 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         cudss = _spineax_cudss()
         if state.token.phase != "factorized":
             # A symbolic-only state from `init_symbolic` has no pivots to reuse yet.
-            record_operation(
-                "factorize", "CuDSS", outputs={"reason": "No prior factorization"}
+            state_token, values = record_operation(
+                (state.token, values),
+                "factorize",
+                "CuDSS",
+                outputs={"reason": "No prior factorization"},
             )
-            token = cudss.factorize(state.token, values)
+            token = cudss.factorize(state_token, values)
         elif self.reordering in _REFACTORIZING_REORDERINGS:
             token = _refactorize_or_factorize(cudss, state.token, values)
         else:
-            record_operation(
-                "factorize", "CuDSS", outputs={"reason": "Reused analysis"}
+            state_token, values = record_operation(
+                (state.token, values),
+                "factorize",
+                "CuDSS",
+                outputs={"reason": "Reused analysis"},
             )
-            token = cudss.factorize(state.token, values)
+            token = cudss.factorize(state_token, values)
         return _CuDSSState(
             sparse,
             token,
@@ -741,7 +772,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
                 "`CuDSS` cannot solve with a symbolic-only state; call `update` with an "
                 "operator first."
             )
-        with compute_scope():
+        with compute_scope(vector, after=state) as vector:
             cudss = _spineax_cudss()
             b = ravel_vector(vector, state.packed_structures)
             b = _ensure_gpu(b)
@@ -752,7 +783,8 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             # cuDSS reports no per-solve rebuild status, unlike klujax and
             # pardiso_mkl_jax. A rebuild of an evicted entry only shows in the global
             # `spineax.cudss.rebuild_count()`.
-            record_operation(
+            x = record_operation(
+                x,
                 "solve",
                 "CuDSS",
                 inputs={"conjugated": True} if state.conjugate_solve else None,
@@ -777,8 +809,11 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             csr_T = _transpose_csr(
                 token.offsets, token.columns, token.values, state.shape
             )
-            record_operation(
-                "analyze", "CuDSS", outputs={"reason": "Transposed general matrix"}
+            csr_T = record_operation(
+                csr_T,
+                "analyze",
+                "CuDSS",
+                outputs={"reason": "Transposed general matrix"},
             )
             new_token = cudss.analyze(
                 csr_T[2],
@@ -791,8 +826,10 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
                 memory=token.memory_id,
             )
             if state.packed_structures is not None:
-                record_operation("factorize", "CuDSS")
-                new_token = cudss.factorize(new_token, csr_T[2])
+                new_token, values_T = record_operation(
+                    (new_token, csr_T[2]), "factorize", "CuDSS"
+                )
+                new_token = cudss.factorize(new_token, values_T)
             return _CuDSSState(
                 state.operator,
                 new_token,
@@ -828,10 +865,13 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         # numerically valid: `refactorize` (pivot reuse) is right here, and cheaper than a
         # fresh `factorize`.
         cudss = _spineax_cudss()
-        record_operation(
-            "refactorize", "CuDSS", outputs={"reason": "Conjugated values"}
+        token, values = record_operation(
+            (state.token, state.token.values),
+            "refactorize",
+            "CuDSS",
+            outputs={"reason": "Conjugated values"},
         )
-        new_token = cudss.refactorize(state.token, jnp.conj(state.token.values))
+        new_token = cudss.refactorize(token, jnp.conj(values))
         return _CuDSSState(
             state.operator,
             new_token,

@@ -174,7 +174,7 @@ def _profile_reuse(fn: Callable[..., _T], *args: object) -> tuple[_T, _Reuse]:
     profile = splx.create_solve_profile()
     with profile:
         output = fn(*args)
-    records = sorted(profile.records, key=lambda record: record.order)
+    records = profile.records
     solver_records = [r for r in records if r.solver == _SOLVER]
     ops = [r.operation for r in solver_records]
     generic = [r for r in records if r.solver is None]

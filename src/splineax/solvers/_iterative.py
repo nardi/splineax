@@ -48,7 +48,7 @@ from lineax._solution import RESULTS
 from lineax._solve import AbstractLinearSolver
 from lineax._solver.misc import preconditioner_and_y0
 
-from splineax._profile import compute_scope, record_operation, suppress_records
+from splineax._profile import compute_scope, record_operation
 from splineax.solvers._diagnostics import SolverDiagnostics
 from splineax.solvers._sparse import (
     SparseLinearSolver,
@@ -156,7 +156,8 @@ class Richardson(AbstractLinearSolver[_RichardsonState]):
         # that the profile looks as if no refinement was used. The gate is a dynamic
         # value instead of a branch, since a record inside a cond breaks `vmap`.
         started = (_tree_norm(initial_residual) > threshold) & (self.max_steps > 0)
-        record_operation(
+        initial_guess, initial_residual = record_operation(
+            (initial_guess, initial_residual),
             "refine_start",
             "Richardson",
             dynamic={
@@ -178,7 +179,8 @@ class Richardson(AbstractLinearSolver[_RichardsonState]):
             solution, residual, step = carry
             solution = _tree_add(solution, preconditioner.mv(residual))
             residual = _tree_sub(vector, operator.mv(solution))
-            record_operation(
+            solution, residual = record_operation(
+                (solution, residual),
                 "refine_step",
                 "Richardson",
                 dynamic={"step": step + 1, "residual_norm": _tree_norm(residual)},
@@ -189,7 +191,8 @@ class Richardson(AbstractLinearSolver[_RichardsonState]):
             keep_going, refine, (initial_guess, initial_residual, jnp.array(0))
         )
         converged = _tree_norm(residual) <= threshold
-        record_operation(
+        solution = record_operation(
+            solution,
             "refine_result",
             "Richardson",
             dynamic={
@@ -541,8 +544,7 @@ def _skip_unless(
 ) -> tuple[PyTree[Array], Int[Array, ""]]:
     """Run `run` only where `predicate` is true, and return zeros elsewhere.
 
-    The branch that does not run returns zeros of the same structure. Records inside
-    `run` are dropped, since a record in a cond breaks `vmap`.
+    The branch that does not run returns zeros of the same structure.
 
     Under `vmap` the predicate is reduced with any across the batch dimension, so the
     cond stays a branch instead of becoming a select that runs `run` at every index. An
@@ -550,11 +552,7 @@ def _skip_unless(
     output.
     """
 
-    def run_silently() -> tuple[PyTree[Array], Int[Array, ""]]:
-        with suppress_records():
-            return run()
-
-    shapes = jax.eval_shape(run_silently)
+    shapes = jax.eval_shape(run)
     zeros = jtu.tree_map(lambda shape: jnp.zeros(shape.shape, shape.dtype), shapes)
 
     def run_masked() -> tuple[PyTree[Array], Int[Array, ""]]:
@@ -562,7 +560,7 @@ def _skip_unless(
         # select below applies at each index of the batch dimension.
         return jtu.tree_map(
             lambda result, zero: jnp.where(predicate, result, zero),
-            run_silently(),
+            run(),
             zeros,
         )
 
@@ -688,7 +686,7 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
             updated_state = dataclasses.replace(
                 state, operator=state_operator(operator), stale=jnp.array(True)
             )
-        with compute_scope():
+        with compute_scope(vector, after=updated_state) as vector:
             solution, result, stats, new_state = self._solve(
                 updated_state, vector, options
             )
@@ -707,7 +705,7 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
         A stale factorization that fails to reach the tolerance is made again for this
         solve only. Use `update_and_compute` to keep the new factorization.
         """
-        with compute_scope():
+        with compute_scope(vector, after=state) as vector:
             solution, result, stats, _ = self._solve(state, vector, options)
         return solution, result, stats
 
@@ -830,7 +828,8 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
         accepted_stale = attempt & (
             _residual_norm(operator, solution_stale, vector) <= threshold
         )
-        record_operation(
+        solution_stale = record_operation(
+            solution_stale,
             "reuse_attempt",
             "HybridDirectIterative",
             dynamic={
@@ -862,7 +861,8 @@ class HybridDirectIterative(AbstractLinearSolver[HybridState[Any]]):
         accepted_fresh = ~accepted_stale & (
             _residual_norm(operator, solution_fresh, vector) <= threshold
         )
-        record_operation(
+        solution_fresh = record_operation(
+            solution_fresh,
             "iterative_result",
             "HybridDirectIterative",
             dynamic={

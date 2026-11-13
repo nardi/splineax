@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from enum import IntEnum
 from typing import Any
 
@@ -17,7 +18,7 @@ from lineax._solver.misc import (
     unravel_solution,
 )
 
-from splineax._profile import compute_scope, record_operation
+from splineax._profile import EventRecord, compute_scope, record_event, record_operation
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.solvers._diagnostics import SolverDiagnostics
@@ -54,12 +55,10 @@ class _SpsolveState(eqx.Module):
     def track(self, solution: Any) -> "_SpsolveState":
         """No-op, since a Spsolve state owns no memory to order a release after."""
         del solution
-        record_operation("track")
         return self
 
     def release(self) -> None:
         """No-op, since a Spsolve state owns nothing to free."""
-        record_operation("release")
 
 
 class ReorderingScheme(IntEnum):
@@ -120,24 +119,32 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any] = {}
     ) -> _SpsolveState:
-        record_operation(
-            "init",
-            inputs=lambda: profile_inputs(
-                operator,
-                operator_pattern_tag(operator),
-                (operator.out_size(), operator.in_size()),
+        return self._build(
+            operator,
+            options,
+            lambda matrix: record_operation(
+                matrix,
+                "init",
+                inputs=lambda: profile_inputs(
+                    operator,
+                    operator_pattern_tag(operator),
+                    (operator.out_size(), operator.in_size()),
+                ),
             ),
         )
-        return self._build(operator, options)
 
     def _build(
-        self, operator: AbstractLinearOperator, options: dict[str, Any]
+        self,
+        operator: AbstractLinearOperator,
+        options: dict[str, Any],
+        record_boundary: Callable[[BCSR], BCSR],
     ) -> _SpsolveState:
         """Sort `operator` into a solvable CSR state, no factorization.
 
-        Shared by `init` and `update`'s rebuild path, so a rebuild does not re-emit an `init`
-        boundary. `Spsolve` factors and solves in one fused call, so there is no analyze or
-        factor to record here.
+        Shared by `init` and `update`'s rebuild path. Each of them passes the function that
+        records its own generic operation, so a rebuild does not record an `init` boundary.
+        `Spsolve` factors and solves in one fused call, so there is no analyze or factor to
+        record here.
         """
         if operator.in_size() != operator.out_size():
             raise ValueError(
@@ -164,7 +171,9 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
                     warn_if_unsorted(matrix, "Spsolve")
                 matrix_bcsr = BCSR.from_bcoo(matrix)
 
-        return _SpsolveState(sparse, matrix_bcsr, pack_structures(operator))
+        return _SpsolveState(
+            sparse, record_boundary(matrix_bcsr), pack_structures(operator)
+        )
 
     def init_symbolic(
         self, sparsity: _Sparsity, options: dict[str, Any] = {}
@@ -175,7 +184,7 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         that `update` fills with the first real operator.
         """
         del sparsity, options
-        record_operation("init_symbolic", outputs={"note": "no-op"})
+        record_event(EventRecord("init_symbolic", outputs={"note": "no-op"}))
         return _SpsolveState(None, None, None)
 
     def update(
@@ -190,23 +199,27 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
         """
         shape = state.matrix.shape if state.matrix is not None else None
         if operator is state.operator:
-            record_operation(
+            return record_operation(
+                state,
                 "update",
                 inputs=lambda: profile_inputs(
                     operator, operator_pattern_tag(operator), shape
                 ),
                 outputs={"outcome": "noop", "reason": "Same operator"},
             )
-            return state
         # `Spsolve` reuses nothing, so every changed operator is a full rebuild.
-        record_operation(
-            "update",
-            inputs=lambda: profile_inputs(
-                operator, operator_pattern_tag(operator), shape
+        return self._build(
+            operator,
+            options,
+            lambda matrix: record_operation(
+                matrix,
+                "update",
+                inputs=lambda: profile_inputs(
+                    operator, operator_pattern_tag(operator), shape
+                ),
+                outputs={"outcome": "rebuilt", "reason": "No factorization to reuse"},
             ),
-            outputs={"outcome": "rebuilt", "reason": "No factorization to reuse"},
         )
-        return self._build(operator, options)
 
     def update_and_compute(
         self,
@@ -227,18 +240,23 @@ class Spsolve(AbstractLinearSolver[_SpsolveState]):
                 "`Spsolve` cannot solve with a symbolic-only state; call `update` with "
                 "an operator first."
             )
-        with compute_scope():
+        with compute_scope(vector, after=state) as vector:
             matrix = state.matrix
             packed_structures = state.packed_structures
             vector = ravel_vector(vector, packed_structures)
             # `spsolve` requires the right-hand side to share the matrix dtype.
             vector = vector.astype(matrix.dtype)
             # Fused analyze+factor+solve, so no separate factorization is reused.
-            record_operation("spsolve", "Spsolve", outputs={"note": "fused"})
+            data, indices, indptr, vector = record_operation(
+                (matrix.data, matrix.indices, matrix.indptr, vector),
+                "spsolve",
+                "Spsolve",
+                outputs={"note": "fused"},
+            )
             solution = _spsolve(
-                matrix.data,
-                matrix.indices,
-                matrix.indptr,
+                data,
+                indices,
+                indptr,
                 vector,
                 tol=self.tol,
                 reorder=self.reorder,
