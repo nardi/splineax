@@ -21,6 +21,8 @@ from jax.experimental.sparse import BCOO
 
 import splineax as splx
 
+from ..conftest import SparseSolverCase
+
 pytestmark = pytest.mark.usefixtures("enable_x64")
 
 # Kept as float64 numpy arrays. This module is imported before x64 is enabled, so a `jnp`
@@ -356,6 +358,95 @@ def test_cond_without_prior_state_raises() -> None:
 
     with pytest.raises(NotImplementedError, match="cond"):
         splx.stateful_solve_transform(fn)(_data(), _b1(), jnp.array(1.0))
+
+
+def _static_argument_fn():
+    """A function that takes its tag, solver, and two other static values as arguments."""
+    indices = _indices()
+    traces: list[bool] = []
+
+    def function(data, b, tag, solver, label, postprocess):
+        traces.append(True)
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=(3, 3)), tags=tag
+        )
+        solution = lx.linear_solve(operator, b, solver).value
+        return postprocess["function"](solution) if label == "apply" else solution
+
+    return function, traces
+
+
+class _UnhashableSetting:
+    """A static argument leaf that is not hashable and that equals each other instance."""
+
+    __hash__ = None
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _UnhashableSetting)
+
+
+def test_accepts_static_argument_leaves(sparse_solver: SparseSolverCase) -> None:
+    """A tag, a solver, a string, and a callable are valid arguments, also under `jit`."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    function, _ = _static_argument_fn()
+    run = splx.stateful_solve_transform(function)
+    static_arguments = (
+        tag,
+        sparse_solver.make_solver(),
+        "apply",
+        {"function": jnp.sin},
+    )
+    expected = function(_data(), _b1(), *static_arguments)
+    assert jnp.allclose(run(_data(), _b1(), *static_arguments), expected, atol=1e-8)
+    jitted = jax.jit(lambda data, b: run(data, b, *static_arguments))
+    assert jnp.allclose(jitted(_data(), _b1()), expected, atol=1e-8)
+
+
+def test_caches_the_staged_jaxpr_per_static_argument(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """Equal static leaves share one staged jaxpr, and a new static value stages again."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    function, traces = _static_argument_fn()
+    run = splx.stateful_solve_transform(function)
+    solver = sparse_solver.make_solver()
+    run(_data(), _b1(), tag, solver, "apply", {"function": jnp.sin})
+    run(_data(), _b2(), tag, solver, "apply", {"function": jnp.sin})
+    assert len(traces) == 1, "equal static leaves staged the function more than once"
+    plain = run(_data(), _b1(), tag, solver, "skip", {"function": jnp.sin})
+    assert len(traces) == 2, "a new string did not stage exactly once"
+    assert jnp.allclose(plain, jnp.linalg.solve(_dense(), _b1()), atol=1e-8)
+    run(_data(), _b1(), tag, solver, "apply", {"function": jnp.cos})
+    assert len(traces) == 3, "a new callable did not stage exactly once"
+
+
+def test_caches_an_unhashable_static_leaf_by_identity(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """A static leaf that is not hashable shares a staged jaxpr only with itself."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    function, traces = _static_argument_fn()
+    run = splx.stateful_solve_transform(function)
+    solver = sparse_solver.make_solver()
+    setting = _UnhashableSetting()
+    run(_data(), _b1(), tag, solver, "skip", {"function": setting})
+    run(_data(), _b2(), tag, solver, "skip", {"function": setting})
+    assert len(traces) == 1, "one unhashable leaf staged the function more than once"
+    run(_data(), _b1(), tag, solver, "skip", {"function": _UnhashableSetting()})
+    assert len(traces) == 2, "another unhashable leaf did not stage exactly once"
+
+
+def test_stages_again_when_a_profile_becomes_active(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """A jaxpr that was staged without a profile is not used while a profile records."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    run = splx.stateful_solve_transform(_two_solve_fn(tag, sparse_solver.make_solver()))
+    run(_data(), _b1(), _b2())
+    profile = splx.create_solve_profile()
+    with profile:
+        jax.block_until_ready(run(_data(), _b1(), _b2()))
+    assert [record.operation for record in profile.records].count("init") == 1
 
 
 def _scan_fn(tag: object, solver: lx.AbstractLinearSolver | None = None):
@@ -736,21 +827,23 @@ def test_return_final_state_paths() -> None:
     assert jnp.allclose(out_false, expected, atol=1e-8)
 
 
-def _custom_jvp_solve(tag: object):
+def _custom_jvp_solve(tag: object, solver: lx.AbstractLinearSolver | None = None):
     """A `custom_jvp` function that solves `A x = b` for the values of `A`, with its own
     rule.
 
     The rule solves the tangent system `A dx = db - dA x` with the same solver, so a
-    solve appears in the primal and in the rule.
+    solve appears in the primal and in the rule. Solves with `KLU` unless another `solver`
+    is given.
     """
     indices = _indices()
+    solver = splx.KLU() if solver is None else solver
 
     def operator_of(data: jax.Array) -> splx.BCOOLinearOperator:
         return splx.BCOOLinearOperator(BCOO((data, indices), shape=(3, 3)), tags=tag)
 
     @jax.custom_jvp
     def solve(data: jax.Array, right_hand_side: jax.Array) -> jax.Array:
-        return lx.linear_solve(operator_of(data), right_hand_side, splx.KLU()).value
+        return lx.linear_solve(operator_of(data), right_hand_side, solver).value
 
     @solve.defjvp
     def solve_jvp(primals, tangents):
@@ -761,7 +854,7 @@ def _custom_jvp_solve(tag: object):
             data_tangent
         ).mv(solution)
         solution_tangent = lx.linear_solve(
-            operator_of(data), tangent_right_hand_side, splx.KLU()
+            operator_of(data), tangent_right_hand_side, solver
         ).value
         return solution, solution_tangent
 
@@ -795,8 +888,8 @@ def test_custom_jvp_threading_keeps_its_rule() -> None:
     """Derivatives of a threaded `custom_jvp` solve match the plain function in forward
     mode, in reverse mode, and under `jit`.
 
-    The rule solves a tangent system. The state stays the state of the primal solve, so
-    the batched tangents of `jacfwd` and the transposed solve of `grad` still work.
+    The rule solves a tangent system. The threaded state depends on the primal values
+    only, so the batched tangents of `jacfwd` and the transposed solve of `grad` work.
     """
     tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
     fn = _function_calling_solve_twice(_custom_jvp_solve(tag))
@@ -817,6 +910,241 @@ def test_custom_jvp_threading_keeps_its_rule() -> None:
     assert jnp.allclose(
         jax.jit(jax.grad(loss(run)))(data), jax.grad(loss(fn))(data), atol=1e-8
     )
+
+
+def test_release_frees_the_factorization_of_a_tangent_solve(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """The final state contains the factorization that a tangent solve uses.
+
+    The tangent solve of the rule refactors the threaded state. The `release` at the end
+    of the function reads the state from after that refactor. The solver then does not
+    rebuild a factorization that the `release` freed too early.
+    """
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    solve = _custom_jvp_solve(tag, sparse_solver.make_solver())
+    run = splx.stateful_solve_transform(lambda data, b: solve(data, b))
+    jacobian = jax.jit(jax.jacfwd(run, argnums=1))
+    jax.block_until_ready(jacobian(_data(), _b1()))
+    rebuilds_before = sparse_solver.rebuild_total()
+    result = jax.block_until_ready(jacobian(_data(), _b1()))
+    assert jnp.allclose(result, jnp.linalg.inv(_dense()), atol=1e-8)
+    assert sparse_solver.rebuild_total() == rebuilds_before
+
+
+@pytest.mark.parametrize("transformation", [jax.jacfwd, jax.jacrev])
+def test_kept_state_releases_after_a_derivative(
+    transformation, sparse_solver: SparseSolverCase
+) -> None:
+    """A kept final state that is tracked with a Jacobian releases after its solves."""
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    solve = _custom_jvp_solve(tag, sparse_solver.make_solver())
+    run = splx.stateful_solve_transform(
+        lambda data, b: solve(data, b), return_final_state=True
+    )
+
+    @jax.jit
+    def jacobian_then_release(data: jax.Array, b: jax.Array) -> jax.Array:
+        jacobian, state = transformation(run, argnums=1, has_aux=True)(data, b)
+        state.track(jacobian).release()
+        return jacobian
+
+    jax.block_until_ready(jacobian_then_release(_data(), _b1()))
+    rebuilds_before = sparse_solver.rebuild_total()
+    result = jax.block_until_ready(jacobian_then_release(_data(), _b1()))
+    assert jnp.allclose(result, jnp.linalg.inv(_dense()), atol=1e-8)
+    assert sparse_solver.rebuild_total() == rebuilds_before
+
+
+def _check_gradient_of_root(make_solver) -> None:
+    """Check the reverse derivative of a root solve with `make_solver` for both solves.
+
+    The solver is the linear solver of Newton and of the implicit adjoint. The function is
+    linear, so the gradient of the sum of the root is the sum of the columns of the
+    inverse of the matrix.
+    """
+    optx = pytest.importorskip("optimistix")
+    dense = jnp.array([[3.0, 1.0], [1.0, 2.0]])
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(jnp.ones_like(dense)))
+
+    def sum_of_root(right_hand_side: jax.Array) -> jax.Array:
+        sparse_solver = make_solver()
+        root_solver = optx.Newton(rtol=1e-10, atol=1e-10, linear_solver=sparse_solver)
+
+        def solve() -> jax.Array:
+            return optx.root_find(
+                lambda value, target: dense @ value - target,
+                root_solver,
+                jnp.zeros_like(right_hand_side),
+                args=right_hand_side,
+                tags=frozenset({tag}),
+                adjoint=optx.ImplicitAdjoint(linear_solver=sparse_solver),
+            ).value
+
+        return jnp.sum(splx.stateful_solve_transform(solve)())
+
+    gradient = jax.jit(jax.grad(sum_of_root))(jnp.array([2.0, -8.0]))
+    assert jnp.allclose(gradient, jnp.sum(jnp.linalg.inv(dense), axis=0), atol=1e-8)
+
+
+def test_reverse_mode_of_an_implicit_adjoint(sparse_solver: SparseSolverCase) -> None:
+    """The gradient of a root solve is correct when a sparse solver does both solves."""
+    _check_gradient_of_root(sparse_solver.make_solver)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("iterative", [True, False])
+def test_reverse_mode_of_an_implicit_adjoint_with_the_default_solver(
+    iterative: bool,
+) -> None:
+    """The gradient of a root solve is correct when its solves refine iteratively."""
+    _check_gradient_of_root(lambda: splx.AutoSparseLinearSolver(iterative=iterative))
+
+
+def test_threads_a_solve_that_vmap_batched(sparse_solver: SparseSolverCase) -> None:
+    """A solve with a batched vector uses the factorization of an earlier solve.
+
+    Under `jax.vmap` the solve is a batched form of `linear_solve_p`. The transform runs it
+    against the threaded state, so the function analyzes one time.
+    """
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(_dense()))
+    solver = sparse_solver.make_solver()
+    indices = _indices()
+
+    def function(data: jax.Array, vectors: jax.Array) -> tuple[jax.Array, jax.Array]:
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=(3, 3)), tags=tag
+        )
+        first = lx.linear_solve(operator, vectors[0], solver).value
+        batched = jax.vmap(
+            lambda vector: lx.linear_solve(operator, vector, solver).value
+        )
+        return first, batched(vectors)
+
+    vectors = jnp.stack([_b1(), _b2(), 2.0 * _b1()])
+    run = splx.stateful_solve_transform(function)
+    profile = splx.create_solve_profile()
+    with profile:
+        threaded = jax.block_until_ready(run(_data(), vectors))
+    expected = function(_data(), vectors)
+    assert jnp.allclose(threaded[0], expected[0], atol=1e-8)
+    assert jnp.allclose(threaded[1], expected[1], atol=1e-8)
+    generic_operations = [
+        record.operation for record in profile.records if record.solver is None
+    ]
+    assert generic_operations.count("init") == 1
+    assert generic_operations.count("compute") == 2
+
+
+@pytest.mark.parametrize("transformation", [jax.jacfwd, jax.jacrev])
+def test_jacobian_inside_the_transform_does_not_rebuild(
+    transformation, sparse_solver: SparseSolverCase
+) -> None:
+    """A root find with an implicit adjoint reuses its factorization below a Jacobian.
+
+    The solve of the adjoint is batched by the Jacobian transformation. The transform
+    threads it, so the last factorization is freed and no call builds it again.
+    """
+    optx = pytest.importorskip("optimistix")
+    size = 4
+    dense = 3.0 * jnp.eye(size) - jnp.eye(size, k=1) - jnp.eye(size, k=-1)
+    tag = splx.sparsity_pattern_tag(BCOO.fromdense(jnp.where(dense != 0, 1.0, 0.0)))
+
+    def find_root(right_hand_side: jax.Array) -> jax.Array:
+        solver = sparse_solver.make_solver()
+        return optx.root_find(
+            lambda value, target: dense @ value + 0.1 * value**3 - target,
+            optx.Newton(rtol=1e-10, atol=1e-10, linear_solver=solver),
+            jnp.zeros(size),
+            args=right_hand_side,
+            tags=frozenset({tag}),
+            adjoint=optx.ImplicitAdjoint(linear_solver=sparse_solver.make_solver()),
+        ).value
+
+    right_hand_side = jnp.linspace(1.0, 2.0, size)
+    expected = transformation(find_root)(right_hand_side)
+    run = jax.jit(splx.stateful_solve_transform(transformation(find_root)))
+    jax.block_until_ready(run(right_hand_side))
+    rebuilds_before = sparse_solver.rebuild_total()
+    result = jax.block_until_ready(run(right_hand_side))
+    assert jnp.allclose(result, expected, atol=1e-8)
+    assert sparse_solver.rebuild_total() == rebuilds_before
+    # A new function stages again, because a profile is active now.
+    profiled = jax.jit(splx.stateful_solve_transform(transformation(find_root)))
+    profile = splx.create_solve_profile()
+    with profile:
+        jax.block_until_ready(profiled(right_hand_side))
+    if transformation is jax.jacfwd:
+        generic_operations = [
+            record.operation for record in profile.records if record.solver is None
+        ]
+        assert generic_operations.count("init") == 1
+
+
+def _fresh_system(size: int) -> tuple[jax.Array, object]:
+    """A tridiagonal matrix of this size and its sparsity tag.
+
+    `lineax` caches the trace of a solve for each solver and shape. A cached trace has the
+    records of the profile that was active when `lineax` made it. A test that counts records
+    uses a size that no other test uses.
+    """
+    dense = 3.0 * jnp.eye(size) - jnp.eye(size, k=1) - jnp.eye(size, k=-1)
+    return dense, splx.sparsity_pattern_tag(BCOO.fromdense(dense))
+
+
+def test_jacrev_inside_the_transform_records_one_state(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """The profile of a root find below `jax.jacrev` has one `init`.
+
+    The backward pass of `jax.jacrev` holds the `init` of the adjoint solve in a different
+    jaxpr than the solve. The transform replaces that `init`, so nothing uses its result
+    and the compiler removes its records.
+    """
+    optx = pytest.importorskip("optimistix")
+    size = 5
+    dense, tag = _fresh_system(size)
+
+    def find_root(right_hand_side: jax.Array) -> jax.Array:
+        return optx.root_find(
+            lambda value, target: dense @ value + 0.1 * value**3 - target,
+            optx.Newton(
+                rtol=1e-10, atol=1e-10, linear_solver=sparse_solver.make_solver()
+            ),
+            jnp.zeros(size),
+            args=right_hand_side,
+            tags=frozenset({tag}),
+            adjoint=optx.ImplicitAdjoint(linear_solver=sparse_solver.make_solver()),
+        ).value
+
+    run = jax.jit(splx.stateful_solve_transform(jax.jacrev(find_root)))
+    profile = splx.create_solve_profile()
+    with profile:
+        jax.block_until_ready(run(jnp.linspace(1.0, 2.0, size)))
+    assert len(profile.sequences) == 1
+
+
+def test_keeps_the_records_of_a_solve_that_the_filter_rejects(
+    sparse_solver: SparseSolverCase,
+) -> None:
+    """A solve that the transform does not thread keeps the records of its own `init`."""
+    dense, tag = _fresh_system(6)
+    solver = sparse_solver.make_solver()
+    indices = BCOO.fromdense(dense).indices
+
+    def function(data: jax.Array, vector: jax.Array) -> jax.Array:
+        operator = splx.BCOOLinearOperator(
+            BCOO((data, indices), shape=dense.shape), tags=tag
+        )
+        return lx.linear_solve(operator, vector, solver).value
+
+    run = splx.stateful_solve_transform(function, filter_solver=lambda solver: False)
+    profile = splx.create_solve_profile()
+    with profile:
+        jax.block_until_ready(run(BCOO.fromdense(dense).data, jnp.ones(dense.shape[0])))
+    operations = [record.operation for record in profile.records]
+    assert operations.count("init") == 1
+    assert operations.count("compute") == 1
 
 
 @pytest.mark.cpu_only

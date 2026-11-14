@@ -29,13 +29,7 @@ from lineax import (
 from lineax import linear_solve as _lx_linear_solve
 from lineax._solution import RESULTS, Solution
 
-from splineax._profile import (
-    order_slot_scope,
-    profiling_active,
-    record_operation,
-    reserve_order_slot,
-    sparsity_hash,
-)
+from splineax._profile import profiling_active, record_operation, sparsity_hash
 from splineax.operators._bcoo import BCOOLinearOperator
 from splineax.operators._bcsr import BCSRLinearOperator
 from splineax.operators._tagged import materialise_as_bcoo
@@ -422,7 +416,8 @@ def update_for_transposed_pattern(
         and state.operator is not None
         and shares_values(operator_matrix, state.operator)
     ):
-        record_operation(
+        state = record_operation(
+            state,
             "update",
             inputs=lambda: profile_inputs(operator, tag, state.shape),
             outputs={
@@ -457,7 +452,9 @@ def update_for_transposed_pattern(
     # and the operator to fold in is that matrix.
     untransposed_state = solver.transpose(state, {})[0] if state.transposed else state
     updated_state = solver.update(untransposed_state, analyzed_operator, options)
-    record_operation("transpose", outputs={"reason": "Transposed sparsity tag"})
+    updated_state = record_operation(
+        updated_state, "transpose", outputs={"reason": "Transposed sparsity tag"}
+    )
     return solver.transpose(updated_state, {})[0]
 
 
@@ -533,89 +530,47 @@ def _prepare_state(
     return solver.update(state, operator, opts)
 
 
-class _OrderedSolveState(eqx.Module):
-    """A solver state paired with the profile order slot of the solve that reads it."""
+class _ProfiledSolver(AbstractLinearSolver):
+    """A solver that calls the methods of another solver and has a type of its own.
 
-    state: PyTree[Any]
-    """The wrapped solver's own state."""
-
-    order_slot: tuple[int, ...] = eqx.field(static=True)
-    """The position in program order reserved for the solve's profile records."""
-
-
-class _ProfileOrderedSolver(AbstractLinearSolver):
-    """A solver wrapper that sorts a solve's profile records at the solve's call site.
-
-    lineax's `linear_solve` primitive traces `compute` late, during abstract evaluation,
-    lowering, and batching. By then the code after the solve has already been traced, so
-    the solve's records would sort after it. This wrapper's `compute` records inside the
-    order slot its `_OrderedSolveState` carries, which `_solve_factorization` reserves at
-    the call site.
+    `lineax.linear_solve` caches the trace of a solve for each solver type and shape. A
+    trace that `lineax` made while no profile was active has no record callbacks. The type
+    of this wrapper gives the solves of a profile cache entries of their own.
     """
 
     solver: AbstractLinearSolver
     """The solver that does the work."""
 
-    def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any]
-    ) -> _OrderedSolveState:
-        """Initialize the wrapped solver and reserve a slot at this point."""
-        return _OrderedSolveState(
-            self.solver.init(operator, options), reserve_order_slot()
-        )
+    def init(self, operator: AbstractLinearOperator, options: dict[str, Any]) -> Any:
+        """Call `init` of the wrapped solver."""
+        return self.solver.init(operator, options)
 
     def compute(
-        self,
-        state: _OrderedSolveState,
-        vector: PyTree[Any],
-        options: dict[str, Any],
+        self, state: Any, vector: PyTree[Any], options: dict[str, Any]
     ) -> tuple[PyTree[Any], RESULTS, dict[str, Any]]:
-        """Run the wrapped solver's `compute` with its records sorted at the state's slot."""
-        with order_slot_scope(state.order_slot):
-            return self.solver.compute(state.state, vector, options)
+        """Call `compute` of the wrapped solver."""
+        return self.solver.compute(state, vector, options)
 
     def transpose(
-        self, state: _OrderedSolveState, options: dict[str, Any]
-    ) -> tuple[_OrderedSolveState, dict[str, Any]]:
-        """Transpose the wrapped state and reserve a new slot for the transposed solve.
+        self, state: Any, options: dict[str, Any]
+    ) -> tuple[Any, dict[str, Any]]:
+        """Call `transpose` of the wrapped solver."""
+        return self.solver.transpose(state, options)
 
-        lineax calls this where it stages the transposed solve. Under reverse mode, that is
-        during transposition, after the whole forward pass, which is also when the
-        backward solve runs. So the transposed solve takes a new slot at this point
-        instead of the forward solve's slot.
-        """
-        transposed_state, transposed_options = self.solver.transpose(
-            state.state, options
-        )
-        return (
-            _OrderedSolveState(transposed_state, reserve_order_slot()),
-            transposed_options,
-        )
-
-    def conj(
-        self, state: _OrderedSolveState, options: dict[str, Any]
-    ) -> tuple[_OrderedSolveState, dict[str, Any]]:
-        """Conjugate the wrapped state and reserve a new slot for the conjugated solve.
-
-        lineax calls this where it stages the conjugated solve, so the new slot sits at
-        that point in the program. See `transpose`.
-        """
-        conjugated_state, conjugated_options = self.solver.conj(state.state, options)
-        return (
-            _OrderedSolveState(conjugated_state, reserve_order_slot()),
-            conjugated_options,
-        )
+    def conj(self, state: Any, options: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        """Call `conj` of the wrapped solver."""
+        return self.solver.conj(state, options)
 
     def assume_full_rank(self) -> bool:
-        """Whether the wrapped solver assumes a full-rank operator."""
+        """Call `assume_full_rank` of the wrapped solver."""
         return self.solver.assume_full_rank()
 
 
-def _solve_factorization(
+def solve_factorization(
     operator: AbstractLinearOperator,
     vector: PyTree[Any],
     solver: Any,
-    opts: dict[str, Any],
+    options: dict[str, Any],
     state: Any,
     throw: bool,
 ) -> Solution:
@@ -625,30 +580,33 @@ def _solve_factorization(
     object it used for the primal solve, so `update` is an identity no-op and the tangent
     solve reuses the primal's factorization.
 
-    While a `SolveProfile` is active, the solver and state are wrapped in
-    `_ProfileOrderedSolver` and `_OrderedSolveState`. The solve's records then sort at
-    this call site. With no profile active, the solve goes to lineax unchanged.
+    The `solver` and the `state` have the types of one solver, which this function does not
+    name. While a profile is active, the solver is wrapped in `_ProfiledSolver`.
     """
-    if not profiling_active():
-        return _lx_linear_solve(
-            operator, vector, solver, options=opts, state=state, throw=throw
-        )
-    # Reserve the slot now, while the code around this solve is being traced.
-    ordered_state = _OrderedSolveState(state, reserve_order_slot())
-    solution = _lx_linear_solve(
-        operator,
-        vector,
-        _ProfileOrderedSolver(solver),
-        options=opts,
-        state=ordered_state,
-        throw=throw,
+    if profiling_active():
+        solver = _ProfiledSolver(solver)
+    return _lx_linear_solve(
+        operator, vector, solver, options=options, state=state, throw=throw
     )
-    # Return the solver's own state on the solution, as the unprofiled path does.
-    return Solution(
-        value=solution.value,
-        result=solution.result,
-        state=state,
-        stats=solution.stats,
+
+
+def solve_prepared_tangent(
+    operator: AbstractLinearOperator,
+    vector: PyTree[Any],
+    solver: Any,
+    options: dict[str, Any],
+    state: Any,
+) -> Solution:
+    """Solve for a tangent vector against the factorization in `state`.
+
+    The solve is linear in `vector`, so it calls `lineax.linear_solve` without the
+    `custom_jvp` of `linear_solve`. The returned `Solution` has the state after `update`
+    and before any `track`. The solve has no error check, because the primal solve that it
+    follows has been checked already.
+    """
+    updated_state = solver.update(state, operator, options)
+    return solve_factorization(
+        operator, vector, solver, options, updated_state, throw=False
     )
 
 
@@ -665,7 +623,7 @@ def update_then_compute(
     solve. It never raises on a failed result. The caller checks the result code.
     """
     updated_state = solver.update(state, operator, options)
-    solution = _solve_factorization(
+    solution = solve_factorization(
         operator, vector, solver, options, updated_state, throw=False
     )
     return solution.value, solution.result, solution.stats, updated_state
@@ -689,7 +647,7 @@ def _stateful_solve_impl(
     if state is None:
         # A state fresh from `init` matches the operator, so there is nothing to update.
         state = solver.init(operator, opts)
-        initial = _solve_factorization(
+        initial = solve_factorization(
             operator, vector, solver, opts, state, throw=False
         )
         value, result, stats = initial.value, initial.result, initial.stats
@@ -752,7 +710,7 @@ def _stateful_solve_jvp(
         )
     opts = {} if options is None else options
     prepared = _prepare_state(operator, state, solver, opts)
-    solution = _solve_factorization(operator, vector, solver, opts, prepared, throw)
+    solution = solve_factorization(operator, vector, solver, opts, prepared, throw)
 
     # Build the tangent right-hand side `b' - A'x`. With no tangent on the vector or
     # the operator, the tangent solve is skipped entirely: the tangent outputs are
@@ -783,7 +741,7 @@ def _stateful_solve_jvp(
 
     # The tangent solve: the same operator object and the same prepared state, so
     # `update` is a no-op and the factorization is shared with the primal solve.
-    t_solution = _solve_factorization(operator, t_rhs, solver, opts, prepared, throw)
+    t_solution = solve_factorization(operator, t_rhs, solver, opts, prepared, throw)
 
     # Track the primal solution onto the state once, after both solves. Only the
     # primal solution can be a witness: JAX requires a custom-JVP rule's primal

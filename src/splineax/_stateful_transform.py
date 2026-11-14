@@ -16,6 +16,7 @@ the function as a custom derivative that takes and returns the state.
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar, cast, overload
 
+import equinox as eqx
 import equinox.internal as eqxi
 import jax
 import jax.core
@@ -27,12 +28,19 @@ from jax.custom_derivatives import CustomVJPPrimal, SymbolicZero
 from jax.extend.core import ClosedJaxpr, Jaxpr, JaxprEqn, Literal, Primitive, Var
 from jax.interpreters.ad import Zero
 from jaxtyping import Array, Bool, PyTree
-from lineax import AbstractLinearOperator, AbstractLinearSolver
+from lineax import AbstractLinearOperator, AbstractLinearSolver, Solution
 from lineax._solution import RESULTS
 from lineax._solve import linear_solve_p
 
-from splineax._profile import is_record_callback
-from splineax.solvers._sparse import linear_solve as splineax_linear_solve
+from splineax._profile import profiling_active
+from splineax.solvers._sparse import (
+    TrackableState,
+    solve_factorization,
+    solve_prepared_tangent,
+)
+from splineax.solvers._sparse import (
+    linear_solve as splineax_linear_solve,
+)
 from splineax.solvers._stateful import StatefulSolver
 
 _OutputT = TypeVar("_OutputT")
@@ -107,6 +115,42 @@ def _runtime_value_leaves(tree: PyTree) -> list[Array]:
     return [leaf for leaf in jax.tree_util.tree_leaves(tree) if _is_runtime_value(leaf)]
 
 
+class _TangentFlag:
+    """A mark on one operand of an equation, which says if the operand depends on a tangent.
+
+    This is a plain class and not a `NamedTuple`, so that a pytree flatten keeps it as a
+    leaf.
+    """
+
+    def __init__(self, is_tangent: bool) -> None:
+        self.is_tangent = is_tangent
+        """True if the operand depends on a tangent."""
+
+
+class _BatchAxis:
+    """The axis along which one operand of a batched solve is batched, or None."""
+
+    def __init__(self, axis: int | None) -> None:
+        self.axis = axis
+        """The batch axis of the operand, or None if the operand is not batched."""
+
+
+def _solve_equation(eqn: JaxprEqn) -> JaxprEqn | None:
+    """The `linear_solve_p` equation that this equation binds, directly or batched.
+
+    `lineax` creates `linear_solve_p` with `equinox.internal.create_vprim`. Under `jax.vmap`
+    a solve with a batched operand becomes a `vprim` equation. Its `prim` param is
+    `linear_solve_p` and its `params` param holds the params of the unbatched solve. Returns
+    an equation for the unbatched solve with the same invars, or None for any other
+    equation.
+    """
+    if eqn.primitive is linear_solve_p:
+        return eqn
+    if eqn.primitive.name == "vprim" and eqn.params.get("prim") is linear_solve_p:
+        return eqn.replace(primitive=linear_solve_p, params=dict(eqn.params["params"]))
+    return None
+
+
 def _reconstruct_solve_arguments(eqn: JaxprEqn, operands: list[Any]) -> _SolveArguments:
     """Rebuild the arguments `lineax.linear_solve` bound in this equation.
 
@@ -123,6 +167,25 @@ def _reconstruct_solve_arguments(eqn: JaxprEqn, operands: list[Any]) -> _SolveAr
     treedef = cast(jax.tree_util.PyTreeDef, eqn.params["treedef"])
     flat = _combine(list(operands), static)
     return cast(_SolveArguments, jax.tree_util.tree_unflatten(treedef, flat))
+
+
+def _operator_depends_on_tangent(
+    eqn: JaxprEqn, operand_is_tangent: Sequence[bool]
+) -> bool:
+    """Whether an operand in the operator of this `linear_solve_p` equation is a tangent.
+
+    The flags take the places of the operand values in the reconstruction of the
+    arguments. Each flag is a `_TangentFlag`, so that a static boolean leaf of the
+    operator does not count as a flag.
+    """
+    if not any(operand_is_tangent):
+        return False
+    flags = [_TangentFlag(is_tangent) for is_tangent in operand_is_tangent]
+    operator = _reconstruct_solve_arguments(eqn, flags)[0]
+    return any(
+        isinstance(leaf, _TangentFlag) and leaf.is_tangent
+        for leaf in jax.tree_util.tree_leaves(operator)
+    )
 
 
 def _rebind_solve(arguments: _SolveArguments) -> _SolveResult:
@@ -158,18 +221,11 @@ def _is_selected_solve(eqn: JaxprEqn, filter_solver: _FilterSolver) -> bool:
     The solver is a static param, so it reads out without running anything, by
     reconstructing with placeholder operands.
     """
-    if eqn.primitive is not linear_solve_p:
+    solve_eqn = _solve_equation(eqn)
+    if solve_eqn is None:
         return False
-    arguments = _reconstruct_solve_arguments(eqn, [None] * len(eqn.invars))
+    arguments = _reconstruct_solve_arguments(solve_eqn, [None] * len(solve_eqn.invars))
     return _solver_matches(arguments[4], filter_solver)
-
-
-def _is_profile_record(eqn: JaxprEqn) -> bool:
-    """Whether an equation is the `io_callback` that appends a solve-profile record."""
-    if eqn.primitive.name != "io_callback":
-        return False
-    callback = getattr(eqn.params.get("callback"), "callback_func", None)
-    return is_record_callback(callback)
 
 
 def _state_substitutions(eqn: JaxprEqn, new_state: PyTree) -> dict[Var, Any]:
@@ -246,20 +302,13 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         jaxpr: Jaxpr,
         consts: list[Any],
         args: list[Any],
-        drop_profile_records: bool = False,
         tangent_args: Sequence[bool] | None = None,
     ) -> list[Any]:
         """Evaluate the jaxpr against these argument values, returning its output values.
 
         `tangent_args` flags the arguments that carry tangents. A solve that depends on
-        one of them runs with the threaded state but does not store the state it used, so
-        the state stays a function of the primal values alone.
-
-        Profile records that come before a threaded solve in the same jaxpr are dropped,
-        and so are all records when `drop_profile_records` is true. A jaxpr that binds a
-        solve itself is the body of `lineax.linear_solve`, where everything before the bind
-        is `lineax`'s own `init`. The threaded state replaces that init, so its records
-        describe work that no longer runs.
+        one of them runs with the threaded state, and the state stays a function of the
+        primal values alone, see `_thread_solve`.
         """
         env: dict[Var, Any] = {}
 
@@ -279,29 +328,13 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             if is_tangent
         }
 
-        last_solve_index = max(
-            (
-                index
-                for index, eqn in enumerate(jaxpr.eqns)
-                if _is_selected_solve(eqn, self.filter_solver)
-            ),
-            default=-1,
-        )
-        for index, eqn in enumerate(jaxpr.eqns):
-            drops_records = drop_profile_records or index < last_solve_index
-            if drops_records and _is_profile_record(eqn):
-                continue
+        for eqn in jaxpr.eqns:
             operands = [read(v) for v in eqn.invars]
             operand_is_tangent = [
                 not isinstance(v, Literal) and v in tangent_vars for v in eqn.invars
             ]
             has_tangent_operand = any(operand_is_tangent)
-            state_before = self.state
-            outputs = self._process_equation(
-                eqn, operands, env, drops_records, operand_is_tangent
-            )
-            if has_tangent_operand and eqn.primitive is linear_solve_p:
-                self.state = state_before
+            outputs = self._process_equation(eqn, operands, env, operand_is_tangent)
             if has_tangent_operand:
                 tangent_vars.update(eqn.outvars)
             for outvar, value in zip(eqn.outvars, outputs):
@@ -314,32 +347,41 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         eqn: JaxprEqn,
         operands: list[Any],
         env: dict[Var, Any],
-        drop_profile_records: bool,
         operand_is_tangent: Sequence[bool] = (),
     ) -> list[Any]:
         """Produce one equation's output values, threading the state through a matched solve.
 
-        A matched `linear_solve_p` is threaded, an inline primitive has its body interpreted
+        A matched `linear_solve_p` is threaded, and so is a matched solve that `jax.vmap`
+        batched if only its vector is batched. An inline primitive has its body interpreted
         in place, a higher-order primitive that nests a matched solve raises, and everything
         else is rebound as `jax.core.eval_jaxpr` would. A threaded solve may rewrite `env`,
-        see `_thread_solve`, and an inlined body drops its profile records when
-        `drop_profile_records` is true.
+        see `_thread_solve`.
         """
         primitive: Primitive = eqn.primitive
         if primitive is linear_solve_p:
             arguments = _reconstruct_solve_arguments(eqn, operands)
             if _solver_matches(arguments[4], self.filter_solver):
-                return self._thread_solve(eqn, arguments, env, any(operand_is_tangent))
+                return self._thread_solve(
+                    eqn,
+                    arguments,
+                    env,
+                    depends_on_tangent=any(operand_is_tangent),
+                    operator_depends_on_tangent=_operator_depends_on_tangent(
+                        eqn, operand_is_tangent
+                    ),
+                )
             return _runtime_value_leaves(_rebind_solve(arguments))
+
+        solve_eqn = _solve_equation(eqn)
+        if solve_eqn is not None and _is_selected_solve(eqn, self.filter_solver):
+            threaded = self._thread_batched_solve(eqn, solve_eqn, operands, env)
+            if threaded is not None:
+                return threaded
 
         if primitive.name in _INLINE_PRIMITIVES:
             inner = cast(ClosedJaxpr, eqn.params["jaxpr"])
             return self.interpret(
-                inner.jaxpr,
-                inner.consts,
-                operands,
-                drop_profile_records,
-                operand_is_tangent,
+                inner.jaxpr, inner.consts, operands, operand_is_tangent
             )
 
         nested = _nested_jaxprs(eqn)
@@ -374,6 +416,7 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         arguments: _SolveArguments,
         env: dict[Var, Any],
         depends_on_tangent: bool = False,
+        operator_depends_on_tangent: bool = False,
     ) -> list[Any]:
         """Solve through `splineax.linear_solve`, threading the state in and out.
 
@@ -381,8 +424,34 @@ class _StateThreadingInterpreter(Generic[_StateT]):
         stage it, with the same `init` or `update`, `track`, differentiation rule, and
         profile order. The vars that held the old state then point at the state this solve
         used, see `_state_substitutions`. Returns the solve's output values.
+
+        The threaded state must depend on the primal values only. A tracked state
+        depends on the solution, so a solve that depends on a tangent does not store its
+        tracked state. If only the vector depends on a tangent, the solve stores the
+        state from before `track`, which contains the factorization of the primal
+        operator. The final `release` then frees that factorization. If the operator
+        depends on a tangent, the threaded state stays as it was before the solve.
         """
         operator, _old_state, vector, options, solver, throw = arguments
+        if (
+            depends_on_tangent
+            and not operator_depends_on_tangent
+            and self.state is not None
+            and isinstance(solver, StatefulSolver)
+        ):
+            # A solve of a tangent is linear in its vector, so it goes to `lineax` directly.
+            # `lineax` transposes it with `solver.transpose`, which never differentiates
+            # the checks and selects inside an iterative solver. Another `custom_jvp` around
+            # the solve would differentiate them, see `solve_prepared_tangent`.
+            solution = solve_prepared_tangent(
+                operator, vector, solver, dict(options), self.state
+            )
+            self.state = solution.state
+            env.update(_state_substitutions(eqn, solution.state))
+            return _runtime_value_leaves(
+                (solution.value, solution.result, solution.stats)
+            )
+        state_before = self.state
         solution, self.state = splineax_linear_solve(
             operator,
             vector,
@@ -393,8 +462,80 @@ class _StateThreadingInterpreter(Generic[_StateT]):
             # The primal solve it follows has been checked already.
             throw=throw and not depends_on_tangent,
         )
+        if operator_depends_on_tangent:
+            self.state = state_before
+        elif depends_on_tangent:
+            self.state = solution.state
         env.update(_state_substitutions(eqn, solution.state))
         return _runtime_value_leaves((solution.value, solution.result, solution.stats))
+
+    def _thread_batched_solve(
+        self,
+        eqn: JaxprEqn,
+        solve_eqn: JaxprEqn,
+        operands: list[Any],
+        env: dict[Var, Any],
+    ) -> list[Any] | None:
+        """Thread the state through a solve that `jax.vmap` batched, if only its vector is.
+
+        The solve runs against the factorization in the threaded state, under `jax.vmap`
+        with the batch axes of the equation. It binds the same batched primitive, with the
+        threaded state as an operand. The state after `update` is then tracked onto the
+        batched solution, outside the `jax.vmap`. For this reason the state stays unbatched.
+
+        Returns None if no state exists yet or if the solver has no stateful API. It also
+        returns None if the operator, the state or the options are batched. The equation
+        then runs unchanged.
+        """
+        operator, _old_state, vector, options, solver, throw = (
+            _reconstruct_solve_arguments(solve_eqn, operands)
+        )
+        if self.state is None or not isinstance(solver, StatefulSolver):
+            return None
+        axes = _reconstruct_solve_arguments(
+            solve_eqn, [_BatchAxis(axis) for axis in eqn.params["__batch_axes"]]
+        )
+
+        def batch_axis(leaf: object) -> int | None:
+            return leaf.axis if isinstance(leaf, _BatchAxis) else None
+
+        for unbatched_part in (axes[0], axes[1], axes[3]):
+            if any(
+                batch_axis(leaf) is not None
+                for leaf in jax.tree_util.tree_leaves(unbatched_part)
+            ):
+                return None
+        vector_axes = jax.tree_util.tree_map(batch_axis, axes[2])
+
+        # The solver is a `StatefulSolver` of any state type, which the state type of this
+        # interpreter does not name.
+        updated_state: Any = cast(Any, solver).update(
+            self.state, operator, dict(options)
+        )
+
+        def solve_vector(
+            one_vector: PyTree[Array],
+        ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
+            solution = solve_factorization(
+                operator, one_vector, solver, dict(options), updated_state, throw
+            )
+            return solution.value, solution.result, solution.stats
+
+        value, result, stats = jax.vmap(
+            solve_vector,
+            in_axes=(vector_axes,),
+            axis_size=eqn.params["__axis_size"],
+            axis_name=eqn.params["__axis_name"],
+        )(vector)
+        if isinstance(updated_state, TrackableState):
+            solution = Solution(
+                value=value, result=result, state=updated_state, stats=stats
+            )
+            self.state = updated_state.track(solution)
+        else:
+            self.state = updated_state
+        env.update(_state_substitutions(solve_eqn, updated_state))
+        return _runtime_value_leaves((value, result, stats))
 
     def _require_prior_state(self, region: str) -> None:
         """Raise if no state exists yet to seed a control-flow region's carry."""
@@ -1151,6 +1292,39 @@ class _StagedComputation(NamedTuple, Generic[_StateT]):
     """How many leading result leaves belong to the output, the rest being the state."""
 
 
+class _StaticLeafIdentity:
+    """A cache key for a static argument leaf that is not hashable.
+
+    Two keys are equal if they contain the same object. The key has a reference to the
+    leaf, so the `id` of the leaf cannot be reused while the key is in the cache.
+    """
+
+    leaf: object
+    """The static leaf that this key identifies."""
+
+    def __init__(self, leaf: object) -> None:
+        self.leaf = leaf
+
+    def __hash__(self) -> int:
+        return id(self.leaf)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _StaticLeafIdentity) and other.leaf is self.leaf
+
+
+def _static_leaf_key(leaf: object) -> object:
+    """Return the cache key of a static argument leaf.
+
+    A hashable leaf is its own key, so two equal leaves share one staged jaxpr. A leaf
+    that is not hashable is compared by identity.
+    """
+    try:
+        hash(leaf)
+    except TypeError:
+        return _StaticLeafIdentity(leaf)
+    return leaf
+
+
 class _WrappedFunction(Protocol[_OutputT]):
     """The function `stateful_solve_transform` returns.
 
@@ -1182,6 +1356,12 @@ def stateful_solve_transform(
     whose own signature already has a `state` argument cannot be wrapped, since the keyword
     is taken.
 
+    The arguments can be pytrees with leaves of any type. A leaf that is a JAX array, a
+    NumPy array or a Python scalar is a traced input of the staged jaxpr. Each other
+    leaf, such as a sparsity tag, a string or a callable, is static. The staged jaxpr is
+    cached for each combination of static leaves, so a new static value causes a new
+    trace of `fn`.
+
     **Arguments:**
 
     - `fn`: the function to transform. It calls `lineax.linear_solve` internally.
@@ -1199,15 +1379,17 @@ def stateful_solve_transform(
     staged_by_signature: dict[Any, _StagedComputation[Any]] = {}
 
     def stage(
-        call: tuple[tuple[Any, ...], dict[str, Any]], state: Any
+        dynamic_call: PyTree[Any], static_call: PyTree[Any], state: Any
     ) -> _StagedComputation[Any]:
         """Trace `fn` under this call and state, interpret it, and prune the result.
 
         Runs the state-threading interpreter once to build the transformed jaxpr, then drops
         the dead init with `dce_jaxpr`. The output and state structures the interpreter
         discovers are captured here so the caller can rebuild both from the evaluated leaves.
+        Only the leaves of `dynamic_call` are inputs of the jaxpr. The leaves of
+        `static_call` are constants of the trace.
         """
-        call_leaves, call_treedef = jax.tree_util.tree_flatten(call)
+        call_leaves, call_treedef = jax.tree_util.tree_flatten(dynamic_call)
         state_leaves, state_treedef = jax.tree_util.tree_flatten(state)
         num_call_leaves = len(call_leaves)
 
@@ -1216,9 +1398,9 @@ def stateful_solve_transform(
         num_output_leaves = 0
 
         def call_flat(*flat: Any) -> _OutputT:
-            """Call `fn` from a flat list of the call's argument leaves."""
-            these_args, these_kwargs = jax.tree_util.tree_unflatten(
-                call_treedef, list(flat)
+            """Call `fn` from a flat list of the dynamic argument leaves of the call."""
+            these_args, these_kwargs = eqx.combine(
+                jax.tree_util.tree_unflatten(call_treedef, list(flat)), static_call
             )
             return fn(*these_args, **these_kwargs)
 
@@ -1273,19 +1455,25 @@ def stateful_solve_transform(
             state is not None if return_final_state is None else return_final_state
         )
 
-        call = (args, kwargs)
-        call_leaves, call_treedef = jax.tree_util.tree_flatten(call)
+        # Only an array-like leaf can be an input of a jaxpr. Each other leaf is static.
+        dynamic_call, static_call = eqx.partition((args, kwargs), eqx.is_array_like)
+        call_leaves, call_treedef = jax.tree_util.tree_flatten(dynamic_call)
+        static_leaves, static_treedef = jax.tree_util.tree_flatten(static_call)
         state_leaves, state_treedef = jax.tree_util.tree_flatten(state)
         signature = (
             call_treedef,
             tuple(jax.typeof(leaf) for leaf in call_leaves),
+            static_treedef,
+            tuple(_static_leaf_key(leaf) for leaf in static_leaves),
             state_treedef,
             tuple(jax.typeof(leaf) for leaf in state_leaves),
             keep_state,
+            # A jaxpr that was staged without a profile contains no record callbacks.
+            profiling_active(),
         )
         computation = staged_by_signature.get(signature)
         if computation is None:
-            computation = stage(call, state)
+            computation = stage(dynamic_call, static_call, state)
             staged_by_signature[signature] = computation
 
         results = jax.core.eval_jaxpr(

@@ -27,6 +27,8 @@ the transform it runs the function, and each time it encounters a
 equivalent to `splx.linear_solve`. The first solve builds the state with `init`,
 and every later solve folds the operator in with `update`, so a new matrix that
 shares the same pattern as the previous one will reuse the previous analysis.
+The transformed function handles its arguments like `equinox.filter_jit`, except
+that Python scalars are traced, as in `jax.jit`.
 
 ```python
 import jax
@@ -191,6 +193,31 @@ fails at any index along that dimension, the entire batch factors afresh. This i
 and it costs no more than a check that ran at each index separately. If it passes at every
 index, the batch reuses the factorization and skips the fresh factor.
 
+## Derivative solves
+
+You can apply `jax.jacfwd` or `jax.jacrev` to the transformed function or inside it. In
+both cases the solves of the derivative use the threaded state, so they do not analyze or
+factorize the matrix again.
+
+The backward pass of `jax.grad` or `jax.jacrev` runs after the transformed function
+returns. The `release` at the end of the function does not depend on this pass, so it can
+run before the solve of a cotangent. The solve then finds a freed factorization and
+factorizes the matrix again, which the profile shows as `rebuild="freed"`. To prevent
+this, keep the final state and release it after the derivative:
+
+```{.python continuation}
+def jacobian_then_release(values):
+    jacobian, state = jax.jacrev(
+        lambda values: keep(values, b1, b2), has_aux=True
+    )(values)
+    # `track` makes the `release` depend on the Jacobian.
+    state.track(jacobian).release()
+    return jacobian
+
+
+jacobian = jax.jit(jacobian_then_release)(values)
+```
+
 ## Limitations
 
 The transform threads a single state and covers most control flow. A few cases have limits,
@@ -207,6 +234,9 @@ listed here.
   `custom_vjp` function is threaded, and so are the solves in its rule and backward
   function. A call is only found when a solve appears in its primal function. A solve that
   appears only in a rule or a backward function runs on its own.
+- **A batched operator is not threaded.** A solve inside `jax.vmap` is threaded only if
+  its vector is the only batched operand. If the operator or the state is batched as well,
+  the solve builds its own state.
 - **Multiple solve families may not work.** The transform threads one state, so a single loop that
   interleaves two different solvers or patterns may not work, or perform poorly because factorizations
   are never reused. You might be able to use `filter_solver` and to separate them and apply the

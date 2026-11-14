@@ -121,6 +121,39 @@ or through a second wrapper made with `enabled=False`, the first call for a shap
 compile without profiling hooks. No later call for that shape will ever be profiled, even
 through an enabled wrapper.
 
+## Record order
+
+In a compiled function, a record is written when XLA runs the operation, not when the
+function is traced. `profile.records` lists the records in the order in which they were
+written.
+
+Each record takes the arrays of its operation and returns them unchanged, and later
+operations use the returned arrays. A record is therefore written after the operations
+that it depends on and before the operations that depend on it. In a loop, the records of
+each iteration are after the records of the previous iteration. When two operations do not
+depend on each other, their records can be in either order. For example, the `release` of
+a transformed function and the solves in the backward pass of `jax.grad` do not depend on
+each other.
+
+When no result of the function depends on an operation, XLA removes the operation, and its
+record is removed as well. This is the case for the `init` that `lineax.linear_solve`
+calls before a threaded solve, because the transform replaces the state of this `init`.
+
+When `jax.vmap` batches a value in a record, such as `rebuild`, the profile has one record
+for each element of the batch. Otherwise the record is written once.
+
+## Unordered records
+
+The records of `init_symbolic` of `Pardiso` and `Spsolve` are side effects. They are
+written each time the compiled function runs, also when no result depends on the state.
+Their order relative to the other records is not defined. The same is true for the
+`release` of `CuDSS` under `jax.jit`. This `release` cannot read the traced handle and
+frees nothing, so its record has the note "skipped under jit".
+
+JAX does not support side effects in a `lax.cond` under `jax.vmap`. While a profile is
+active, `jax.vmap` therefore raises `NotImplementedError` when a branch of a `lax.cond`
+calls one of these operations.
+
 ## Reuse mechanics
 
 If you `update` a state with an operator that has a different sparsity pattern, the
@@ -173,8 +206,3 @@ sequence 0
   solve issued through `lineax.linear_solve` (or a `stateful_solve_transform`) still
   records the generic and structural operations (`init`, `update`, `analyze`, `factor`,
   `refactor`, ...), but not the ones inside `compute`.
-- **`vmap` over an iterative refinement.** The log is appended through `io_callback`s,
-  which are unordered IO effects. A plain solve (and its `grad`, `jacfwd`, and `jacrev`)
-  composes with them, but `jax.vmap` over a refinement loop does not, because its
-  batched `while_loop` predicate rejects unordered IO. Profile plain solves rather than
-  a `vmap` of a refinement.

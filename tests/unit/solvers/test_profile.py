@@ -13,6 +13,7 @@ and both autodiff modes, that independent profiles stay independent, and that
 
 from __future__ import annotations
 
+import itertools
 import threading
 from collections.abc import Callable
 from typing import Any, cast
@@ -30,18 +31,18 @@ from lineax._solution import RESULTS
 
 import splineax as splx
 from splineax import HybridDirectIterative, IterativeRefinement, ProfileRecord
-from splineax._profile import _active, record_operation
+from splineax._profile import (
+    _active,
+    record_operation,
+)
 from splineax.solvers._sparse import SparseLinearSolver, _Sparsity
 
+from ...conftest import SparseSolverCase
 from .conftest import RIGHT_HAND_SIDE, SQUARE_MATRIX, OperatorFactory
 
 
-def _ordered(profile: splx.SolveProfile) -> list[ProfileRecord]:
-    return sorted(profile.records, key=lambda record: record.order)
-
-
 def _ops(profile: splx.SolveProfile) -> list[str]:
-    return [record.operation for record in _ordered(profile)]
+    return [record.operation for record in profile.records]
 
 
 class _NoFilter:
@@ -56,7 +57,7 @@ def _by_op(
     operation: str,
     solver: str | None | _NoFilter = _NO_FILTER,
 ) -> list[ProfileRecord]:
-    records = [r for r in _ordered(profile) if r.operation == operation]
+    records = [r for r in profile.records if r.operation == operation]
     if not isinstance(solver, _NoFilter):
         records = [r for r in records if r.solver == solver]
     return records
@@ -78,8 +79,7 @@ def _compile_probe_under(profile: splx.SolveProfile) -> Callable[[Array], Array]
     """
 
     def probe(value: Array) -> Array:
-        record_operation("probe")
-        return value + 1.0
+        return record_operation(value, "probe") + 1.0
 
     with profile:
         return jax.jit(probe).lower(jnp.zeros(())).compile()
@@ -203,6 +203,27 @@ def test_update_reuses_analysis_on_shared_pattern(enable_x64: None) -> None:
     assert refactors[0].outputs["rebuild"] == 0
     # Reusing the analysis means no second analyze was recorded.
     assert _ops(profile).count("analyze") == 1
+
+
+@pytest.mark.parametrize("solver_name", ["Spsolve", "Pardiso"])
+def test_init_symbolic_is_recorded_when_no_result_uses_it(solver_name: str) -> None:
+    """The record of `init_symbolic` of `Spsolve` and `Pardiso` is a side effect. It is
+    written each time the compiled function runs, also when no result uses the state."""
+    if solver_name == "Pardiso":
+        pytest.importorskip("pardiso_mkl_jax")
+    solver = getattr(splx, solver_name)()
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+
+    @jax.jit
+    def run(vector: Array) -> Array:
+        solver.init_symbolic(sparsity)
+        return 2.0 * vector
+
+    profile = splx.create_solve_profile()
+    with profile:
+        run(RIGHT_HAND_SIDE)
+        run(RIGHT_HAND_SIDE)
+    assert _ops(profile) == ["init_symbolic", "init_symbolic"]
 
 
 @pytest.mark.cpu_only
@@ -551,8 +572,7 @@ def test_refinement_exhausting_steps_still_records(enable_x64: None) -> None:
 def test_profile_of_vmap_and_grad_plain_solve(enable_x64: None) -> None:
     """A plain solve under `jax.vmap`, `jax.grad`, `jax.jacfwd`, and `jax.jacrev` runs
     and records its operations, so the callbacks compose with batching and both
-    autodiff modes. (`vmap` over a refinement loop is the one combination that does
-    not compose, from the batched `while_loop` predicate rejecting unordered IO.)"""
+    autodiff modes."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     indices, shape = sparsity.indices, sparsity.shape
 
@@ -583,7 +603,7 @@ def test_profile_of_vmap_and_grad_plain_solve(enable_x64: None) -> None:
 @pytest.mark.cpu_only
 def test_records_under_jit(enable_x64: None) -> None:
     """Profiling works through `jax.jit`: every expected operation is recorded, and the
-    trace-time order key keeps the printed tree in program order."""
+    operations that depend on each other are in the order of their dependencies."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     indices, shape = sparsity.indices, sparsity.shape
 
@@ -609,7 +629,7 @@ def test_records_under_jit(enable_x64: None) -> None:
         "release",
     ):
         assert expected in ops
-    # Sorting by the order key recovers program order, even under jit.
+    # Each operation depends on the previous one, so the order is fixed under `jit`.
     assert (
         ops.index("init")
         < ops.index("analyze")
@@ -650,20 +670,22 @@ def _make_chained_solves(sparsity: BCOO) -> Callable[[Array, Array], Array]:
 
 @pytest.mark.cpu_only
 @pytest.mark.parametrize(
-    ("transform", "batch_rhs", "expected_ops"),
+    ("transform", "batch_rhs", "expected_ops", "fixed_order"),
     [
         (
             eqx.filter_jit,
             False,
             ["init", "compute", "track", "update", "compute", "track", "release"],
+            True,
         ),
         (
             lambda fn: eqx.filter_jit(jax.vmap(fn, in_axes=(None, 0))),
             True,
             ["init", "compute", "track", "update", "compute", "track", "release"],
+            True,
         ),
-        # The tangent solve shares the primal's factorization, so it runs before the
-        # `track` that closes the primal's factorization window.
+        # The tangent solves do not depend on the `track` of the primal solves, so their
+        # place in the log is not defined.
         (
             lambda fn: eqx.filter_jit(jax.jacfwd(fn, argnums=1)),
             False,
@@ -678,8 +700,10 @@ def _make_chained_solves(sparsity: BCOO) -> Callable[[Array, Array], Array]:
                 "track",
                 "release",
             ],
+            False,
         ),
-        # The backward solves run after the whole forward pass, second solve first.
+        # The backward solves depend on nothing after the forward pass, so their place
+        # in the log is not defined either.
         (
             lambda fn: eqx.filter_jit(jax.grad(fn, argnums=1)),
             False,
@@ -694,6 +718,7 @@ def _make_chained_solves(sparsity: BCOO) -> Callable[[Array, Array], Array]:
                 "compute",
                 "compute",
             ],
+            False,
         ),
     ],
     ids=["jit", "vmap", "jacfwd", "grad"],
@@ -703,10 +728,12 @@ def test_generic_operations_in_program_order_under_transforms(
     transform: Callable[[Callable[[Array, Array], Array]], Callable[..., Any]],
     batch_rhs: bool,
     expected_ops: list[str],
+    fixed_order: bool,
 ) -> None:
-    """Under `jit`, `vmap`, `jacfwd`, and `grad`, the generic operations of two chained
-    solves sort in program order. lineax traces each solve's `compute` late, so this
-    checks that the order slot reserved at each call site places the `compute` there."""
+    """Under `jit`, `vmap`, `jacfwd`, and `grad`, the log has the generic operations of two
+    chained solves. The primal operations are in the order of their dependencies. The
+    derivative solves have no dependency on later operations, so the test compares only
+    the operations of those logs."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     chained_solves = _make_chained_solves(sparsity)
     rhs = (
@@ -718,9 +745,12 @@ def test_generic_operations_in_program_order_under_transforms(
     with profile:
         jax.block_until_ready(transform(chained_solves)(sparsity.data, rhs))
     generic_ops = [
-        record.operation for record in _ordered(profile) if record.solver is None
+        record.operation for record in profile.records if record.solver is None
     ]
-    assert generic_ops == expected_ops
+    if fixed_order:
+        assert generic_ops == expected_ops
+    else:
+        assert sorted(generic_ops) == sorted(expected_ops)
 
 
 @pytest.mark.cpu_only
@@ -728,8 +758,9 @@ def test_stateful_transform_profiles_one_sequence_in_program_order(
     enable_x64: None,
 ) -> None:
     """A jitted `stateful_solve_transform` of two naive `lineax.linear_solve` calls records
-    one sequence in program order. The records of the `init` `lineax` runs itself are
-    dropped, since the threaded state replaces it, and each `compute` sorts at its solve."""
+    one sequence in program order. The `init` that `lineax` runs itself has no record.
+    The transform uses the threaded state instead of the state of this `init`, so the
+    `init` is removed."""
     sparsity = BCOO.fromdense(SQUARE_MATRIX)
     tag = splx.sparsity_pattern_tag(sparsity)
     first = splx.BCOOLinearOperator(sparsity, tags=tag)
@@ -750,7 +781,7 @@ def test_stateful_transform_profiles_one_sequence_in_program_order(
     with profile:
         jax.block_until_ready(solve_two(first, second))
     generic_ops = [
-        record.operation for record in _ordered(profile) if record.solver is None
+        record.operation for record in profile.records if record.solver is None
     ]
     assert generic_ops == [
         "init",
@@ -763,6 +794,143 @@ def test_stateful_transform_profiles_one_sequence_in_program_order(
     ]
     assert len(profile.sequences) == 1
     assert _ops(profile).count("analyze") == 1
+
+
+def _loop_of_solves(
+    loop: str, solver: lx.AbstractLinearSolver
+) -> Callable[[Array, Array], Array]:
+    """Return a function that solves one time, then three times in a `scan` or a `while`.
+
+    The `loop` is `"scan"`, `"while"` or `"unrolled"`, which is a Python loop.
+
+    Each solve in the loop has new matrix values, so each iteration refactors.
+    """
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    tag = splx.sparsity_pattern_tag(sparsity)
+    values = jnp.asarray(sparsity.data, dtype=jnp.float64)
+
+    def solve(scale: Array, vector: Array) -> Array:
+        operator = splx.BCOOLinearOperator(
+            BCOO((scale * values, sparsity.indices), shape=sparsity.shape),
+            tags=tag,
+        )
+        return lx.linear_solve(operator, vector, solver).value
+
+    def scan_of_solves(scale: Array, vector: Array) -> Array:
+        start = solve(scale, vector)
+        scales = scale * jnp.arange(2.0, 5.0)
+        final, _ = jax.lax.scan(
+            lambda carry, step_scale: (solve(step_scale, carry), None), start, scales
+        )
+        return final
+
+    def while_of_solves(scale: Array, vector: Array) -> Array:
+        def body(carry: tuple[Array, Array]) -> tuple[Array, Array]:
+            count, value = carry
+            return count + 1, solve(scale * (count + 2.0), value)
+
+        _, final = jax.lax.while_loop(
+            lambda carry: carry[0] < 3, body, (jnp.asarray(0), solve(scale, vector))
+        )
+        return final
+
+    def unrolled_solves(scale: Array, vector: Array) -> Array:
+        value = solve(scale, vector)
+        for step_scale in scale * jnp.arange(2.0, 5.0):
+            value = solve(step_scale, value)
+        return value
+
+    return {
+        "scan": scan_of_solves,
+        "while": while_of_solves,
+        "unrolled": unrolled_solves,
+    }[loop]
+
+
+def _operations_in_order(
+    run: Callable[[Array, Array], Array], vector: Array
+) -> list[tuple[str | None, str]]:
+    """Run `run` under a profile and return its operations, adjacent repeats as one.
+
+    A record with a batched value fires one time for each batch element, so adjacent
+    records of one operation count as one.
+    """
+    profile = splx.create_solve_profile()
+    with profile:
+        jax.block_until_ready(jax.jit(run)(jnp.asarray(1.0), vector))
+    return [
+        key
+        for key, _ in itertools.groupby(
+            (record.solver, record.operation) for record in profile.records
+        )
+    ]
+
+
+@pytest.mark.parametrize("loop", ["scan", "while"])
+@pytest.mark.parametrize("batched", [False, True])
+def test_stateful_transform_sorts_loop_records_by_iteration(
+    enable_x64: None, sparse_solver: SparseSolverCase, loop: str, batched: bool
+) -> None:
+    """The records of a threaded loop are in the order of the same solves in a Python loop.
+
+    The state that each iteration passes on makes the records of an iteration depend on
+    the records of the previous iteration, also under `vmap`.
+    """
+    if batched and sparse_solver.solver_name == "Pardiso":
+        pytest.skip("The `factor` call of `pardiso_mkl_jax` has no batching rule.")
+    vector = jnp.asarray(RIGHT_HAND_SIDE, dtype=jnp.float64)
+    runs = {
+        name: splx.stateful_solve_transform(
+            _loop_of_solves(name, sparse_solver.make_solver())
+        )
+        for name in (loop, "unrolled")
+    }
+    if batched:
+        runs = {name: jax.vmap(run, in_axes=(None, 0)) for name, run in runs.items()}
+        vector = jnp.stack([vector, 2.0 * vector])
+    operations = _operations_in_order(runs[loop], vector)
+    assert operations == _operations_in_order(runs["unrolled"], vector)
+    # The reference has the operations of four solves, so a loop that is not sorted by
+    # iteration would differ from it.
+    assert [operation for _, operation in operations].count("compute") == 4
+
+
+def test_stateful_transform_sorts_an_unrolled_iteration_first(
+    enable_x64: None, sparse_solver: SparseSolverCase
+) -> None:
+    """A loop without a prior state has its first iteration unrolled, and the records of
+    that iteration come before the records of the other iterations."""
+    sparsity = BCOO.fromdense(SQUARE_MATRIX)
+    tag = splx.sparsity_pattern_tag(sparsity)
+    values = jnp.asarray(sparsity.data, dtype=jnp.float64)
+    vector = jnp.asarray(RIGHT_HAND_SIDE, dtype=jnp.float64)
+    solver = sparse_solver.make_solver()
+
+    @splx.stateful_solve_transform
+    def scan_of_solves(scale: Array) -> Array:
+        def step(carry: Array, step_scale: Array) -> tuple[Array, None]:
+            operator = splx.BCOOLinearOperator(
+                BCOO((step_scale * values, sparsity.indices), shape=sparsity.shape),
+                tags=tag,
+            )
+            return lx.linear_solve(operator, carry, solver).value, None
+
+        final, _ = jax.lax.scan(step, vector, scale * jnp.arange(1.0, 4.0))
+        return final
+
+    profile = splx.create_solve_profile()
+    with profile:
+        jax.block_until_ready(jax.jit(scan_of_solves)(jnp.asarray(1.0)))
+    generic_operations = [
+        record.operation for record in profile.records if record.solver is None
+    ]
+    assert generic_operations == [
+        "init",
+        "compute",
+        "track",
+        *["update", "compute", "track"] * 2,
+        "release",
+    ]
 
 
 @pytest.mark.cpu_only
@@ -819,7 +987,7 @@ def test_stateful_transform_profile_matches_hand_written_solves(
     hand_written, transformed = profiles
 
     def operations(profile: splx.SolveProfile) -> list[tuple[str | None, str]]:
-        return [(record.solver, record.operation) for record in _ordered(profile)]
+        return [(record.solver, record.operation) for record in profile.records]
 
     assert operations(transformed) == operations(hand_written)
 

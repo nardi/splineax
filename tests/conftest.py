@@ -1,6 +1,10 @@
+from collections.abc import Callable
+from typing import Any
+
 import jax
 import pytest
 
+import splineax as splx
 from splineax.solvers._auto import _cuda_backend_available
 from splineax.solvers._cudss import _cudss_available
 
@@ -48,3 +52,56 @@ def enable_x64():
     """
     with jax.enable_x64(True):
         yield
+
+
+class SparseSolverCase:
+    """A sparse stateful solver and the way to count its factorization rebuilds."""
+
+    def __init__(self, solver_name: str) -> None:
+        self.solver_name = solver_name
+        """The name of the solver class, as a profile record names it."""
+
+    def make_solver(self) -> Any:
+        """Return a new solver of this kind."""
+        return getattr(splx, self.solver_name)()
+
+    def rebuild_total(self) -> int:
+        """Return how many times the backing library rebuilt a factorization so far.
+
+        A rebuild is the cost of a use of a factorization that was freed or evicted. The
+        total counts since the library loaded, so a test compares two readings.
+        """
+        # Each library is optional, so a solver imports its own library when a test asks.
+        counter: Callable[[], dict[Any, int]]
+        match self.solver_name:
+            case "KLU":
+                import klujax
+
+                counter = klujax.rebuild_stats
+            case "Pardiso":
+                from pardiso_mkl_jax import primitive
+
+                counter = primitive.rebuild_stats
+            case "CuDSS":
+                import spineax.cudss as cudss
+
+                return int(cudss.rebuild_count())
+            case _:
+                raise ValueError(f"Unknown sparse solver: {self.solver_name}.")
+        return sum(count for reason, count in counter().items() if int(reason) != 0)
+
+
+@pytest.fixture(
+    params=[
+        pytest.param("KLU", marks=pytest.mark.cpu_only),
+        pytest.param("Pardiso", marks=pytest.mark.cpu_only),
+        pytest.param("CuDSS", marks=pytest.mark.cudss_gpu),
+    ]
+)
+def sparse_solver(request: pytest.FixtureRequest) -> SparseSolverCase:
+    """Each sparse solver that keeps a factorization, with the marks that skip it.
+
+    `KLU` and `Pardiso` run on the CPU and `CuDSS` runs on a CUDA GPU, see
+    `pytest_runtest_setup`.
+    """
+    return SparseSolverCase(request.param)
