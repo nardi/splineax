@@ -24,6 +24,7 @@ state through jit) lives in `test_factorization.py`, the generic solve suite in
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 import equinox as eqx
@@ -501,6 +502,56 @@ def test_profile_records_cudss_operations(fake_cudss: FakeCuDSS) -> None:
     ]
     update = next(record for record in profile.records if record.operation == "update")
     assert update.outputs["outcome"] == "reused"
+
+
+def _structure_pointers(token: Any) -> tuple[int, int]:
+    """The device addresses of the CSR structure arrays of `token`."""
+    return (
+        token.offsets.unsafe_buffer_pointer(),
+        token.columns.unsafe_buffer_pointer(),
+    )
+
+
+@pytest.mark.parametrize("use_profile", [False, True])
+@pytest.mark.parametrize(
+    "reordering", [CuDSSReordering.DEFAULT, CuDSSReordering.COLAMD]
+)
+def test_token_keeps_the_analyzed_structure_buffers(
+    fake_cudss: FakeCuDSS,
+    monkeypatch: pytest.MonkeyPatch,
+    reordering: CuDSSReordering,
+    use_profile: bool,
+) -> None:
+    """Every state keeps the `offsets` and `columns` buffers that `analyze` received.
+
+    Under the COLAMD reorderings, cuDSS reads these buffers again in the numeric phases.
+    A copy in a new buffer lets the original buffer be freed while cuDSS still reads it.
+    """
+    analyzed_tokens = []
+    analyze = fake_cudss.analyze
+
+    def recording_analyze(*args: Any, **kwargs: Any) -> Any:
+        token = analyze(*args, **kwargs)
+        analyzed_tokens.append(token)
+        return token
+
+    monkeypatch.setattr(fake_cudss, "analyze", recording_analyze)
+    first, second = _shared_pattern_operators()
+    solver = CuDSS(reordering=reordering)
+    profile = splx.create_solve_profile()
+
+    with profile if use_profile else contextlib.nullcontext():
+        initial_state = solver.init(first, {})
+        updated_state = solver.update(initial_state, second, {})
+        _, tracked_state = splx.linear_solve(
+            second, RIGHT_HAND_SIDE, solver, state=updated_state
+        )
+        tracked_state.release()
+
+    (analyzed_token,) = analyzed_tokens
+    expected = _structure_pointers(analyzed_token)
+    for state in (initial_state, updated_state, tracked_state):
+        assert _structure_pointers(state.token) == expected
 
 
 # ---------------------------------------------------------------------------
