@@ -1,13 +1,14 @@
 import importlib.util
 from collections.abc import Callable
 from enum import IntEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 import equinox as eqx
 import equinox.internal as eqxi
 import jax
 import jax.core
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import lineax as lx
 from entangle_jax import entangle
 from jax.experimental.sparse import BCOO, BCSR
@@ -27,6 +28,7 @@ from lineax._solver.misc import (
 from splineax._profile import (
     EventRecord,
     compute_scope,
+    profiling_active,
     record_event,
     record_operation,
 )
@@ -251,6 +253,60 @@ def _maybe_release(cudss: Any, token: "FactorToken") -> bool:
     return True
 
 
+@runtime_checkable
+class _StructuredToken(Protocol):
+    """A cuDSS token that holds the CSR structure arrays that `analyze` received."""
+
+    offsets: Integer[Array, " n+1"]
+    columns: Integer[Array, " nse"]
+
+
+def _ordering_filter(tree: PyTree) -> PyTree[bool]:
+    """The `eqx.partition` filter that selects the array leaves of `tree` to entangle.
+
+    It selects every array leaf except the `offsets` and `columns` of a cuDSS token.
+    Under the COLAMD reorderings, the numeric phases of cuDSS read the structure buffers
+    that `analyze` received, even when a later phase receives other buffers. An eager
+    `entangle` returns its payload in a new buffer. When a token holds only that copy, JAX
+    frees the original buffer, and cuDSS then reads freed device memory. The order of the
+    operations is kept, because every cuDSS phase takes the token `id`, which is still
+    entangled.
+    """
+
+    def node_filter(node: object) -> PyTree[bool]:
+        if isinstance(node, _StructuredToken):
+            return eqx.tree_at(
+                lambda token: (token.offsets, token.columns),
+                jtu.tree_map(eqx.is_array, node),
+                (False, False),
+            )
+        return eqx.is_array(node)
+
+    return jtu.tree_map(
+        node_filter, tree, is_leaf=lambda node: isinstance(node, _StructuredToken)
+    )
+
+
+_CarrierT = TypeVar("_CarrierT")
+"""The pytree that `_record_operation` returns, in the type that the caller passed."""
+
+
+def _record_operation(carrier: _CarrierT, *args: Any, **kwargs: Any) -> _CarrierT:
+    """Call `record_operation`, but do not entangle the CSR structure of a cuDSS token.
+
+    The structure arrays of each token in `carrier` are returned unchanged, so they keep
+    their buffers. See `_ordering_filter` for the reason. `args` and `kwargs` are passed
+    to `record_operation` unchanged, so they have the types of its parameters.
+    """
+    if not profiling_active():
+        # `record_operation` returns `carrier` itself when no profile is active, and so
+        # does this function.
+        return carrier
+    ordered, structure = eqx.partition(carrier, _ordering_filter(carrier))
+    ordered = record_operation(ordered, *args, **kwargs)
+    return eqx.combine(ordered, structure)
+
+
 def _refactorize_or_factorize(
     cudss: Any, token: "FactorToken", values: Inexact[Array, " nse"]
 ) -> "FactorToken":
@@ -281,7 +337,7 @@ def _refactorize_or_factorize(
         lambda: refreshed,
         lambda: cudss.factorize(refreshed, values),
     )
-    return record_operation(
+    return _record_operation(
         chosen,
         "refactorize",
         "CuDSS",
@@ -410,13 +466,15 @@ class _CuDSSState(eqx.Module):
         in a later `update`, will be ordered after this call.
         """
         value = solution.value if isinstance(solution, Solution) else solution
-        value = record_operation(value, "track")
+        value = _record_operation(value, "track")
         # The witness only establishes an execution-order dependency, so stop its
         # gradient: a tracked state must stay usable inside `grad` of the solve.
         witness = jax.lax.stop_gradient(value)
+        # The structure arrays keep their buffers, see `_ordering_filter`.
+        ordered, structure = eqx.partition(self.token, _ordering_filter(self.token))
         return _CuDSSState(
             self.operator,
-            entangle(self.token, witness),
+            eqx.combine(entangle(ordered, witness), structure),
             self.packed_structures,
             self.shape,
             self.conjugate_solve,
@@ -434,8 +492,8 @@ class _CuDSSState(eqx.Module):
                 EventRecord("release", "CuDSS", outputs={"note": "skipped under jit"}),
             )
             return
-        token = record_operation(self.token, "release")
-        token = record_operation(token, "release", "CuDSS")
+        token = _record_operation(self.token, "release")
+        token = _record_operation(token, "release", "CuDSS")
         _maybe_release(_spineax_cudss(), token)
 
 
@@ -562,7 +620,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
     def _analyze(self, csr: _CSR, mtype_id: int) -> "FactorToken":
         """Run cuDSS's analysis phase for a CSR pattern, returning an analyzed token."""
         offsets, columns, values = csr
-        offsets, columns, values = record_operation(
+        offsets, columns, values = _record_operation(
             (offsets, columns, values), "analyze", "CuDSS"
         )
         return _spineax_cudss().analyze(
@@ -582,7 +640,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         return self._analyze_and_factor(
             operator,
             options,
-            lambda csr: record_operation(
+            lambda csr: _record_operation(
                 csr,
                 "init",
                 inputs=lambda: profile_inputs(
@@ -617,7 +675,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         cudss = _spineax_cudss()
         mtype_id = _mtype_id(operator, self.diagnostics, self.matrix_type)
         token = self._analyze(csr, mtype_id)
-        token, values = record_operation((token, csr[2]), "factorize", "CuDSS")
+        token, values = _record_operation((token, csr[2]), "factorize", "CuDSS")
         token = cudss.factorize(token, values)
         return _CuDSSState(
             sparse,
@@ -646,7 +704,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             raise ValueError(
                 f"`CuDSS.init_symbolic` requires a square matrix; got shape {shape}."
             )
-        csr = record_operation(
+        csr = _record_operation(
             csr,
             "init_symbolic",
             inputs=lambda: profile_inputs(
@@ -684,7 +742,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         """
         if operator is state.operator:
             # Nothing changed, so this is a no-op.
-            return record_operation(
+            return _record_operation(
                 state,
                 "update",
                 inputs=lambda: profile_inputs(
@@ -696,7 +754,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         reuse_block = sparsity_reuse_block(state.sparsity_tag, tag)
         if reuse_block is None:
             # Same pattern, new values. Reuse the analysis the stored token carries.
-            state = record_operation(
+            state = _record_operation(
                 state,
                 "update",
                 inputs=lambda: profile_inputs(operator, tag, state.shape),
@@ -709,7 +767,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         return self._analyze_and_factor(
             operator,
             options,
-            lambda csr: record_operation(
+            lambda csr: _record_operation(
                 csr,
                 "update",
                 inputs=lambda: profile_inputs(operator, tag, state.shape),
@@ -734,7 +792,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         cudss = _spineax_cudss()
         if state.token.phase != "factorized":
             # A symbolic-only state from `init_symbolic` has no pivots to reuse yet.
-            state_token, values = record_operation(
+            state_token, values = _record_operation(
                 (state.token, values),
                 "factorize",
                 "CuDSS",
@@ -744,7 +802,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         elif self.reordering in _REFACTORIZING_REORDERINGS:
             token = _refactorize_or_factorize(cudss, state.token, values)
         else:
-            state_token, values = record_operation(
+            state_token, values = _record_operation(
                 (state.token, values),
                 "factorize",
                 "CuDSS",
@@ -783,7 +841,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             # cuDSS reports no per-solve rebuild status, unlike klujax and
             # pardiso_mkl_jax. A rebuild of an evicted entry only shows in the global
             # `spineax.cudss.rebuild_count()`.
-            x = record_operation(
+            x = _record_operation(
                 x,
                 "solve",
                 "CuDSS",
@@ -809,7 +867,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
             csr_T = _transpose_csr(
                 token.offsets, token.columns, token.values, state.shape
             )
-            csr_T = record_operation(
+            csr_T = _record_operation(
                 csr_T,
                 "analyze",
                 "CuDSS",
@@ -826,7 +884,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
                 memory=token.memory_id,
             )
             if state.packed_structures is not None:
-                new_token, values_T = record_operation(
+                new_token, values_T = _record_operation(
                     (new_token, csr_T[2]), "factorize", "CuDSS"
                 )
                 new_token = cudss.factorize(new_token, values_T)
@@ -865,7 +923,7 @@ class CuDSS(AbstractLinearSolver[_CuDSSState]):
         # numerically valid: `refactorize` (pivot reuse) is right here, and cheaper than a
         # fresh `factorize`.
         cudss = _spineax_cudss()
-        token, values = record_operation(
+        token, values = _record_operation(
             (state.token, state.token.values),
             "refactorize",
             "CuDSS",

@@ -7,6 +7,7 @@ import pytest
 import splineax as splx
 from splineax.solvers._auto import _cuda_backend_available
 from splineax.solvers._cudss import _cudss_available
+from splineax.solvers._pardiso import _pardiso_available
 
 from .fake_cudss import fake_cudss as fake_cudss
 
@@ -94,7 +95,16 @@ class SparseSolverCase:
 @pytest.fixture(
     params=[
         pytest.param("KLU", marks=pytest.mark.cpu_only),
-        pytest.param("Pardiso", marks=pytest.mark.cpu_only),
+        pytest.param(
+            "Pardiso",
+            marks=[
+                pytest.mark.skipif(
+                    not _pardiso_available(),
+                    reason="pardiso-mkl-jax is not installed",
+                ),
+                pytest.mark.cpu_only,
+            ],
+        ),
         pytest.param("CuDSS", marks=pytest.mark.cudss_gpu),
     ]
 )
@@ -102,6 +112,7 @@ def sparse_solver(request: pytest.FixtureRequest) -> SparseSolverCase:
     """Each sparse solver that keeps a factorization, with the marks that skip it.
 
     `KLU` and `Pardiso` run on the CPU and `CuDSS` runs on a CUDA GPU, see
-    `pytest_runtest_setup`.
+    `pytest_runtest_setup`. `Pardiso` also skips when its optional dependency is not
+    installed.
     """
     return SparseSolverCase(request.param)
